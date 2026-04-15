@@ -11,9 +11,9 @@ logger = logging.getLogger(__name__)
 def _compute_base_derived_features(df: pd.DataFrame) -> pd.DataFrame:
 	featured = df.copy()
 
-	featured["log_price"] = featured["close"].map(math.log).astype("float64")
+	featured["log_price"] = featured["adj_close"].map(math.log).astype("float64")
 	featured["simple_return"] = (
-		featured.groupby("ticker", sort=False)["close"].pct_change().astype("float64")
+		featured.groupby("ticker", sort=False)["adj_close"].pct_change().astype("float64")
 	)
 	featured["log_return"] = (
 		featured.groupby("ticker", sort=False)["log_price"].diff().astype("float64")
@@ -47,11 +47,11 @@ def _add_lag_features(df: pd.DataFrame) -> pd.DataFrame:
 
 def _add_sma_features(df: pd.DataFrame) -> pd.DataFrame:
 	featured = df.copy()
-	by_ticker_close = featured.groupby("ticker", sort=False)["close"]
+	by_ticker_adj_close = featured.groupby("ticker", sort=False)["adj_close"]
 
 	for window in (10, 20, 50):
 		featured[f"sma_{window}"] = (
-			by_ticker_close.transform(
+			by_ticker_adj_close.transform(
 				lambda s: s.rolling(window=window, min_periods=window).mean()
 			).astype("float64")
 		)
@@ -61,11 +61,11 @@ def _add_sma_features(df: pd.DataFrame) -> pd.DataFrame:
 
 def _add_ema_features(df: pd.DataFrame) -> pd.DataFrame:
 	featured = df.copy()
-	by_ticker_close = featured.groupby("ticker", sort=False)["close"]
+	by_ticker_adj_close = featured.groupby("ticker", sort=False)["adj_close"]
 
 	for span in (12, 26):
 		featured[f"ema_{span}"] = (
-			by_ticker_close.transform(lambda s: s.ewm(span=span, adjust=False).mean()).astype("float64")
+			by_ticker_adj_close.transform(lambda s: s.ewm(span=span, adjust=False).mean()).astype("float64")
 		)
 
 	return featured
@@ -76,8 +76,8 @@ def _add_trend_features(df: pd.DataFrame) -> pd.DataFrame:
 	return _add_ema_features(with_sma)
 
 
-def _compute_rsi_14(close: pd.Series) -> pd.Series:
-	delta = close.diff()
+def _compute_rsi_14(adj_close: pd.Series) -> pd.Series:
+	delta = adj_close.diff()
 	gain = delta.clip(lower=0)
 	loss = -delta.clip(upper=0)
 
@@ -90,12 +90,12 @@ def _compute_rsi_14(close: pd.Series) -> pd.Series:
 
 def _add_momentum_features(df: pd.DataFrame) -> pd.DataFrame:
 	featured = df.copy()
-	by_ticker_close = featured.groupby("ticker", sort=False)["close"]
+	by_ticker_adj_close = featured.groupby("ticker", sort=False)["adj_close"]
 
-	featured["rsi_14"] = by_ticker_close.transform(_compute_rsi_14).astype("float64")
+	featured["rsi_14"] = by_ticker_adj_close.transform(_compute_rsi_14).astype("float64")
 
-	ema_fast = by_ticker_close.transform(lambda s: s.ewm(span=12, adjust=False).mean())
-	ema_slow = by_ticker_close.transform(lambda s: s.ewm(span=26, adjust=False).mean())
+	ema_fast = by_ticker_adj_close.transform(lambda s: s.ewm(span=12, adjust=False).mean())
+	ema_slow = by_ticker_adj_close.transform(lambda s: s.ewm(span=26, adjust=False).mean())
 	featured["macd"] = (ema_fast - ema_slow).astype("float64")
 
 	featured["macd_signal"] = (
@@ -126,10 +126,10 @@ def _add_rolling_std_features(df: pd.DataFrame) -> pd.DataFrame:
 def _compute_atr_14_by_ticker(df_ticker: pd.DataFrame) -> pd.Series:
 	high = df_ticker["high"]
 	low = df_ticker["low"]
-	prev_close = df_ticker["close"].shift(1)
+	prev_adj_close = df_ticker["adj_close"].shift(1)
 
 	true_range = pd.concat(
-		[(high - low), (high - prev_close).abs(), (low - prev_close).abs()],
+		[(high - low), (high - prev_adj_close).abs(), (low - prev_adj_close).abs()],
 		axis=1,
 	).max(axis=1)
 
@@ -138,9 +138,19 @@ def _compute_atr_14_by_ticker(df_ticker: pd.DataFrame) -> pd.Series:
 
 def _add_atr_feature(df: pd.DataFrame) -> pd.DataFrame:
 	featured = df.copy()
+	prev_adj_close = featured.groupby("ticker", sort=False)["adj_close"].shift(1)
+	true_range = pd.concat(
+		[
+			(featured["high"] - featured["low"]),
+			(featured["high"] - prev_adj_close).abs(),
+			(featured["low"] - prev_adj_close).abs(),
+		],
+		axis=1,
+	).max(axis=1)
+
 	featured["atr_14"] = (
-		featured.groupby("ticker", sort=False, group_keys=False)
-		.apply(_compute_atr_14_by_ticker)
+		true_range.groupby(featured["ticker"], sort=False)
+		.transform(lambda s: s.rolling(window=14, min_periods=14).mean())
 		.astype("float64")
 	)
 	return featured
@@ -195,7 +205,7 @@ def _add_price_vs_sma_features(df: pd.DataFrame) -> pd.DataFrame:
 	for window in (10, 20, 50):
 		sma_column = f"sma_{window}"
 		featured[f"price_vs_sma_{window}"] = (
-			featured["close"] / featured[sma_column]
+			featured["adj_close"] / featured[sma_column]
 		).astype("float64")
 
 	return featured
@@ -203,18 +213,18 @@ def _add_price_vs_sma_features(df: pd.DataFrame) -> pd.DataFrame:
 
 def _add_price_zscore_feature(df: pd.DataFrame) -> pd.DataFrame:
 	featured = df.copy()
-	by_ticker_close = featured.groupby("ticker", sort=False)["close"]
+	by_ticker_adj_close = featured.groupby("ticker", sort=False)["adj_close"]
 
-	rolling_mean_20 = by_ticker_close.transform(
+	rolling_mean_20 = by_ticker_adj_close.transform(
 		lambda s: s.rolling(window=20, min_periods=20).mean()
 	)
-	rolling_std_20 = by_ticker_close.transform(
+	rolling_std_20 = by_ticker_adj_close.transform(
 		lambda s: s.rolling(window=20, min_periods=20).std()
 	)
 	rolling_std_20 = rolling_std_20.mask(rolling_std_20 == 0)
 
 	featured["zscore_price_20"] = (
-		(featured["close"] - rolling_mean_20) / rolling_std_20
+		(featured["adj_close"] - rolling_mean_20) / rolling_std_20
 	).astype("float64")
 
 	return featured
@@ -229,11 +239,11 @@ def _add_relative_normalization_features(df: pd.DataFrame) -> pd.DataFrame:
 
 def _add_rolling_mean_features(df: pd.DataFrame) -> pd.DataFrame:
 	featured = df.copy()
-	by_ticker_close = featured.groupby("ticker", sort=False)["close"]
+	by_ticker_adj_close = featured.groupby("ticker", sort=False)["adj_close"]
 
 	for window in (5, 10):
 		featured[f"rolling_mean_{window}"] = (
-			by_ticker_close.transform(
+			by_ticker_adj_close.transform(
 				lambda s: s.rolling(window=window, min_periods=window).mean()
 			).astype("float64")
 		)
@@ -243,15 +253,15 @@ def _add_rolling_mean_features(df: pd.DataFrame) -> pd.DataFrame:
 
 def _add_rolling_extreme_features(df: pd.DataFrame) -> pd.DataFrame:
 	featured = df.copy()
-	by_ticker_close = featured.groupby("ticker", sort=False)["close"]
+	by_ticker_adj_close = featured.groupby("ticker", sort=False)["adj_close"]
 
 	featured["rolling_max_10"] = (
-		by_ticker_close.transform(
+		by_ticker_adj_close.transform(
 			lambda s: s.rolling(window=10, min_periods=10).max()
 		).astype("float64")
 	)
 	featured["rolling_min_10"] = (
-		by_ticker_close.transform(
+		by_ticker_adj_close.transform(
 			lambda s: s.rolling(window=10, min_periods=10).min()
 		).astype("float64")
 	)
@@ -267,18 +277,18 @@ def _add_rolling_statistics_features(df: pd.DataFrame) -> pd.DataFrame:
 def _add_basic_range_features(df: pd.DataFrame) -> pd.DataFrame:
 	featured = df.copy()
 	featured["high_low_range"] = (featured["high"] - featured["low"]).astype("float64")
-	featured["close_open_range"] = (featured["close"] - featured["open"]).astype("float64")
+	featured["close_open_range"] = (featured["adj_close"] - featured["open"]).astype("float64")
 	return featured
 
 
 def _add_true_range_feature(df: pd.DataFrame) -> pd.DataFrame:
 	featured = df.copy()
-	prev_close = featured.groupby("ticker", sort=False)["close"].shift(1)
+	prev_adj_close = featured.groupby("ticker", sort=False)["adj_close"].shift(1)
 	featured["true_range"] = pd.concat(
 		[
 			(featured["high"] - featured["low"]),
-			(featured["high"] - prev_close).abs(),
-			(featured["low"] - prev_close).abs(),
+			(featured["high"] - prev_adj_close).abs(),
+			(featured["low"] - prev_adj_close).abs(),
 		],
 		axis=1,
 	).max(axis=1).astype("float64")
