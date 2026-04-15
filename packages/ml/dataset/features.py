@@ -45,9 +45,41 @@ def _add_lag_features(df: pd.DataFrame) -> pd.DataFrame:
 	return _add_volume_lags(with_return_lags)
 
 
+def _add_sma_features(df: pd.DataFrame) -> pd.DataFrame:
+	featured = df.copy()
+	by_ticker_close = featured.groupby("ticker", sort=False)["close"]
+
+	for window in (10, 20, 50):
+		featured[f"sma_{window}"] = (
+			by_ticker_close.transform(
+				lambda s: s.rolling(window=window, min_periods=window).mean()
+			).astype("float64")
+		)
+
+	return featured
+
+
+def _add_ema_features(df: pd.DataFrame) -> pd.DataFrame:
+	featured = df.copy()
+	by_ticker_close = featured.groupby("ticker", sort=False)["close"]
+
+	for span in (12, 26):
+		featured[f"ema_{span}"] = (
+			by_ticker_close.transform(lambda s: s.ewm(span=span, adjust=False).mean()).astype("float64")
+		)
+
+	return featured
+
+
+def _add_trend_features(df: pd.DataFrame) -> pd.DataFrame:
+	with_sma = _add_sma_features(df)
+	return _add_ema_features(with_sma)
+
+
 def build_features_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 	featured = _compute_base_derived_features(df)
 	featured = _add_lag_features(featured)
+	featured = _add_trend_features(featured)
 
 	logger.info(
 		"build_features_dataframe: rows=%d, tickers=%d",
