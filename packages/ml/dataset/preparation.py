@@ -60,9 +60,12 @@ def _drop_invalid_ohlc_rows(df: pd.DataFrame) -> pd.DataFrame:
     return df.loc[valid_rows].reset_index(drop=True)
 
 
-def _filter_by_min_trading_days(df: pd.DataFrame) -> pd.DataFrame:
+def _filter_by_min_trading_days(
+        df: pd.DataFrame,
+        min_trading_days: int = MIN_TRADING_DAYS,
+) -> pd.DataFrame:
     trading_days = df.groupby("ticker")["date"].transform("nunique")
-    return df.loc[trading_days >= MIN_TRADING_DAYS].reset_index(drop=True)
+    return df.loc[trading_days >= min_trading_days].reset_index(drop=True)
 
 
 def _filter_by_zero_volume_ratio(
