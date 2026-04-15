@@ -10,7 +10,7 @@ STD_EPSILON = 1e-12
 
 
 def _compute_base_derived_features(df: pd.DataFrame) -> pd.DataFrame:
-	featured = df.copy()
+	featured = df
 	invalid_adj_close = featured["adj_close"] <= 0
 	if invalid_adj_close.any():
 		raise ValueError("Column 'adj_close' must be strictly positive to compute log_price")
@@ -27,7 +27,7 @@ def _compute_base_derived_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _add_return_lags(df: pd.DataFrame) -> pd.DataFrame:
-	lagged = df.copy()
+	lagged = df
 	for lag in (1, 2, 3, 5, 10):
 		lagged[f"return_lag_{lag}"] = (
 			lagged.groupby("ticker", sort=False, group_keys=False)["simple_return"].shift(lag).astype("float64")
@@ -36,7 +36,7 @@ def _add_return_lags(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _add_volume_lags(df: pd.DataFrame) -> pd.DataFrame:
-	lagged = df.copy()
+	lagged = df
 	for lag in (1, 3, 5):
 		lagged[f"volume_lag_{lag}"] = (
 			lagged.groupby("ticker", sort=False, group_keys=False)["volume"].shift(lag).astype("float64")
@@ -50,7 +50,7 @@ def _add_lag_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _add_sma_features(df: pd.DataFrame) -> pd.DataFrame:
-	featured = df.copy()
+	featured = df
 	by_ticker_adj_close = featured.groupby("ticker", sort=False, group_keys=False)["adj_close"]
 
 	for window in (10, 20, 50):
@@ -64,7 +64,7 @@ def _add_sma_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _add_ema_features(df: pd.DataFrame) -> pd.DataFrame:
-	featured = df.copy()
+	featured = df
 	by_ticker_adj_close = featured.groupby("ticker", sort=False, group_keys=False)["adj_close"]
 
 	for span in (12, 26):
@@ -95,7 +95,7 @@ def _compute_rsi_14(adj_close: pd.Series) -> pd.Series:
 
 
 def _add_momentum_features(df: pd.DataFrame) -> pd.DataFrame:
-	featured = df.copy()
+	featured = df
 	by_ticker_adj_close = featured.groupby("ticker", sort=False, group_keys=False)["adj_close"]
 
 	featured["rsi_14"] = by_ticker_adj_close.transform(_compute_rsi_14).astype("float64")
@@ -120,7 +120,7 @@ def _add_momentum_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _add_rolling_std_features(df: pd.DataFrame) -> pd.DataFrame:
-	featured = df.copy()
+	featured = df
 	by_ticker_return = featured.groupby("ticker", sort=False, group_keys=False)["simple_return"]
 
 	for window in (10, 20):
@@ -135,7 +135,7 @@ def _add_rolling_std_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _add_atr_feature(df: pd.DataFrame) -> pd.DataFrame:
-	featured = df.copy()
+	featured = df
 	prev_adj_close = featured.groupby("ticker", sort=False, group_keys=False)["adj_close"].shift(1)
 	true_range = pd.concat(
 		[
@@ -160,7 +160,7 @@ def _add_volatility_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _add_volume_sma_features(df: pd.DataFrame) -> pd.DataFrame:
-	featured = df.copy()
+	featured = df
 	by_ticker_volume = featured.groupby("ticker", sort=False, group_keys=False)["volume"]
 
 	for window in (10, 20):
@@ -174,7 +174,7 @@ def _add_volume_sma_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _add_volume_zscore_feature(df: pd.DataFrame) -> pd.DataFrame:
-	featured = df.copy()
+	featured = df
 	by_ticker_volume = featured.groupby("ticker", sort=False, group_keys=False)["volume"]
 
 	rolling_mean_20 = by_ticker_volume.transform(
@@ -198,7 +198,7 @@ def _add_volume_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _add_price_vs_sma_features(df: pd.DataFrame) -> pd.DataFrame:
-	featured = df.copy()
+	featured = df
 
 	for window in (10, 20, 50):
 		sma_column = f"sma_{window}"
@@ -210,7 +210,7 @@ def _add_price_vs_sma_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _add_price_zscore_feature(df: pd.DataFrame) -> pd.DataFrame:
-	featured = df.copy()
+	featured = df
 	by_ticker_adj_close = featured.groupby("ticker", sort=False, group_keys=False)["adj_close"]
 
 	rolling_mean_20 = by_ticker_adj_close.transform(
@@ -236,7 +236,7 @@ def _add_relative_normalization_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _add_rolling_mean_features(df: pd.DataFrame) -> pd.DataFrame:
-	featured = df.copy()
+	featured = df
 	by_ticker_adj_close = featured.groupby("ticker", sort=False, group_keys=False)["adj_close"]
 
 	for window in (5, 10):
@@ -250,7 +250,7 @@ def _add_rolling_mean_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _add_rolling_extreme_features(df: pd.DataFrame) -> pd.DataFrame:
-	featured = df.copy()
+	featured = df
 	by_ticker_adj_close = featured.groupby("ticker", sort=False, group_keys=False)["adj_close"]
 
 	featured["rolling_max_10"] = (
@@ -273,14 +273,14 @@ def _add_rolling_statistics_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _add_basic_range_features(df: pd.DataFrame) -> pd.DataFrame:
-	featured = df.copy()
+	featured = df
 	featured["high_low_range"] = (featured["high"] - featured["low"]).astype("float64")
 	featured["close_open_range"] = (featured["adj_close"] - featured["open"]).astype("float64")
 	return featured
 
 
 def _add_true_range_feature(df: pd.DataFrame) -> pd.DataFrame:
-	featured = df.copy()
+	featured = df
 	prev_adj_close = featured.groupby("ticker", sort=False, group_keys=False)["adj_close"].shift(1)
 	featured["true_range"] = pd.concat(
 		[
@@ -299,7 +299,8 @@ def _add_price_action_range_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_features_dataframe(df: pd.DataFrame) -> pd.DataFrame:
-	featured = _compute_base_derived_features(df)
+	featured = df.copy()
+	featured = _compute_base_derived_features(featured)
 	featured = _add_lag_features(featured)
 	featured = _add_trend_features(featured)
 	featured = _add_momentum_features(featured)
