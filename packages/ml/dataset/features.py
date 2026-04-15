@@ -298,8 +298,29 @@ def _add_price_action_range_features(df: pd.DataFrame) -> pd.DataFrame:
 	return _add_true_range_feature(with_basic_ranges)
 
 
+def _validate_unique_ticker_date_pairs(df: pd.DataFrame) -> None:
+	duplicated_mask = df.duplicated(subset=["ticker", "date"], keep=False)
+	if not duplicated_mask.any():
+		return
+
+	duplicates = (
+		df.loc[duplicated_mask, ["ticker", "date"]]
+		.drop_duplicates()
+		.sort_values(["ticker", "date"])
+	)
+	sample = duplicates.head(5)
+	sample_pairs = ", ".join(
+		f"({row.ticker}, {row.date})" for row in sample.itertuples(index=False)
+	)
+	raise ValueError(
+		"Found duplicate (ticker, date) pairs before feature generation: "
+		f"count={len(duplicates)}; sample=[{sample_pairs}]"
+	)
+
+
 def build_features_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 	featured = df.copy()
+	_validate_unique_ticker_date_pairs(featured)
 	featured.sort_values(["ticker", "date"], inplace=True)
 	featured.reset_index(drop=True, inplace=True)
 	featured = _compute_base_derived_features(featured)
