@@ -6,6 +6,7 @@ import math
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+STD_EPSILON = 1e-12
 
 
 def _compute_base_derived_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -186,12 +187,12 @@ def _add_volume_zscore_feature(df: pd.DataFrame) -> pd.DataFrame:
 	by_ticker_volume = featured.groupby("ticker", sort=False)["volume"]
 
 	rolling_mean_20 = by_ticker_volume.transform(
-		lambda s: s.rolling(window=20, min_periods=20).mean().shift(1)
-	)
+		lambda s: s.rolling(window=20, min_periods=20).mean()
+	).shift(1)
 	rolling_std_20 = by_ticker_volume.transform(
-		lambda s: s.rolling(window=20, min_periods=20).std().shift(1)
-	)
-	rolling_std_20 = rolling_std_20.mask(rolling_std_20 == 0)
+		lambda s: s.rolling(window=20, min_periods=20).std()
+	).shift(1)
+	rolling_std_20 = rolling_std_20.mask(rolling_std_20.abs() <= STD_EPSILON)
 
 	featured["volume_zscore"] = (
 		(featured["volume"] - rolling_mean_20) / rolling_std_20
@@ -222,12 +223,12 @@ def _add_price_zscore_feature(df: pd.DataFrame) -> pd.DataFrame:
 	by_ticker_adj_close = featured.groupby("ticker", sort=False)["adj_close"]
 
 	rolling_mean_20 = by_ticker_adj_close.transform(
-		lambda s: s.rolling(window=20, min_periods=20).mean().shift(1)
-	)
+		lambda s: s.rolling(window=20, min_periods=20).mean()
+	).shift(1)
 	rolling_std_20 = by_ticker_adj_close.transform(
-		lambda s: s.rolling(window=20, min_periods=20).std().shift(1)
-	)
-	rolling_std_20 = rolling_std_20.mask(rolling_std_20 == 0)
+		lambda s: s.rolling(window=20, min_periods=20).std()
+	).shift(1)
+	rolling_std_20 = rolling_std_20.mask(rolling_std_20.abs() <= STD_EPSILON)
 
 	featured["zscore_price_20"] = (
 		(featured["adj_close"] - rolling_mean_20) / rolling_std_20
