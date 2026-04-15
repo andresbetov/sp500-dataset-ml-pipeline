@@ -227,6 +227,43 @@ def _add_relative_normalization_features(df: pd.DataFrame) -> pd.DataFrame:
 	return with_price_zscore
 
 
+def _add_rolling_mean_features(df: pd.DataFrame) -> pd.DataFrame:
+	featured = df.copy()
+	by_ticker_close = featured.groupby("ticker", sort=False)["close"]
+
+	for window in (5, 10):
+		featured[f"rolling_mean_{window}"] = (
+			by_ticker_close.transform(
+				lambda s: s.rolling(window=window, min_periods=window).mean()
+			).astype("float64")
+		)
+
+	return featured
+
+
+def _add_rolling_extreme_features(df: pd.DataFrame) -> pd.DataFrame:
+	featured = df.copy()
+	by_ticker_close = featured.groupby("ticker", sort=False)["close"]
+
+	featured["rolling_max_10"] = (
+		by_ticker_close.transform(
+			lambda s: s.rolling(window=10, min_periods=10).max()
+		).astype("float64")
+	)
+	featured["rolling_min_10"] = (
+		by_ticker_close.transform(
+			lambda s: s.rolling(window=10, min_periods=10).min()
+		).astype("float64")
+	)
+
+	return featured
+
+
+def _add_rolling_statistics_features(df: pd.DataFrame) -> pd.DataFrame:
+	with_rolling_mean = _add_rolling_mean_features(df)
+	return _add_rolling_extreme_features(with_rolling_mean)
+
+
 def build_features_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 	featured = _compute_base_derived_features(df)
 	featured = _add_lag_features(featured)
@@ -235,6 +272,7 @@ def build_features_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 	featured = _add_volatility_features(featured)
 	featured = _add_volume_features(featured)
 	featured = _add_relative_normalization_features(featured)
+	featured = _add_rolling_statistics_features(featured)
 
 	logger.info(
 		"build_features_dataframe: rows=%d, tickers=%d",
