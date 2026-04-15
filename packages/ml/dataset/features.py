@@ -264,6 +264,32 @@ def _add_rolling_statistics_features(df: pd.DataFrame) -> pd.DataFrame:
 	return _add_rolling_extreme_features(with_rolling_mean)
 
 
+def _add_basic_range_features(df: pd.DataFrame) -> pd.DataFrame:
+	featured = df.copy()
+	featured["high_low_range"] = (featured["high"] - featured["low"]).astype("float64")
+	featured["close_open_range"] = (featured["close"] - featured["open"]).astype("float64")
+	return featured
+
+
+def _add_true_range_feature(df: pd.DataFrame) -> pd.DataFrame:
+	featured = df.copy()
+	prev_close = featured.groupby("ticker", sort=False)["close"].shift(1)
+	featured["true_range"] = pd.concat(
+		[
+			(featured["high"] - featured["low"]),
+			(featured["high"] - prev_close).abs(),
+			(featured["low"] - prev_close).abs(),
+		],
+		axis=1,
+	).max(axis=1).astype("float64")
+	return featured
+
+
+def _add_price_action_range_features(df: pd.DataFrame) -> pd.DataFrame:
+	with_basic_ranges = _add_basic_range_features(df)
+	return _add_true_range_feature(with_basic_ranges)
+
+
 def build_features_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 	featured = _compute_base_derived_features(df)
 	featured = _add_lag_features(featured)
@@ -273,6 +299,7 @@ def build_features_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 	featured = _add_volume_features(featured)
 	featured = _add_relative_normalization_features(featured)
 	featured = _add_rolling_statistics_features(featured)
+	featured = _add_price_action_range_features(featured)
 
 	logger.info(
 		"build_features_dataframe: rows=%d, tickers=%d",
