@@ -133,18 +133,6 @@ def _add_rolling_std_features(df: pd.DataFrame) -> pd.DataFrame:
 	return featured
 
 
-def _compute_atr_14_by_ticker(df_ticker: pd.DataFrame) -> pd.Series:
-	high = df_ticker["high"]
-	low = df_ticker["low"]
-	prev_adj_close = df_ticker["adj_close"].shift(1)
-
-	true_range = pd.concat(
-		[(high - low), (high - prev_adj_close).abs(), (low - prev_adj_close).abs()],
-		axis=1,
-	).max(axis=1)
-
-	return true_range.rolling(window=14, min_periods=14).mean().astype("float64")
-
 
 def _add_atr_feature(df: pd.DataFrame) -> pd.DataFrame:
 	featured = df.copy()
