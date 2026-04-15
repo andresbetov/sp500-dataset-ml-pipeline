@@ -76,10 +76,44 @@ def _add_trend_features(df: pd.DataFrame) -> pd.DataFrame:
 	return _add_ema_features(with_sma)
 
 
+def _compute_rsi_14(close: pd.Series) -> pd.Series:
+	delta = close.diff()
+	gain = delta.clip(lower=0)
+	loss = -delta.clip(upper=0)
+
+	avg_gain = gain.ewm(alpha=1 / 14, adjust=False, min_periods=14).mean()
+	avg_loss = loss.ewm(alpha=1 / 14, adjust=False, min_periods=14).mean()
+
+	rs = avg_gain / avg_loss
+	return 100 - (100 / (1 + rs))
+
+
+def _add_momentum_features(df: pd.DataFrame) -> pd.DataFrame:
+	featured = df.copy()
+	by_ticker_close = featured.groupby("ticker", sort=False)["close"]
+
+	featured["rsi_14"] = by_ticker_close.transform(_compute_rsi_14).astype("float64")
+
+	ema_fast = by_ticker_close.transform(lambda s: s.ewm(span=12, adjust=False).mean())
+	ema_slow = by_ticker_close.transform(lambda s: s.ewm(span=26, adjust=False).mean())
+	featured["macd"] = (ema_fast - ema_slow).astype("float64")
+
+	featured["macd_signal"] = (
+		featured.groupby("ticker", sort=False)["macd"]
+		.transform(lambda s: s.ewm(span=9, adjust=False).mean())
+		.astype("float64")
+	)
+
+	featured["macd_hist"] = (featured["macd"] - featured["macd_signal"]).astype("float64")
+
+	return featured
+
+
 def build_features_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 	featured = _compute_base_derived_features(df)
 	featured = _add_lag_features(featured)
 	featured = _add_trend_features(featured)
+	featured = _add_momentum_features(featured)
 
 	logger.info(
 		"build_features_dataframe: rows=%d, tickers=%d",
