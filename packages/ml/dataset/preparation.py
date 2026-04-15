@@ -94,8 +94,8 @@ def _drop_invalid_ohlc_rows(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _filter_by_min_trading_days(
-        df: pd.DataFrame,
-        min_trading_days: int = MIN_TRADING_DAYS,
+    df: pd.DataFrame,
+    min_trading_days: int = MIN_TRADING_DAYS,
 ) -> pd.DataFrame:
     rows_in = len(df)
     tickers_in = df["ticker"].nunique()
