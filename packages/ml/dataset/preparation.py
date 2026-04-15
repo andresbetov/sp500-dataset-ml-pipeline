@@ -17,16 +17,19 @@ REQUIRED_COLUMNS = {
 PRICE_COLUMNS = {"open", "high", "low", "close", "adj close"}
 MIN_TRADING_DAYS = 500
 
+
 def _normalize_column_names(df: pd.DataFrame) -> pd.DataFrame:
     normalized = df.copy()
     normalized.columns = [str(column).strip().lower() for column in normalized.columns]
     return normalized
+
 
 def _validate_required_columns(df: pd.DataFrame) -> None:
     missing = REQUIRED_COLUMNS - set(df.columns)
     if missing:
         missing_list = ", ".join(sorted(missing))
         raise ValueError(f"Missing required columns: {missing_list}")
+
 
 def _cast_columns(df: pd.DataFrame) -> None:
     df["ticker"] = df["ticker"].astype("string").str.strip()
@@ -41,10 +44,12 @@ def _cast_columns(df: pd.DataFrame) -> None:
     else:
         df["volume"] = volume_numeric.astype("float64")
 
+
 def _sort_and_deduplicate(df: pd.DataFrame) -> pd.DataFrame:
     ordered = df.sort_values(by=["ticker", "date"])
     unique = ordered.drop_duplicates(subset=["ticker", "date"], keep="first")
     return unique.reset_index(drop=True)
+
 
 def _drop_invalid_ohlc_rows(df: pd.DataFrame) -> pd.DataFrame:
     valid_range = (df["high"] >= df["low"])
@@ -53,9 +58,11 @@ def _drop_invalid_ohlc_rows(df: pd.DataFrame) -> pd.DataFrame:
     valid_rows = valid_range & valid_close & valid_open
     return df.loc[valid_rows].reset_index(drop=True)
 
+
 def _filter_by_min_trading_days(df: pd.DataFrame) -> pd.DataFrame:
     trading_days = df.groupby("ticker")["date"].transform("nunique")
     return df.loc[trading_days >= MIN_TRADING_DAYS].reset_index(drop=True)
+
 
 def prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     normalized = _normalize_column_names(df)
