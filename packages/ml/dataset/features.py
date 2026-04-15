@@ -7,6 +7,7 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 STD_EPSILON = 1e-12
+MAX_ABS_ZSCORE = 8.0
 
 MIN_HISTORY_BY_FEATURE = {
 	"simple_return": 1,
@@ -45,6 +46,25 @@ MIN_HISTORY_BY_FEATURE = {
 	"rolling_min_10": 10,
 	"true_range": 1,
 }
+
+
+def _compute_stable_rolling_zscore(
+	values: pd.Series,
+	group_labels: pd.Series,
+	window: int,
+) -> pd.Series:
+	grouped_values = values.groupby(group_labels, sort=False, group_keys=False)
+	rolling_mean = grouped_values.transform(
+		lambda s: s.rolling(window=window, min_periods=window).mean()
+	).shift(1)
+	rolling_std = grouped_values.transform(
+		lambda s: s.rolling(window=window, min_periods=window).std()
+	).shift(1)
+	rolling_std = rolling_std.mask(rolling_std.abs() <= STD_EPSILON)
+
+	zscore = ((values - rolling_mean) / rolling_std).astype("float64")
+	zscore = zscore.replace([np.inf, -np.inf], np.nan)
+	return zscore.clip(lower=-MAX_ABS_ZSCORE, upper=MAX_ABS_ZSCORE).astype("float64")
 
 
 def _compute_base_derived_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -213,19 +233,11 @@ def _add_volume_sma_features(df: pd.DataFrame) -> pd.DataFrame:
 
 def _add_volume_zscore_feature(df: pd.DataFrame) -> pd.DataFrame:
 	featured = df
-	by_ticker_volume = featured.groupby("ticker", sort=False, group_keys=False)["volume"]
-
-	rolling_mean_20 = by_ticker_volume.transform(
-		lambda s: s.rolling(window=20, min_periods=20).mean()
-	).shift(1)
-	rolling_std_20 = by_ticker_volume.transform(
-		lambda s: s.rolling(window=20, min_periods=20).std()
-	).shift(1)
-	rolling_std_20 = rolling_std_20.mask(rolling_std_20.abs() <= STD_EPSILON)
-
-	featured["volume_zscore"] = (
-		(featured["volume"] - rolling_mean_20) / rolling_std_20
-	).astype("float64")
+	featured["volume_zscore"] = _compute_stable_rolling_zscore(
+		values=featured["volume"],
+		group_labels=featured["ticker"],
+		window=20,
+	)
 
 	return featured
 
@@ -249,19 +261,11 @@ def _add_price_vs_sma_features(df: pd.DataFrame) -> pd.DataFrame:
 
 def _add_price_zscore_feature(df: pd.DataFrame) -> pd.DataFrame:
 	featured = df
-	by_ticker_adj_close = featured.groupby("ticker", sort=False, group_keys=False)["adj_close"]
-
-	rolling_mean_20 = by_ticker_adj_close.transform(
-		lambda s: s.rolling(window=20, min_periods=20).mean()
-	).shift(1)
-	rolling_std_20 = by_ticker_adj_close.transform(
-		lambda s: s.rolling(window=20, min_periods=20).std()
-	).shift(1)
-	rolling_std_20 = rolling_std_20.mask(rolling_std_20.abs() <= STD_EPSILON)
-
-	featured["zscore_price_20"] = (
-		(featured["adj_close"] - rolling_mean_20) / rolling_std_20
-	).astype("float64")
+	featured["zscore_price_20"] = _compute_stable_rolling_zscore(
+		values=featured["adj_close"],
+		group_labels=featured["ticker"],
+		window=20,
+	)
 
 	return featured
 
