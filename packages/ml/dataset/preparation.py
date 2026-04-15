@@ -15,6 +15,7 @@ REQUIRED_COLUMNS = {
 }
 
 PRICE_COLUMNS = {"open", "high", "low", "close", "adj close"}
+MIN_TRADING_DAYS = 500
 
 def _normalize_column_names(df: pd.DataFrame) -> pd.DataFrame:
     normalized = df.copy()
@@ -52,11 +53,15 @@ def _drop_invalid_ohlc_rows(df: pd.DataFrame) -> pd.DataFrame:
     valid_rows = valid_range & valid_close & valid_open
     return df.loc[valid_rows].reset_index(drop=True)
 
+def _filter_by_min_trading_days(df: pd.DataFrame) -> pd.DataFrame:
+    trading_days = df.groupby("ticker")["date"].transform("nunique")
+    return df.loc[trading_days >= MIN_TRADING_DAYS].reset_index(drop=True)
+
 def prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     normalized = _normalize_column_names(df)
     _validate_required_columns(normalized)
     _cast_columns(normalized)
     cleaned = _drop_invalid_ohlc_rows(normalized)
     deduplicated = _sort_and_deduplicate(cleaned)
-    return deduplicated
+    return _filter_by_min_trading_days(deduplicated)
 
