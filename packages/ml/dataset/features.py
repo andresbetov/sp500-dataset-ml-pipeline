@@ -151,12 +151,50 @@ def _add_volatility_features(df: pd.DataFrame) -> pd.DataFrame:
 	return _add_atr_feature(with_rolling_std)
 
 
+def _add_volume_sma_features(df: pd.DataFrame) -> pd.DataFrame:
+	featured = df.copy()
+	by_ticker_volume = featured.groupby("ticker", sort=False)["volume"]
+
+	for window in (10, 20):
+		featured[f"volume_sma_{window}"] = (
+			by_ticker_volume.transform(
+				lambda s: s.rolling(window=window, min_periods=window).mean()
+			).astype("float64")
+		)
+
+	return featured
+
+
+def _add_volume_zscore_feature(df: pd.DataFrame) -> pd.DataFrame:
+	featured = df.copy()
+	by_ticker_volume = featured.groupby("ticker", sort=False)["volume"]
+
+	rolling_mean_20 = by_ticker_volume.transform(
+		lambda s: s.rolling(window=20, min_periods=20).mean()
+	)
+	rolling_std_20 = by_ticker_volume.transform(
+		lambda s: s.rolling(window=20, min_periods=20).std()
+	)
+
+	featured["volume_zscore"] = (
+		(featured["volume"] - rolling_mean_20) / rolling_std_20
+	).astype("float64")
+
+	return featured
+
+
+def _add_volume_features(df: pd.DataFrame) -> pd.DataFrame:
+	with_volume_sma = _add_volume_sma_features(df)
+	return _add_volume_zscore_feature(with_volume_sma)
+
+
 def build_features_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 	featured = _compute_base_derived_features(df)
 	featured = _add_lag_features(featured)
 	featured = _add_trend_features(featured)
 	featured = _add_momentum_features(featured)
 	featured = _add_volatility_features(featured)
+	featured = _add_volume_features(featured)
 
 	logger.info(
 		"build_features_dataframe: rows=%d, tickers=%d",
