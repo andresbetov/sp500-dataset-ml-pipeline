@@ -40,9 +40,17 @@ def _cast_columns(df: pd.DataFrame) -> None:
     else:
         df["volume"] = volume_numeric.astype("float64")
 
+def _drop_invalid_ohlc_rows(df: pd.DataFrame) -> pd.DataFrame:
+    valid_range = (df["high"] >= df["low"])
+    valid_close = (df["close"] <= df["high"]) & (df["close"] >= df["low"])
+    valid_open = (df["open"] <= df["high"]) & (df["open"] >= df["low"])
+    valid_rows = valid_range & valid_close & valid_open
+    return df.loc[valid_rows].reset_index(drop=True)
+
 def prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     normalized = _normalize_column_names(df)
     _validate_required_columns(normalized)
     _cast_columns(normalized)
-    return normalized
+    cleaned = _drop_invalid_ohlc_rows(normalized)
+    return cleaned
 
