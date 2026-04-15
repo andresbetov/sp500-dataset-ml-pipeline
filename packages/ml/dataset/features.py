@@ -300,6 +300,8 @@ def _add_price_action_range_features(df: pd.DataFrame) -> pd.DataFrame:
 
 def build_features_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 	featured = df.copy()
+	featured.sort_values(["ticker", "date"], inplace=True)
+	featured.reset_index(drop=True, inplace=True)
 	featured = _compute_base_derived_features(featured)
 	featured = _add_lag_features(featured)
 	featured = _add_trend_features(featured)
