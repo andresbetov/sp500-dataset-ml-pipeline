@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import logging
-import math
 
+import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)
@@ -11,8 +11,11 @@ STD_EPSILON = 1e-12
 
 def _compute_base_derived_features(df: pd.DataFrame) -> pd.DataFrame:
 	featured = df.copy()
+	invalid_adj_close = featured["adj_close"] <= 0
+	if invalid_adj_close.any():
+		raise ValueError("Column 'adj_close' must be strictly positive to compute log_price")
 
-	featured["log_price"] = featured["adj_close"].map(math.log).astype("float64")
+	featured["log_price"] = np.log(featured["adj_close"]).astype("float64")
 	featured["simple_return"] = (
 		featured.groupby("ticker", sort=False)["adj_close"].pct_change().astype("float64")
 	)
