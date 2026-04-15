@@ -376,11 +376,31 @@ def _cast_numeric_columns_to_float64(df: pd.DataFrame) -> pd.DataFrame:
 	return df
 
 
+def _sort_stably_by_ticker_date(df: pd.DataFrame) -> pd.DataFrame:
+	df.sort_values(["ticker", "date"], kind="mergesort", inplace=True)
+	df.reset_index(drop=True, inplace=True)
+	return df
+
+
+def _reorder_columns_deterministically(df: pd.DataFrame) -> pd.DataFrame:
+	base_columns = [
+		"ticker",
+		"date",
+		"open",
+		"high",
+		"low",
+		"adj_close",
+		"volume",
+	]
+	present_base = [column for column in base_columns if column in df.columns]
+	feature_columns = sorted(column for column in df.columns if column not in present_base)
+	return df[present_base + feature_columns]
+
+
 def build_features_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 	featured = df.copy()
 	_validate_unique_ticker_date_pairs(featured)
-	featured.sort_values(["ticker", "date"], inplace=True)
-	featured.reset_index(drop=True, inplace=True)
+	featured = _sort_stably_by_ticker_date(featured)
 	featured = _compute_base_derived_features(featured)
 	featured = _add_lag_features(featured)
 	featured = _add_trend_features(featured)
@@ -392,6 +412,8 @@ def build_features_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 	featured = _add_price_action_range_features(featured)
 	featured = _enforce_history_based_nan_consistency(featured)
 	featured = _cast_numeric_columns_to_float64(featured)
+	featured = _sort_stably_by_ticker_date(featured)
+	featured = _reorder_columns_deterministically(featured)
 
 	logger.info(
 		"build_features_dataframe: rows=%d, tickers=%d",
