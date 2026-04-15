@@ -8,6 +8,44 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 STD_EPSILON = 1e-12
 
+MIN_HISTORY_BY_FEATURE = {
+	"simple_return": 1,
+	"log_return": 1,
+	"return_lag_1": 2,
+	"return_lag_2": 3,
+	"return_lag_3": 4,
+	"return_lag_5": 6,
+	"return_lag_10": 11,
+	"volume_lag_1": 1,
+	"volume_lag_3": 3,
+	"volume_lag_5": 5,
+	"sma_10": 10,
+	"sma_20": 20,
+	"sma_50": 50,
+	"ema_12": 1,
+	"ema_26": 1,
+	"rsi_14": 14,
+	"macd": 1,
+	"macd_signal": 1,
+	"macd_hist": 1,
+	"rolling_std_10": 11,
+	"rolling_std_20": 21,
+	"atr_14": 15,
+	"volume_sma_10": 10,
+	"volume_sma_20": 20,
+	"volume_zscore": 20,
+	"zscore_volume_20": 20,
+	"price_vs_sma_10": 10,
+	"price_vs_sma_20": 20,
+	"price_vs_sma_50": 50,
+	"zscore_price_20": 20,
+	"rolling_mean_5": 5,
+	"rolling_mean_10": 10,
+	"rolling_max_10": 10,
+	"rolling_min_10": 10,
+	"true_range": 1,
+}
+
 
 def _compute_base_derived_features(df: pd.DataFrame) -> pd.DataFrame:
 	featured = df
@@ -318,6 +356,22 @@ def _validate_unique_ticker_date_pairs(df: pd.DataFrame) -> None:
 	)
 
 
+def _enforce_history_based_nan_consistency(df: pd.DataFrame) -> pd.DataFrame:
+	position_in_ticker = df.groupby("ticker", sort=False, group_keys=False).cumcount()
+
+	for column, min_history in MIN_HISTORY_BY_FEATURE.items():
+		if column in df.columns:
+			df.loc[position_in_ticker < min_history, column] = np.nan
+
+	return df
+
+
+def _cast_numeric_columns_to_float64(df: pd.DataFrame) -> pd.DataFrame:
+	numeric_columns = df.select_dtypes(include=["number"]).columns
+	df[numeric_columns] = df[numeric_columns].astype("float64")
+	return df
+
+
 def build_features_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 	featured = df.copy()
 	_validate_unique_ticker_date_pairs(featured)
@@ -332,6 +386,8 @@ def build_features_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 	featured = _add_relative_normalization_features(featured)
 	featured = _add_rolling_statistics_features(featured)
 	featured = _add_price_action_range_features(featured)
+	featured = _enforce_history_based_nan_consistency(featured)
+	featured = _cast_numeric_columns_to_float64(featured)
 
 	logger.info(
 		"build_features_dataframe: rows=%d, tickers=%d",
