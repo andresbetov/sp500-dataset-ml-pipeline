@@ -109,11 +109,54 @@ def _add_momentum_features(df: pd.DataFrame) -> pd.DataFrame:
 	return featured
 
 
+def _add_rolling_std_features(df: pd.DataFrame) -> pd.DataFrame:
+	featured = df.copy()
+	by_ticker_return = featured.groupby("ticker", sort=False)["simple_return"]
+
+	for window in (10, 20):
+		featured[f"rolling_std_{window}"] = (
+			by_ticker_return.transform(
+				lambda s: s.rolling(window=window, min_periods=window).std()
+			).astype("float64")
+		)
+
+	return featured
+
+
+def _compute_atr_14_by_ticker(df_ticker: pd.DataFrame) -> pd.Series:
+	high = df_ticker["high"]
+	low = df_ticker["low"]
+	prev_close = df_ticker["close"].shift(1)
+
+	true_range = pd.concat(
+		[(high - low), (high - prev_close).abs(), (low - prev_close).abs()],
+		axis=1,
+	).max(axis=1)
+
+	return true_range.rolling(window=14, min_periods=14).mean().astype("float64")
+
+
+def _add_atr_feature(df: pd.DataFrame) -> pd.DataFrame:
+	featured = df.copy()
+	featured["atr_14"] = (
+		featured.groupby("ticker", sort=False, group_keys=False)
+		.apply(_compute_atr_14_by_ticker)
+		.astype("float64")
+	)
+	return featured
+
+
+def _add_volatility_features(df: pd.DataFrame) -> pd.DataFrame:
+	with_rolling_std = _add_rolling_std_features(df)
+	return _add_atr_feature(with_rolling_std)
+
+
 def build_features_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 	featured = _compute_base_derived_features(df)
 	featured = _add_lag_features(featured)
 	featured = _add_trend_features(featured)
 	featured = _add_momentum_features(featured)
+	featured = _add_volatility_features(featured)
 
 	logger.info(
 		"build_features_dataframe: rows=%d, tickers=%d",
