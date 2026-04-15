@@ -52,7 +52,7 @@ def _add_sma_features(df: pd.DataFrame) -> pd.DataFrame:
 	for window in (10, 20, 50):
 		featured[f"sma_{window}"] = (
 			by_ticker_adj_close.transform(
-				lambda s: s.rolling(window=window, min_periods=window).mean()
+				lambda s: s.rolling(window=window, min_periods=window).mean().shift(1)
 			).astype("float64")
 		)
 
@@ -116,7 +116,7 @@ def _add_rolling_std_features(df: pd.DataFrame) -> pd.DataFrame:
 	for window in (10, 20):
 		featured[f"rolling_std_{window}"] = (
 			by_ticker_return.transform(
-				lambda s: s.rolling(window=window, min_periods=window).std()
+				lambda s: s.rolling(window=window, min_periods=window).std().shift(1)
 			).astype("float64")
 		)
 
@@ -150,7 +150,7 @@ def _add_atr_feature(df: pd.DataFrame) -> pd.DataFrame:
 
 	featured["atr_14"] = (
 		true_range.groupby(featured["ticker"], sort=False)
-		.transform(lambda s: s.rolling(window=14, min_periods=14).mean())
+		.transform(lambda s: s.rolling(window=14, min_periods=14).mean().shift(1))
 		.astype("float64")
 	)
 	return featured
@@ -168,7 +168,7 @@ def _add_volume_sma_features(df: pd.DataFrame) -> pd.DataFrame:
 	for window in (10, 20):
 		featured[f"volume_sma_{window}"] = (
 			by_ticker_volume.transform(
-				lambda s: s.rolling(window=window, min_periods=window).mean()
+				lambda s: s.rolling(window=window, min_periods=window).mean().shift(1)
 			).astype("float64")
 		)
 
@@ -180,10 +180,10 @@ def _add_volume_zscore_feature(df: pd.DataFrame) -> pd.DataFrame:
 	by_ticker_volume = featured.groupby("ticker", sort=False)["volume"]
 
 	rolling_mean_20 = by_ticker_volume.transform(
-		lambda s: s.rolling(window=20, min_periods=20).mean()
+		lambda s: s.rolling(window=20, min_periods=20).mean().shift(1)
 	)
 	rolling_std_20 = by_ticker_volume.transform(
-		lambda s: s.rolling(window=20, min_periods=20).std()
+		lambda s: s.rolling(window=20, min_periods=20).std().shift(1)
 	)
 	rolling_std_20 = rolling_std_20.mask(rolling_std_20 == 0)
 
@@ -216,10 +216,10 @@ def _add_price_zscore_feature(df: pd.DataFrame) -> pd.DataFrame:
 	by_ticker_adj_close = featured.groupby("ticker", sort=False)["adj_close"]
 
 	rolling_mean_20 = by_ticker_adj_close.transform(
-		lambda s: s.rolling(window=20, min_periods=20).mean()
+		lambda s: s.rolling(window=20, min_periods=20).mean().shift(1)
 	)
 	rolling_std_20 = by_ticker_adj_close.transform(
-		lambda s: s.rolling(window=20, min_periods=20).std()
+		lambda s: s.rolling(window=20, min_periods=20).std().shift(1)
 	)
 	rolling_std_20 = rolling_std_20.mask(rolling_std_20 == 0)
 
@@ -244,7 +244,7 @@ def _add_rolling_mean_features(df: pd.DataFrame) -> pd.DataFrame:
 	for window in (5, 10):
 		featured[f"rolling_mean_{window}"] = (
 			by_ticker_adj_close.transform(
-				lambda s: s.rolling(window=window, min_periods=window).mean()
+				lambda s: s.rolling(window=window, min_periods=window).mean().shift(1)
 			).astype("float64")
 		)
 
@@ -257,12 +257,12 @@ def _add_rolling_extreme_features(df: pd.DataFrame) -> pd.DataFrame:
 
 	featured["rolling_max_10"] = (
 		by_ticker_adj_close.transform(
-			lambda s: s.rolling(window=10, min_periods=10).max()
+			lambda s: s.rolling(window=10, min_periods=10).max().shift(1)
 		).astype("float64")
 	)
 	featured["rolling_min_10"] = (
 		by_ticker_adj_close.transform(
-			lambda s: s.rolling(window=10, min_periods=10).min()
+			lambda s: s.rolling(window=10, min_periods=10).min().shift(1)
 		).astype("float64")
 	)
 
