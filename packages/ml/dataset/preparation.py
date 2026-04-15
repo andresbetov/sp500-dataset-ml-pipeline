@@ -16,6 +16,7 @@ REQUIRED_COLUMNS = {
 
 PRICE_COLUMNS = {"open", "high", "low", "close", "adj close"}
 MIN_TRADING_DAYS = 500
+MAX_ZERO_VOLUME_RATIO = 0.05
 
 
 def _normalize_column_names(df: pd.DataFrame) -> pd.DataFrame:
@@ -64,11 +65,20 @@ def _filter_by_min_trading_days(df: pd.DataFrame) -> pd.DataFrame:
     return df.loc[trading_days >= MIN_TRADING_DAYS].reset_index(drop=True)
 
 
+def _filter_by_zero_volume_ratio(
+    df: pd.DataFrame,
+    max_zero_volume_ratio: float = MAX_ZERO_VOLUME_RATIO,
+) -> pd.DataFrame:
+    zero_volume_ratio = df["volume"].eq(0).groupby(df["ticker"]).transform("mean")
+    return df.loc[zero_volume_ratio <= max_zero_volume_ratio].reset_index(drop=True)
+
+
 def prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     normalized = _normalize_column_names(df)
     _validate_required_columns(normalized)
     _cast_columns(normalized)
     cleaned = _drop_invalid_ohlc_rows(normalized)
     deduplicated = _sort_and_deduplicate(cleaned)
-    return _filter_by_min_trading_days(deduplicated)
+    filtered_by_volume = _filter_by_zero_volume_ratio(deduplicated)
+    return _filter_by_min_trading_days(filtered_by_volume)
 
