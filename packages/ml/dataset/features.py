@@ -175,6 +175,7 @@ def _add_volume_zscore_feature(df: pd.DataFrame) -> pd.DataFrame:
 	rolling_std_20 = by_ticker_volume.transform(
 		lambda s: s.rolling(window=20, min_periods=20).std()
 	)
+	rolling_std_20 = rolling_std_20.mask(rolling_std_20 == 0)
 
 	featured["volume_zscore"] = (
 		(featured["volume"] - rolling_mean_20) / rolling_std_20
@@ -188,6 +189,44 @@ def _add_volume_features(df: pd.DataFrame) -> pd.DataFrame:
 	return _add_volume_zscore_feature(with_volume_sma)
 
 
+def _add_price_vs_sma_features(df: pd.DataFrame) -> pd.DataFrame:
+	featured = df.copy()
+
+	for window in (10, 20, 50):
+		sma_column = f"sma_{window}"
+		featured[f"price_vs_sma_{window}"] = (
+			featured["close"] / featured[sma_column]
+		).astype("float64")
+
+	return featured
+
+
+def _add_price_zscore_feature(df: pd.DataFrame) -> pd.DataFrame:
+	featured = df.copy()
+	by_ticker_close = featured.groupby("ticker", sort=False)["close"]
+
+	rolling_mean_20 = by_ticker_close.transform(
+		lambda s: s.rolling(window=20, min_periods=20).mean()
+	)
+	rolling_std_20 = by_ticker_close.transform(
+		lambda s: s.rolling(window=20, min_periods=20).std()
+	)
+	rolling_std_20 = rolling_std_20.mask(rolling_std_20 == 0)
+
+	featured["zscore_price_20"] = (
+		(featured["close"] - rolling_mean_20) / rolling_std_20
+	).astype("float64")
+
+	return featured
+
+
+def _add_relative_normalization_features(df: pd.DataFrame) -> pd.DataFrame:
+	with_price_vs_sma = _add_price_vs_sma_features(df)
+	with_price_zscore = _add_price_zscore_feature(with_price_vs_sma)
+	with_price_zscore["zscore_volume_20"] = with_price_zscore["volume_zscore"].astype("float64")
+	return with_price_zscore
+
+
 def build_features_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 	featured = _compute_base_derived_features(df)
 	featured = _add_lag_features(featured)
@@ -195,6 +234,7 @@ def build_features_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 	featured = _add_momentum_features(featured)
 	featured = _add_volatility_features(featured)
 	featured = _add_volume_features(featured)
+	featured = _add_relative_normalization_features(featured)
 
 	logger.info(
 		"build_features_dataframe: rows=%d, tickers=%d",
