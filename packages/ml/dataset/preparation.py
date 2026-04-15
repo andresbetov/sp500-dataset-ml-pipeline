@@ -40,6 +40,11 @@ def _cast_columns(df: pd.DataFrame) -> None:
     else:
         df["volume"] = volume_numeric.astype("float64")
 
+def _sort_and_deduplicate(df: pd.DataFrame) -> pd.DataFrame:
+    ordered = df.sort_values(by=["ticker", "date"])
+    unique = ordered.drop_duplicates(subset=["ticker", "date"], keep="first")
+    return unique.reset_index(drop=True)
+
 def _drop_invalid_ohlc_rows(df: pd.DataFrame) -> pd.DataFrame:
     valid_range = (df["high"] >= df["low"])
     valid_close = (df["close"] <= df["high"]) & (df["close"] >= df["low"])
@@ -52,5 +57,6 @@ def prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     _validate_required_columns(normalized)
     _cast_columns(normalized)
     cleaned = _drop_invalid_ohlc_rows(normalized)
-    return cleaned
+    deduplicated = _sort_and_deduplicate(cleaned)
+    return deduplicated
 
