@@ -2,4 +2,4 @@
 name = "sp500-dataset-ml-pipeline"
 version = "0.1.0"
 requires-python = ">=3.12"
-dependencies = ["kagglehub", "pandas", "pyarrow", "requests"]
+dependencies = ["kagglehub", "pandas", "pyarrow", "dagshub"]
