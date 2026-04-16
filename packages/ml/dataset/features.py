@@ -112,13 +112,13 @@ def _add_lag_features(df: pd.DataFrame) -> pd.DataFrame:
 def _add_ema_features(df: pd.DataFrame) -> pd.DataFrame:
 	featured = df
 	by_ticker_adj_close = featured.groupby("ticker", sort=False, group_keys=False)["adj_close"]
+	lagged_adj_close = by_ticker_adj_close.shift(1)
 
 	for span in (12, 26):
-		featured[f"ema_{span}"] = (
-			by_ticker_adj_close.transform(
-				lambda s: s.ewm(span=span, adjust=False).mean().shift(1)
-			).astype("float64")
+		ema_shifted = by_ticker_adj_close.transform(
+			lambda s: s.ewm(span=span, adjust=False).mean().shift(1)
 		)
+		featured[f"ema_{span}"] = (ema_shifted / lagged_adj_close).astype("float64")
 
 	return featured
 
@@ -142,6 +142,7 @@ def _compute_rsi_14(adj_close: pd.Series) -> pd.Series:
 def _add_momentum_features(df: pd.DataFrame) -> pd.DataFrame:
 	featured = df
 	by_ticker_adj_close = featured.groupby("ticker", sort=False, group_keys=False)["adj_close"]
+	lagged_adj_close = by_ticker_adj_close.shift(1)
 
 	rsi_raw = by_ticker_adj_close.transform(_compute_rsi_14)
 	featured["rsi_14"] = (
@@ -154,7 +155,8 @@ def _add_momentum_features(df: pd.DataFrame) -> pd.DataFrame:
 	ema_slow_aligned = by_ticker_adj_close.transform(
 		lambda s: s.ewm(span=26, adjust=False).mean().shift(1)
 	)
-	featured["macd"] = (ema_fast_aligned - ema_slow_aligned).astype("float64")
+	macd_raw = ema_fast_aligned - ema_slow_aligned
+	featured["macd"] = (macd_raw / lagged_adj_close).astype("float64")
 
 	featured["macd_signal"] = (
 		featured["macd"]
@@ -185,7 +187,8 @@ def _add_rolling_std_features(df: pd.DataFrame) -> pd.DataFrame:
 
 def _add_atr_feature(df: pd.DataFrame) -> pd.DataFrame:
 	featured = df
-	prev_adj_close = featured.groupby("ticker", sort=False, group_keys=False)["adj_close"].shift(1)
+	by_ticker_adj_close = featured.groupby("ticker", sort=False, group_keys=False)["adj_close"]
+	prev_adj_close = by_ticker_adj_close.shift(1)
 	true_range = pd.concat(
 		[
 			(featured["high"] - featured["low"]),
@@ -198,6 +201,7 @@ def _add_atr_feature(df: pd.DataFrame) -> pd.DataFrame:
 	featured["atr_14"] = (
 		true_range.groupby(featured["ticker"], sort=False, group_keys=False)
 		.transform(lambda s: s.rolling(window=14, min_periods=14).mean().shift(1))
+		.div(prev_adj_close)
 		.astype("float64")
 	)
 	return featured
@@ -283,12 +287,11 @@ def _add_legacy_feature_aliases(df: pd.DataFrame) -> pd.DataFrame:
 def _add_rolling_mean_features(df: pd.DataFrame) -> pd.DataFrame:
 	featured = df
 	by_ticker_adj_close = featured.groupby("ticker", sort=False, group_keys=False)["adj_close"]
-
-	featured["rolling_mean_5"] = (
-		by_ticker_adj_close.transform(
-			lambda s: s.rolling(window=5, min_periods=5).mean().shift(1)
-		).astype("float64")
+	lagged_adj_close = by_ticker_adj_close.shift(1)
+	rolling_mean_5 = by_ticker_adj_close.transform(
+		lambda s: s.rolling(window=5, min_periods=5).mean().shift(1)
 	)
+	featured["rolling_mean_5"] = (rolling_mean_5 / lagged_adj_close).astype("float64")
 
 	return featured
 
@@ -296,16 +299,17 @@ def _add_rolling_mean_features(df: pd.DataFrame) -> pd.DataFrame:
 def _add_rolling_extreme_features(df: pd.DataFrame) -> pd.DataFrame:
 	featured = df
 	by_ticker_adj_close = featured.groupby("ticker", sort=False, group_keys=False)["adj_close"]
+	lagged_adj_close = by_ticker_adj_close.shift(1)
 
 	featured["rolling_max_10"] = (
 		by_ticker_adj_close.transform(
 			lambda s: s.rolling(window=10, min_periods=10).max().shift(1)
-		).astype("float64")
+		).div(lagged_adj_close).astype("float64")
 	)
 	featured["rolling_min_10"] = (
 		by_ticker_adj_close.transform(
 			lambda s: s.rolling(window=10, min_periods=10).min().shift(1)
-		).astype("float64")
+		).div(lagged_adj_close).astype("float64")
 	)
 
 	return featured
