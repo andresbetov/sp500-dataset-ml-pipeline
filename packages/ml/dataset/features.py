@@ -43,7 +43,6 @@ MIN_HISTORY_BY_FEATURE = {
 	"rolling_mean_10": 11,
 	"rolling_max_10": 11,
 	"rolling_min_10": 11,
-	"true_range": 1,
 }
 
 
@@ -324,26 +323,8 @@ def _add_basic_range_features(df: pd.DataFrame) -> pd.DataFrame:
 	return featured
 
 
-def _add_true_range_feature(df: pd.DataFrame) -> pd.DataFrame:
-	featured = df
-	prev_adj_close = featured.groupby("ticker", sort=False, group_keys=False)["adj_close"].shift(1)
-	true_range_raw = pd.concat(
-		[
-			(featured["high"] - featured["low"]),
-			(featured["high"] - prev_adj_close).abs(),
-			(featured["low"] - prev_adj_close).abs(),
-		],
-		axis=1,
-	).max(axis=1)
-	featured["true_range"] = (
-		true_range_raw.groupby(featured["ticker"], sort=False, group_keys=False).shift(1).astype("float64")
-	)
-	return featured
-
-
 def _add_price_action_range_features(df: pd.DataFrame) -> pd.DataFrame:
-	with_basic_ranges = _add_basic_range_features(df)
-	return _add_true_range_feature(with_basic_ranges)
+	return _add_basic_range_features(df)
 
 
 def _validate_unique_ticker_date_pairs(df: pd.DataFrame) -> None:
