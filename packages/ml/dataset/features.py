@@ -7,7 +7,6 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 STD_EPSILON = 1e-12
-MAX_ABS_ZSCORE = 8.0
 
 MIN_HISTORY_BY_FEATURE = {
 	"simple_return": 1,
@@ -64,7 +63,7 @@ def _compute_stable_rolling_zscore(
 
 	zscore = ((values - rolling_mean) / rolling_std).astype("float64")
 	zscore = zscore.replace([np.inf, -np.inf], np.nan)
-	return zscore.clip(lower=-MAX_ABS_ZSCORE, upper=MAX_ABS_ZSCORE).astype("float64")
+	return zscore.astype("float64")
 
 
 def _compute_base_derived_features(df: pd.DataFrame) -> pd.DataFrame:
