@@ -327,14 +327,17 @@ def _add_basic_range_features(df: pd.DataFrame) -> pd.DataFrame:
 def _add_true_range_feature(df: pd.DataFrame) -> pd.DataFrame:
 	featured = df
 	prev_adj_close = featured.groupby("ticker", sort=False, group_keys=False)["adj_close"].shift(1)
-	featured["true_range"] = pd.concat(
+	true_range_raw = pd.concat(
 		[
 			(featured["high"] - featured["low"]),
 			(featured["high"] - prev_adj_close).abs(),
 			(featured["low"] - prev_adj_close).abs(),
 		],
 		axis=1,
-	).max(axis=1).astype("float64")
+	).max(axis=1)
+	featured["true_range"] = (
+		true_range_raw.groupby(featured["ticker"], sort=False, group_keys=False).shift(1).astype("float64")
+	)
 	return featured
 
 
