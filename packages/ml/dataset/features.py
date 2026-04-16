@@ -320,7 +320,6 @@ def _add_rolling_statistics_features(df: pd.DataFrame) -> pd.DataFrame:
 def _add_basic_range_features(df: pd.DataFrame) -> pd.DataFrame:
 	featured = df
 	featured["high_low_range"] = (featured["high"] - featured["low"]).astype("float64")
-	featured["close_open_range"] = (featured["adj_close"] - featured["open"]).astype("float64")
 	return featured
 
 
