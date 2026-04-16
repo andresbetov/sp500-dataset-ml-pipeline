@@ -161,17 +161,18 @@ def _add_momentum_features(df: pd.DataFrame) -> pd.DataFrame:
 		rsi_raw.groupby(featured["ticker"], sort=False, group_keys=False).shift(1).astype("float64")
 	)
 
-	ema_fast_raw = by_ticker_adj_close.transform(lambda s: s.ewm(span=12, adjust=False).mean())
-	ema_slow_raw = by_ticker_adj_close.transform(lambda s: s.ewm(span=26, adjust=False).mean())
-	macd_raw = ema_fast_raw - ema_slow_raw
-	featured["macd"] = macd_raw.groupby(featured["ticker"], sort=False, group_keys=False).shift(1).astype("float64")
-
-	macd_signal_raw = (
-		macd_raw.groupby(featured["ticker"], sort=False, group_keys=False)
-		.transform(lambda s: s.ewm(span=9, adjust=False).mean())
+	ema_fast_aligned = by_ticker_adj_close.transform(
+		lambda s: s.ewm(span=12, adjust=False).mean().shift(1)
 	)
+	ema_slow_aligned = by_ticker_adj_close.transform(
+		lambda s: s.ewm(span=26, adjust=False).mean().shift(1)
+	)
+	featured["macd"] = (ema_fast_aligned - ema_slow_aligned).astype("float64")
+
 	featured["macd_signal"] = (
-		macd_signal_raw.groupby(featured["ticker"], sort=False, group_keys=False).shift(1)
+		featured["macd"]
+		.groupby(featured["ticker"], sort=False, group_keys=False)
+		.transform(lambda s: s.ewm(span=9, adjust=False).mean())
 		.astype("float64")
 	)
 
