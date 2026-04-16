@@ -19,9 +19,6 @@ MIN_HISTORY_BY_FEATURE = {
 	"volume_lag_1": 1,
 	"volume_lag_3": 3,
 	"volume_lag_5": 5,
-	"sma_10": 11,
-	"sma_20": 21,
-	"sma_50": 51,
 	"ema_12": 1,
 	"ema_26": 1,
 	"rsi_14": 28,
@@ -112,20 +109,6 @@ def _add_lag_features(df: pd.DataFrame) -> pd.DataFrame:
 	return _add_volume_lags(with_return_lags)
 
 
-def _add_sma_features(df: pd.DataFrame) -> pd.DataFrame:
-	featured = df
-	by_ticker_adj_close = featured.groupby("ticker", sort=False, group_keys=False)["adj_close"]
-
-	for window in (10, 20, 50):
-		featured[f"sma_{window}"] = (
-			by_ticker_adj_close.transform(
-				lambda s: s.rolling(window=window, min_periods=window).mean().shift(1)
-			).astype("float64")
-		)
-
-	return featured
-
-
 def _add_ema_features(df: pd.DataFrame) -> pd.DataFrame:
 	featured = df
 	by_ticker_adj_close = featured.groupby("ticker", sort=False, group_keys=False)["adj_close"]
@@ -141,8 +124,7 @@ def _add_ema_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _add_trend_features(df: pd.DataFrame) -> pd.DataFrame:
-	with_sma = _add_sma_features(df)
-	return _add_ema_features(with_sma)
+	return _add_ema_features(df)
 
 
 def _compute_rsi_14(adj_close: pd.Series) -> pd.Series:
@@ -258,11 +240,14 @@ def _add_volume_features(df: pd.DataFrame) -> pd.DataFrame:
 
 def _add_price_vs_sma_features(df: pd.DataFrame) -> pd.DataFrame:
 	featured = df
+	by_ticker_adj_close = featured.groupby("ticker", sort=False, group_keys=False)["adj_close"]
 
 	for window in (10, 20, 50):
-		sma_column = f"sma_{window}"
+		lagged_sma = by_ticker_adj_close.transform(
+			lambda s: s.rolling(window=window, min_periods=window).mean().shift(1)
+		)
 		featured[f"price_vs_sma_{window}"] = (
-			featured["adj_close"] / featured[sma_column]
+			featured["adj_close"] / lagged_sma
 		).astype("float64")
 
 	return featured
