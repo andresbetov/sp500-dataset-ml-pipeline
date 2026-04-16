@@ -156,7 +156,10 @@ def _add_momentum_features(df: pd.DataFrame) -> pd.DataFrame:
 	featured = df
 	by_ticker_adj_close = featured.groupby("ticker", sort=False, group_keys=False)["adj_close"]
 
-	featured["rsi_14"] = by_ticker_adj_close.transform(_compute_rsi_14).astype("float64")
+	rsi_raw = by_ticker_adj_close.transform(_compute_rsi_14)
+	featured["rsi_14"] = (
+		rsi_raw.groupby(featured["ticker"], sort=False, group_keys=False).shift(1).astype("float64")
+	)
 
 	ema_fast_raw = by_ticker_adj_close.transform(lambda s: s.ewm(span=12, adjust=False).mean())
 	ema_slow_raw = by_ticker_adj_close.transform(lambda s: s.ewm(span=26, adjust=False).mean())
