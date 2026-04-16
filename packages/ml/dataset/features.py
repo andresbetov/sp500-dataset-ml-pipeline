@@ -38,7 +38,7 @@ MIN_HISTORY_BY_FEATURE = {
 	"price_vs_sma_10": 11,
 	"price_vs_sma_20": 21,
 	"price_vs_sma_50": 51,
-	"zscore_price_20": 21,
+	"zscore_price_20": 41,
 	"rolling_mean_5": 6,
 	"rolling_mean_10": 11,
 	"rolling_max_10": 11,
@@ -264,8 +264,11 @@ def _add_price_vs_sma_features(df: pd.DataFrame) -> pd.DataFrame:
 
 def _add_price_zscore_feature(df: pd.DataFrame) -> pd.DataFrame:
 	featured = df
+	if "price_vs_sma_20" not in featured.columns:
+		raise ValueError("Column 'price_vs_sma_20' is required before computing zscore_price_20")
+
 	featured["zscore_price_20"] = _compute_stable_rolling_zscore(
-		values=featured["adj_close"],
+		values=featured["price_vs_sma_20"],
 		group_labels=featured["ticker"],
 		window=20,
 	)
