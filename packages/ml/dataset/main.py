@@ -4,9 +4,9 @@ from pathlib import Path
 
 import pandas as pd
 
-from .loader import load_dataframe
-from .preparation import prepare_dataframe
-from .features import build_features_dataframe
+from loader import load_dataframe
+from preparation import prepare_dataframe
+from features import build_features_dataframe
 
 
 DEFAULT_PARQUET_PATH = Path("data/processed/sp500_features.parquet")
