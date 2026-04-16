@@ -28,21 +28,27 @@ MIN_HISTORY_BY_FEATURE = {
 	"macd": 1,
 	"macd_signal": 1,
 	"macd_hist": 1,
-	"rolling_std_10": 12,
-	"rolling_std_20": 22,
+	"log_return_std_10": 12,
+	"log_return_std_20": 22,
 	"atr_14": 16,
 	"volume_sma_10": 11,
 	"volume_sma_20": 21,
-	"volume_zscore": 21,
 	"zscore_volume_20": 21,
 	"price_vs_sma_10": 11,
 	"price_vs_sma_20": 21,
 	"price_vs_sma_50": 51,
-	"zscore_price_20": 41,
+	"zscore_price_vs_sma_20": 41,
 	"rolling_mean_5": 6,
 	"rolling_mean_10": 11,
 	"rolling_max_10": 11,
 	"rolling_min_10": 11,
+}
+
+LEGACY_FEATURE_ALIASES = {
+	"rolling_std_10": "log_return_std_10",
+	"rolling_std_20": "log_return_std_20",
+	"volume_zscore": "zscore_volume_20",
+	"zscore_price_20": "zscore_price_vs_sma_20",
 }
 
 
@@ -185,7 +191,7 @@ def _add_rolling_std_features(df: pd.DataFrame) -> pd.DataFrame:
 	by_ticker_return = featured.groupby("ticker", sort=False, group_keys=False)["log_return"]
 
 	for window in (10, 20):
-		featured[f"rolling_std_{window}"] = (
+		featured[f"log_return_std_{window}"] = (
 			by_ticker_return.transform(
 				lambda s: s.rolling(window=window, min_periods=window).std().shift(1)
 			).astype("float64")
@@ -236,7 +242,7 @@ def _add_volume_sma_features(df: pd.DataFrame) -> pd.DataFrame:
 
 def _add_volume_zscore_feature(df: pd.DataFrame) -> pd.DataFrame:
 	featured = df
-	featured["volume_zscore"] = _compute_stable_rolling_zscore(
+	featured["zscore_volume_20"] = _compute_stable_rolling_zscore(
 		values=featured["volume"],
 		group_labels=featured["ticker"],
 		window=20,
@@ -265,9 +271,9 @@ def _add_price_vs_sma_features(df: pd.DataFrame) -> pd.DataFrame:
 def _add_price_zscore_feature(df: pd.DataFrame) -> pd.DataFrame:
 	featured = df
 	if "price_vs_sma_20" not in featured.columns:
-		raise ValueError("Column 'price_vs_sma_20' is required before computing zscore_price_20")
+		raise ValueError("Column 'price_vs_sma_20' is required before computing zscore_price_vs_sma_20")
 
-	featured["zscore_price_20"] = _compute_stable_rolling_zscore(
+	featured["zscore_price_vs_sma_20"] = _compute_stable_rolling_zscore(
 		values=featured["price_vs_sma_20"],
 		group_labels=featured["ticker"],
 		window=20,
@@ -279,8 +285,14 @@ def _add_price_zscore_feature(df: pd.DataFrame) -> pd.DataFrame:
 def _add_relative_normalization_features(df: pd.DataFrame) -> pd.DataFrame:
 	with_price_vs_sma = _add_price_vs_sma_features(df)
 	with_price_zscore = _add_price_zscore_feature(with_price_vs_sma)
-	with_price_zscore["zscore_volume_20"] = with_price_zscore["volume_zscore"].astype("float64")
 	return with_price_zscore
+
+
+def _add_legacy_feature_aliases(df: pd.DataFrame) -> pd.DataFrame:
+	for legacy_name, canonical_name in LEGACY_FEATURE_ALIASES.items():
+		if canonical_name in df.columns:
+			df[legacy_name] = df[canonical_name]
+	return df
 
 
 def _add_rolling_mean_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -402,6 +414,7 @@ def build_features_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 	featured = _add_price_action_range_features(featured)
 	featured = _enforce_history_based_nan_consistency(featured)
 	featured = _cast_numeric_columns_to_float64(featured)
+	featured = _add_legacy_feature_aliases(featured)
 	featured = _sort_stably_by_ticker_date(featured)
 	featured = _reorder_columns_deterministically(featured)
 
