@@ -7,6 +7,16 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 STD_EPSILON = 1e-12
+PRICE_TOLERANCE = 1e-10
+
+ADJUSTED_OHLC_OPEN_COLUMN = "_adj_open"
+ADJUSTED_OHLC_HIGH_COLUMN = "_adj_high"
+ADJUSTED_OHLC_LOW_COLUMN = "_adj_low"
+INTERNAL_FEATURE_COLUMNS = (
+	ADJUSTED_OHLC_OPEN_COLUMN,
+	ADJUSTED_OHLC_HIGH_COLUMN,
+	ADJUSTED_OHLC_LOW_COLUMN,
+)
 
 MIN_HISTORY_BY_FEATURE = {
 	"simple_return": 1,
@@ -54,13 +64,23 @@ def _compute_stable_rolling_zscore(
 	group_labels: pd.Series,
 	window: int,
 ) -> pd.Series:
+	if window < 1:
+		raise ValueError(f"window must be >= 1, got {window}")
+	if len(values) != len(group_labels):
+		raise ValueError(
+			"values and group_labels must have the same length: "
+			f"len(values)={len(values)}, len(group_labels)={len(group_labels)}"
+		)
+	if not values.index.equals(group_labels.index):
+		raise ValueError("values and group_labels must share the same index")
+
 	grouped_values = values.groupby(group_labels, sort=False, group_keys=False)
 	rolling_mean = grouped_values.transform(
-		lambda s: s.rolling(window=window, min_periods=window).mean()
-	).shift(1)
+		lambda s: s.rolling(window=window, min_periods=window).mean().shift(1)
+	)
 	rolling_std = grouped_values.transform(
-		lambda s: s.rolling(window=window, min_periods=window).std()
-	).shift(1)
+		lambda s: s.rolling(window=window, min_periods=window).std().shift(1)
+	)
 	rolling_std = rolling_std.astype("float64")
 	rolling_std = rolling_std.where(rolling_std.abs() > STD_EPSILON, np.nan)
 
@@ -82,6 +102,47 @@ def _compute_base_derived_features(df: pd.DataFrame) -> pd.DataFrame:
 	featured["log_return"] = (
 		featured.groupby("ticker", sort=False, group_keys=False)["log_price"].diff().astype("float64")
 	)
+
+	return featured
+
+
+def _add_adjusted_ohlc_columns(df: pd.DataFrame) -> pd.DataFrame:
+	featured = df
+	required_columns = {"open", "high", "low", "close", "adj_close"}
+	missing_columns = required_columns - set(featured.columns)
+	if missing_columns:
+		missing_list = ", ".join(sorted(missing_columns))
+		raise ValueError(f"Columns required to compute adjusted OHLC are missing: {missing_list}")
+
+	invalid_close = featured["close"] <= 0
+	invalid_adj_close = featured["adj_close"] <= 0
+	if invalid_close.any() or invalid_adj_close.any():
+		raise ValueError("Columns 'close' and 'adj_close' must be strictly positive")
+
+	adjustment_factor = (featured["adj_close"] / featured["close"]).astype("float64")
+	if not np.isfinite(adjustment_factor).all():
+		raise ValueError("Adjusted OHLC factor produced non-finite values")
+
+	featured[ADJUSTED_OHLC_OPEN_COLUMN] = (featured["open"] * adjustment_factor).astype("float64")
+	featured[ADJUSTED_OHLC_HIGH_COLUMN] = (featured["high"] * adjustment_factor).astype("float64")
+	featured[ADJUSTED_OHLC_LOW_COLUMN] = (featured["low"] * adjustment_factor).astype("float64")
+
+	valid_range = featured[ADJUSTED_OHLC_HIGH_COLUMN] >= (featured[ADJUSTED_OHLC_LOW_COLUMN] - PRICE_TOLERANCE)
+	valid_open = (
+		(featured[ADJUSTED_OHLC_OPEN_COLUMN] <= (featured[ADJUSTED_OHLC_HIGH_COLUMN] + PRICE_TOLERANCE))
+		& (featured[ADJUSTED_OHLC_OPEN_COLUMN] >= (featured[ADJUSTED_OHLC_LOW_COLUMN] - PRICE_TOLERANCE))
+	)
+	valid_close = (
+		(featured["adj_close"] <= (featured[ADJUSTED_OHLC_HIGH_COLUMN] + PRICE_TOLERANCE))
+		& (featured["adj_close"] >= (featured[ADJUSTED_OHLC_LOW_COLUMN] - PRICE_TOLERANCE))
+	)
+	valid_rows = valid_range & valid_open & valid_close
+	if not valid_rows.all():
+		invalid_count = int((~valid_rows).sum())
+		raise ValueError(
+			"Adjusted OHLC consistency validation failed after aligning to adj_close: "
+			f"invalid_rows={invalid_count}"
+		)
 
 	return featured
 
@@ -187,13 +248,19 @@ def _add_rolling_std_features(df: pd.DataFrame) -> pd.DataFrame:
 
 def _add_atr_feature(df: pd.DataFrame) -> pd.DataFrame:
 	featured = df
+	required_columns = {ADJUSTED_OHLC_HIGH_COLUMN, ADJUSTED_OHLC_LOW_COLUMN}
+	missing_columns = required_columns - set(featured.columns)
+	if missing_columns:
+		missing_list = ", ".join(sorted(missing_columns))
+		raise ValueError(f"Adjusted OHLC columns are required before ATR computation: {missing_list}")
+
 	by_ticker_adj_close = featured.groupby("ticker", sort=False, group_keys=False)["adj_close"]
 	prev_adj_close = by_ticker_adj_close.shift(1)
 	true_range = pd.concat(
 		[
-			(featured["high"] - featured["low"]),
-			(featured["high"] - prev_adj_close).abs(),
-			(featured["low"] - prev_adj_close).abs(),
+			(featured[ADJUSTED_OHLC_HIGH_COLUMN] - featured[ADJUSTED_OHLC_LOW_COLUMN]),
+			(featured[ADJUSTED_OHLC_HIGH_COLUMN] - prev_adj_close).abs(),
+			(featured[ADJUSTED_OHLC_LOW_COLUMN] - prev_adj_close).abs(),
 		],
 		axis=1,
 	).max(axis=1)
@@ -322,7 +389,15 @@ def _add_rolling_statistics_features(df: pd.DataFrame) -> pd.DataFrame:
 
 def _add_basic_range_features(df: pd.DataFrame) -> pd.DataFrame:
 	featured = df
-	relative_range_raw = (featured["high"] - featured["low"]) / featured["adj_close"]
+	required_columns = {ADJUSTED_OHLC_HIGH_COLUMN, ADJUSTED_OHLC_LOW_COLUMN}
+	missing_columns = required_columns - set(featured.columns)
+	if missing_columns:
+		missing_list = ", ".join(sorted(missing_columns))
+		raise ValueError(f"Adjusted OHLC columns are required before range computation: {missing_list}")
+
+	relative_range_raw = (
+		featured[ADJUSTED_OHLC_HIGH_COLUMN] - featured[ADJUSTED_OHLC_LOW_COLUMN]
+	) / featured["adj_close"]
 	featured["high_low_range"] = (
 		relative_range_raw.groupby(featured["ticker"], sort=False, group_keys=False).shift(1).astype("float64")
 	)
@@ -353,6 +428,30 @@ def _validate_unique_ticker_date_pairs(df: pd.DataFrame) -> None:
 	)
 
 
+def _normalize_and_validate_date_column(df: pd.DataFrame) -> pd.DataFrame:
+	if "date" not in df.columns:
+		raise ValueError("Column 'date' is required before feature generation")
+
+	date_values = df["date"]
+	if pd.api.types.is_datetime64_any_dtype(date_values):
+		parsed_date = date_values
+	else:
+		try:
+			parsed_date = pd.to_datetime(date_values, errors="raise", format="mixed")
+		except Exception as error:
+			raise ValueError("Column 'date' must be parseable as datetime") from error
+
+	if not pd.api.types.is_datetime64_any_dtype(parsed_date):
+		raise ValueError("Column 'date' must be datetime-like after parsing")
+	if isinstance(parsed_date.dtype, pd.DatetimeTZDtype):
+		raise ValueError("Column 'date' must be timezone-naive")
+	if parsed_date.isna().any():
+		raise ValueError("Column 'date' contains invalid or missing datetime values")
+
+	df["date"] = parsed_date.dt.normalize()
+	return df
+
+
 def _enforce_history_based_nan_consistency(df: pd.DataFrame) -> pd.DataFrame:
 	position_in_ticker = df.groupby("ticker", sort=False, group_keys=False).cumcount()
 
@@ -369,6 +468,13 @@ def _cast_numeric_columns_to_float64(df: pd.DataFrame) -> pd.DataFrame:
 	return df
 
 
+def _drop_internal_feature_columns(df: pd.DataFrame) -> pd.DataFrame:
+	columns_to_drop = [column for column in INTERNAL_FEATURE_COLUMNS if column in df.columns]
+	if columns_to_drop:
+		df.drop(columns=columns_to_drop, inplace=True)
+	return df
+
+
 def _sort_stably_by_ticker_date(df: pd.DataFrame) -> pd.DataFrame:
 	df.sort_values(["ticker", "date"], kind="mergesort", inplace=True)
 	df.reset_index(drop=True, inplace=True)
@@ -382,6 +488,7 @@ def _reorder_columns_deterministically(df: pd.DataFrame) -> pd.DataFrame:
 		"open",
 		"high",
 		"low",
+		"close",
 		"adj_close",
 		"volume",
 	]
@@ -392,8 +499,10 @@ def _reorder_columns_deterministically(df: pd.DataFrame) -> pd.DataFrame:
 
 def build_features_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 	featured = df.copy()
+	featured = _normalize_and_validate_date_column(featured)
 	_validate_unique_ticker_date_pairs(featured)
 	featured = _sort_stably_by_ticker_date(featured)
+	featured = _add_adjusted_ohlc_columns(featured)
 	featured = _compute_base_derived_features(featured)
 	featured = _add_lag_features(featured)
 	featured = _add_trend_features(featured)
@@ -403,6 +512,7 @@ def build_features_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 	featured = _add_relative_normalization_features(featured)
 	featured = _add_rolling_statistics_features(featured)
 	featured = _add_price_action_range_features(featured)
+	featured = _drop_internal_feature_columns(featured)
 	featured = _enforce_history_based_nan_consistency(featured)
 	featured = _cast_numeric_columns_to_float64(featured)
 	featured = _add_legacy_feature_aliases(featured)
