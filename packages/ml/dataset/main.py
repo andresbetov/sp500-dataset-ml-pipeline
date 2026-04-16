@@ -29,6 +29,3 @@ def get_dataframe(
     _save_parquet(featured, output_path=parquet_path)
     return featured
 
-
-if __name__ == "__main__":
-    print(get_dataframe().head())
