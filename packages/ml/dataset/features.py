@@ -183,7 +183,7 @@ def _add_momentum_features(df: pd.DataFrame) -> pd.DataFrame:
 
 def _add_rolling_std_features(df: pd.DataFrame) -> pd.DataFrame:
 	featured = df
-	by_ticker_return = featured.groupby("ticker", sort=False, group_keys=False)["simple_return"]
+	by_ticker_return = featured.groupby("ticker", sort=False, group_keys=False)["log_return"]
 
 	for window in (10, 20):
 		featured[f"rolling_std_{window}"] = (
