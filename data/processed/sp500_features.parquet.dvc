@@ -1,0 +1,5 @@
+outs:
+- md5: 38a161408639cc3e8b4c5e4d39447d81
+  size: 754316524
+  hash: md5
+  path: sp500_features.parquet
