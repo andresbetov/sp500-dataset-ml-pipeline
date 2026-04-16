@@ -24,7 +24,7 @@ MIN_HISTORY_BY_FEATURE = {
 	"sma_50": 51,
 	"ema_12": 1,
 	"ema_26": 1,
-	"rsi_14": 14,
+	"rsi_14": 28,
 	"macd": 1,
 	"macd_signal": 1,
 	"macd_hist": 1,
