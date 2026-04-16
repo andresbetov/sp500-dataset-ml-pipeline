@@ -36,7 +36,6 @@ MIN_HISTORY_BY_FEATURE = {
 	"price_vs_sma_50": 51,
 	"zscore_price_vs_sma_20": 41,
 	"rolling_mean_5": 6,
-	"rolling_mean_10": 11,
 	"rolling_max_10": 11,
 	"rolling_min_10": 11,
 }
@@ -284,12 +283,11 @@ def _add_rolling_mean_features(df: pd.DataFrame) -> pd.DataFrame:
 	featured = df
 	by_ticker_adj_close = featured.groupby("ticker", sort=False, group_keys=False)["adj_close"]
 
-	for window in (5, 10):
-		featured[f"rolling_mean_{window}"] = (
-			by_ticker_adj_close.transform(
-				lambda s: s.rolling(window=window, min_periods=window).mean().shift(1)
-			).astype("float64")
-		)
+	featured["rolling_mean_5"] = (
+		by_ticker_adj_close.transform(
+			lambda s: s.rolling(window=5, min_periods=5).mean().shift(1)
+		).astype("float64")
+	)
 
 	return featured
 
