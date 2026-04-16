@@ -59,7 +59,8 @@ def _compute_stable_rolling_zscore(
 	rolling_std = grouped_values.transform(
 		lambda s: s.rolling(window=window, min_periods=window).std()
 	).shift(1)
-	rolling_std = rolling_std.mask(rolling_std.abs() <= STD_EPSILON)
+	rolling_std = rolling_std.astype("float64")
+	rolling_std = rolling_std.where(rolling_std.abs() > STD_EPSILON, np.nan)
 
 	zscore = ((values - rolling_mean) / rolling_std).astype("float64")
 	zscore = zscore.replace([np.inf, -np.inf], np.nan)
