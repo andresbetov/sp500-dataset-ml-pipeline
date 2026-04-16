@@ -11,11 +11,12 @@ REQUIRED_COLUMNS = {
     "open",
     "high",
     "low",
+    "close",
     "adj_close",
     "volume",
 }
 
-PRICE_COLUMNS = {"open", "high", "low", "adj_close"}
+PRICE_COLUMNS = {"open", "high", "low", "close", "adj_close"}
 MIN_TRADING_DAYS = 500
 MAX_ZERO_VOLUME_RATIO = 0.05
 
@@ -79,7 +80,7 @@ def _sort_and_deduplicate(df: pd.DataFrame) -> pd.DataFrame:
 def _drop_invalid_ohlc_rows(df: pd.DataFrame) -> pd.DataFrame:
     rows_in = len(df)
     valid_range = (df["high"] >= df["low"])
-    valid_close = (df["adj_close"] <= df["high"]) & (df["adj_close"] >= df["low"])
+    valid_close = (df["close"] <= df["high"]) & (df["close"] >= df["low"])
     valid_open = (df["open"] <= df["high"]) & (df["open"] >= df["low"])
     valid_rows = valid_range & valid_close & valid_open
     filtered = df.loc[valid_rows].reset_index(drop=True)
@@ -149,4 +150,3 @@ def prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         prepared["ticker"].nunique(),
     )
     return prepared
-
