@@ -38,6 +38,7 @@ MIN_HISTORY_BY_FEATURE = {
 	"rolling_mean_5": 6,
 	"rolling_max_10": 11,
 	"rolling_min_10": 11,
+	"high_low_range": 1,
 }
 
 LEGACY_FEATURE_ALIASES = {
@@ -317,7 +318,10 @@ def _add_rolling_statistics_features(df: pd.DataFrame) -> pd.DataFrame:
 
 def _add_basic_range_features(df: pd.DataFrame) -> pd.DataFrame:
 	featured = df
-	featured["high_low_range"] = (featured["high"] - featured["low"]).astype("float64")
+	relative_range_raw = (featured["high"] - featured["low"]) / featured["adj_close"]
+	featured["high_low_range"] = (
+		relative_range_raw.groupby(featured["ticker"], sort=False, group_keys=False).shift(1).astype("float64")
+	)
 	return featured
 
 
