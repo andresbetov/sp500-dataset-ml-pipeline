@@ -13,17 +13,17 @@ PROJECT_ROOT = SCRIPT_DIR.parent.parent.parent
 DEFAULT_FILE_DIRECTORY = PROJECT_ROOT / "data" / "processed"
 
 
-def _save_dataframe_parquet(df: pd.DataFrame, file_name: str) -> None:
+def _save_parquet(df: pd.DataFrame, file_name: str) -> None:
     file_path = Path(DEFAULT_FILE_DIRECTORY / (file_name + ".parquet"))
     file_path.parent.mkdir(parents=True, exist_ok=True)
     df.to_parquet(file_path, index=False)
 
 
-def build_featured_dataset(
+def generate_featured_dataset(
     file_name: str | None = None,
 ) -> None:
-    loaded = load_dataframe(file_name=file_name)
-    prepared = prepare_dataframe(loaded)
-    featured = build_features_dataframe(prepared)
-    featured = featured.dropna()
-    _save_dataframe_parquet(featured, "featured")
+    raw_df = load_dataframe(file_name=file_name)
+    prepared_df = prepare_dataframe(raw_df)
+    featured_df = build_features_dataframe(prepared_df)
+    featured_df = featured_df.dropna()
+    _save_parquet(featured_df, "featured")
