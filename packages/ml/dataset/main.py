@@ -26,5 +26,5 @@ def get_dataframe(
     prepared = prepare_dataframe(loaded)
     featured = build_features_dataframe(prepared)
     featured = featured.dropna()
-    _save_file(featured, "featured", file_type="csv")
+    _save_dataframe_parquet(featured, "featured")
     return featured
