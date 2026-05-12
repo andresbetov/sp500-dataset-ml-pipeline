@@ -13,7 +13,7 @@ PROJECT_ROOT = SCRIPT_DIR.parent.parent.parent
 DEFAULT_FILE_DIRECTORY = PROJECT_ROOT / "data" / "processed"
 
 
-def _save_parquet(df: pd.DataFrame, file_name: str) -> None:
+def _save_dataframe_parquet(df: pd.DataFrame, file_name: str) -> None:
     file_path = Path(DEFAULT_FILE_DIRECTORY / (file_name + ".parquet"))
     file_path.parent.mkdir(parents=True, exist_ok=True)
     df.to_parquet(file_path, index=False)
