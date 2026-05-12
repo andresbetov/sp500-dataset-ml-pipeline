@@ -32,5 +32,6 @@ def get_dataframe(
     loaded = load_dataframe(file_name=file_name)
     prepared = prepare_dataframe(loaded)
     featured = build_features_dataframe(prepared)
+    featured = featured.dropna()
     _save_file(featured, "featured", file_type="csv")
     return featured
