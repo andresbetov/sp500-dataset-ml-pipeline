@@ -26,4 +26,4 @@ def generate_featured_dataset(
     prepared_df = prepare_dataframe(raw_df)
     featured_df = build_features_dataframe(prepared_df)
     featured_df = featured_df.dropna()
-    _save_parquet(featured_df, "featured")
+    _save_parquet(featured_df, "dataset")
