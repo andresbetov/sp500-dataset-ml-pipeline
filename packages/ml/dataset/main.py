@@ -19,12 +19,11 @@ def _save_dataframe_parquet(df: pd.DataFrame, file_name: str) -> None:
     df.to_parquet(file_path, index=False)
 
 
-def get_dataframe(
+def build_featured_dataset(
     file_name: str | None = None,
-) -> pd.DataFrame:
+) -> None:
     loaded = load_dataframe(file_name=file_name)
     prepared = prepare_dataframe(loaded)
     featured = build_features_dataframe(prepared)
     featured = featured.dropna()
     _save_dataframe_parquet(featured, "featured")
-    return featured
