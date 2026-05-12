@@ -1,4 +1,4 @@
 from .loader import load_dataframe
-from .main import get_dataframe
+from .main import generate_featured_dataset
 
-__all__ = ["get_dataframe", "load_dataframe"]
+__all__ = ["generate_featured_dataset", "load_dataframe"]
