@@ -8,6 +8,7 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 STD_EPSILON = 1e-12
 PRICE_TOLERANCE = 1e-10
+DIRECTION_TOLERANCE = 0.005
 
 ADJUSTED_OHLC_OPEN_COLUMN = "_adj_open"
 ADJUSTED_OHLC_HIGH_COLUMN = "_adj_high"
@@ -49,6 +50,7 @@ MIN_HISTORY_BY_FEATURE = {
 	"rolling_max_10": 11,
 	"rolling_min_10": 11,
 	"high_low_range": 1,
+	"price_direction_5d": 6,
 }
 
 LEGACY_FEATURE_ALIASES = {
@@ -408,6 +410,18 @@ def _add_price_action_range_features(df: pd.DataFrame) -> pd.DataFrame:
 	return _add_basic_range_features(df)
 
 
+def _add_target_price_direction(df: pd.DataFrame) -> pd.DataFrame:
+	featured = df
+	future_close = featured.groupby("ticker", sort=False, group_keys=False)["adj_close"].shift(-5)
+	price_change = (future_close - featured["adj_close"]) / featured["adj_close"]
+
+	featured["price_direction_5d"] = np.where(
+		price_change > DIRECTION_TOLERANCE, 1,
+		np.where(price_change < -DIRECTION_TOLERANCE, -1, 0)
+	).astype("float64")
+	return featured
+
+
 def _validate_unique_ticker_date_pairs(df: pd.DataFrame) -> None:
 	duplicated_mask = df.duplicated(subset=["ticker", "date"], keep=False)
 	if not duplicated_mask.any():
@@ -518,6 +532,7 @@ def build_features_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 	featured = _add_legacy_feature_aliases(featured)
 	featured = _sort_stably_by_ticker_date(featured)
 	featured = _reorder_columns_deterministically(featured)
+	featured = _add_target_price_direction(featured)
 
 	logger.info(
 		"build_features_dataframe: rows=%d, tickers=%d",

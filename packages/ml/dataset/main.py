@@ -8,24 +8,24 @@ from loader import load_dataframe
 from preparation import prepare_dataframe
 from features import build_features_dataframe
 
-
-DEFAULT_PARQUET_PATH = Path("data/processed/sp500_features.parquet")
-
-
-def _save_parquet(df: pd.DataFrame, output_path: str | Path) -> Path:
-    parquet_path = Path(output_path)
-    parquet_path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_parquet(parquet_path, index=False)
-    return parquet_path
+SCRIPT_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = SCRIPT_DIR.parent.parent.parent
+DEFAULT_FILE_DIRECTORY = PROJECT_ROOT / "data" / "processed"
 
 
-def get_dataframe(
+def _save_parquet(df: pd.DataFrame, file_name: str) -> None:
+    file_path = Path(DEFAULT_FILE_DIRECTORY / (file_name + ".parquet"))
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_parquet(file_path, index=False)
+
+
+def generate_featured_dataset(
     file_name: str | None = None,
-    parquet_path: str | Path = DEFAULT_PARQUET_PATH,
-) -> pd.DataFrame:
-    loaded = load_dataframe(file_name=file_name)
-    prepared = prepare_dataframe(loaded)
-    featured = build_features_dataframe(prepared)
-    _save_parquet(featured, output_path=parquet_path)
-    return featured
+) -> None:
+    raw_df = load_dataframe(file_name=file_name)
+    prepared_df = prepare_dataframe(raw_df)
+    featured_df = build_features_dataframe(prepared_df)
+    featured_df = featured_df.dropna()
+    _save_parquet(featured_df, "dataset")
 
+generate_featured_dataset()

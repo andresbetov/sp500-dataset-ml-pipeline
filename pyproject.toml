@@ -5,8 +5,8 @@ requires-python = ">=3.12"
 dependencies = [
     "kagglehub",
     "pandas",
-    "pyarrow",
-    "dagshub",
-    "python-dotenv>=1.2.2",
-    "dvc[s3]>=3.67.1",
+    "numpy",
+    "pyarrow>=24.0.0",
+    "matplotlib",
+    "scipy",
 ]
