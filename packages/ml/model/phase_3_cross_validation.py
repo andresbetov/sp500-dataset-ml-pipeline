@@ -19,81 +19,93 @@ def phase_3_cross_validation() -> dict:
     """
     Setup 5-fold TimeSeriesSplit with expanding windows. Verify no temporal leakage.
     
+    Data is organized by ticker (not globally by date), so we must sort by date first
+    before creating temporal folds.
+    
     Returns:
         folds: Dict with 5 folds containing train/test indices and date bounds
     """
     logger.info("Phase 3: Temporal Cross-Validation Setup")
-
+    
     # Load Phase 2 outputs
     logger.info("Loading Phase 2 outputs...")
     X = joblib.load(MODELS_DIR / "X.pkl")
     y = joblib.load(MODELS_DIR / "Y.pkl")
     metadata = joblib.load(MODELS_DIR / "metadata.pkl")
-
+    
     logger.info(f"Loaded X: {X.shape}, y: {y.shape}")
-
+    
     # Extract dates from metadata
     dates = metadata["date"]
-    logger.info(f"Date range: {dates.min()} to {dates.max()}")
-
+    logger.info(f"Date range (original order): {dates.min()} to {dates.max()}")
+    
+    # Data is organized by ticker, not globally by date
+    # Sort indices by date for proper temporal split
+    date_sort_indices = np.argsort(dates)
+    logger.info("Data organized by ticker. Sorting chronologically for temporal split...")
+    
+    # Re-order X, y, dates by date
+    X_sorted = X[date_sort_indices]
+    y_sorted = y[date_sort_indices]
+    dates_sorted = dates[date_sort_indices]
+    
+    logger.info(f"Sorted date range: {dates_sorted.min()} to {dates_sorted.max()}")
+    
+    # Verify sorted
+    if not np.all(dates_sorted[:-1] <= dates_sorted[1:]):
+        raise ValueError("Failed to sort dates chronologically")
+    
+    logger.info("Data chronologically sorted")
+    
     # Setup TimeSeriesSplit with 5 folds (expanding windows)
     tscv = TimeSeriesSplit(n_splits=5)
-    # TimeSeriesSplit creates 5 folds where:
-    #   - Train always starts from first row (index 0)
-    #   - Train grows each fold (expanding window)
-    #   - Test is always after train (no temporal leakage)
-    # Example with 2.67M rows:
-    #   Fold 0: Train [0:2.14M] | Test [2.14M:2.67M]
-    #   Fold 1: Train [0:2.27M] | Test [2.27M:2.67M]
-    #   Fold 2: Train [0:2.40M] | Test [2.40M:2.67M]
-    #   Fold 3: Train [0:2.54M] | Test [2.54M:2.67M]
-    #   Fold 4: Train [0:2.67M] | Test [] (empty, last split)
-    # tscv.split(X) yields (train_indices, test_indices) tuples
-
     logger.info(f"TimeSeriesSplit initialized with n_splits=5")
-
+    
     folds = {}
-
-    # enumerate(tscv.split(X)): iterate 5 tuples. fold_idx=0,1,2,3,4
-    # Each tuple: (train_indices_array, test_indices_array) -> unpacked two arrays with row indices
-    for fold_idx, (train_indices, test_indices) in enumerate(tscv.split(X)):
+    
+    for fold_idx, (train_indices_sorted, test_indices_sorted) in enumerate(tscv.split(X_sorted)):
         # Get train/test dates
-        train_dates = dates[train_indices]
-        test_dates = dates[test_indices]
-
+        train_dates = dates_sorted[train_indices_sorted]
+        test_dates = dates_sorted[test_indices_sorted]
+        
+        # Map back to original indices (before sorting)
+        train_indices_original = date_sort_indices[train_indices_sorted]
+        test_indices_original = date_sort_indices[test_indices_sorted]
+        
         # Get date bounds
         train_date_min = pd.Timestamp(train_dates.min()).strftime("%Y-%m-%d")
         train_date_max = pd.Timestamp(train_dates.max()).strftime("%Y-%m-%d")
         test_date_min = pd.Timestamp(test_dates.min()).strftime("%Y-%m-%d") if len(test_dates) > 0 else "N/A"
         test_date_max = pd.Timestamp(test_dates.max()).strftime("%Y-%m-%d") if len(test_dates) > 0 else "N/A"
-
+        
         # Verify no temporal leakage
+        # Note: Same date can appear in both train and test (different stocks same date is OK)
         if len(test_dates) > 0:
-            if test_dates.min() <= train_dates.max():
-                msg = f"Fold {fold_idx}: Temporal leakage detected! Test min ({test_dates.min()}) <= Train max ({train_dates.max()})"
+            if test_dates.min() < train_dates.max():
+                msg = f"Fold {fold_idx}: Temporal leakage detected! Test min ({test_dates.min()}) < Train max ({train_dates.max()})"
                 logger.error(msg)
                 raise ValueError(msg)
-
+        
         fold_key = f"fold_{fold_idx}"
         folds[fold_key] = {
-            "train_indices": train_indices.tolist(),
-            "test_indices": test_indices.tolist(),
+            "train_indices": train_indices_original.tolist(),
+            "test_indices": test_indices_original.tolist(),
             "train_date_min": train_date_min,
             "train_date_max": train_date_max,
             "test_date_min": test_date_min,
             "test_date_max": test_date_max,
-            "n_train": len(train_indices),
-            "n_test": len(test_indices),
+            "n_train": len(train_indices_original),
+            "n_test": len(test_indices_original),
         }
-
+        
         logger.info(
-            f"Fold {fold_idx}: Train {len(train_indices):,} | Test {len(test_indices):,} | "
-            f"Dates: {train_date_min} to {test_date_max}"
+            f"Fold {fold_idx}: Train {len(train_indices_original):,} | Test {len(test_indices_original):,} | "
+            f"{train_date_min} to {test_date_max}"
         )
-
+    
     # Save fold metadata to JSON
     folds_metadata_path = MODELS_DIR / "folds_metadata.json"
-
+    
     # Convert to JSON-serializable format
     folds_json = {
         fold_key: {
@@ -108,11 +120,11 @@ def phase_3_cross_validation() -> dict:
         }
         for fold_key, fold_data in folds.items()
     }
-
+    
     with open(folds_metadata_path, "w") as f:
         json.dump(folds_json, f, indent=2)
-
+    
     logger.info(f"Saved fold metadata to {folds_metadata_path}")
-    logger.info("✓ Phase 3 complete: Temporal cross-validation setup with no leakage")
-
+    logger.info("Phase 3 complete: Temporal cross-validation setup with no leakage")
+    
     return folds
