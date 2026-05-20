@@ -7,11 +7,11 @@ import joblib
 import numpy as np
 import pandas as pd
 from sklearn.preprocessing import OneHotEncoder
+from utils import ARTIFACTS_DIR
 
 logger = logging.getLogger(__name__)
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-MODELS_DIR = SCRIPT_DIR / "models"
 DATASET_PATH = SCRIPT_DIR.parent.parent.parent / "data" / "processed" / "dataset.parquet"
 
 # 34 technical indicators (all engineered by dataset pipeline)
@@ -109,16 +109,19 @@ def phase_2_feature_selection() -> tuple[np.ndarray, np.ndarray, dict, OneHotEnc
         "n_ticker_features": x_ticker.shape[1],
     }
 
-    # Save encoder
-    encoder_path = MODELS_DIR / "ticker_encoder.joblib"
-    MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    # Create subdirectories
+    (ARTIFACTS_DIR / "inputs").mkdir(parents=True, exist_ok=True)
+    (ARTIFACTS_DIR / "legacy").mkdir(parents=True, exist_ok=True)
+
+    # Save encoder to legacy
+    encoder_path = ARTIFACTS_DIR / "legacy" / "ticker_encoder.joblib"
     joblib.dump(encoder, encoder_path)
     logger.info(f"Saved encoder to {encoder_path}")
 
-    # Save X, Y, metadata
-    X_path = MODELS_DIR / "X.pkl"
-    y_path = MODELS_DIR / "Y.pkl"
-    metadata_path = MODELS_DIR / "metadata.pkl"
+    # Save X, Y, metadata to inputs
+    X_path = ARTIFACTS_DIR / "inputs" / "X.pkl"
+    y_path = ARTIFACTS_DIR / "inputs" / "Y.pkl"
+    metadata_path = ARTIFACTS_DIR / "inputs" / "metadata.pkl"
 
     joblib.dump(X, X_path)
     joblib.dump(Y, y_path)
