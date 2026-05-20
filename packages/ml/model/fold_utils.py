@@ -6,11 +6,9 @@ from pathlib import Path
 
 import joblib
 import numpy as np
+from utils import ARTIFACTS_DIR
 
 logger = logging.getLogger(__name__)
-
-SCRIPT_DIR = Path(__file__).resolve().parent
-MODELS_DIR = SCRIPT_DIR / "models"
 
 
 def load_fold_data(
@@ -26,11 +24,11 @@ def load_fold_data(
         X_train, X_test, y_train, y_test, train_indices, test_indices
     """
     # Load Phase 2 outputs
-    X = joblib.load(MODELS_DIR / "X.pkl")
-    y = joblib.load(MODELS_DIR / "Y.pkl")
+    X = joblib.load(ARTIFACTS_DIR / "inputs" / "X.pkl")
+    y = joblib.load(ARTIFACTS_DIR / "inputs" / "Y.pkl")
     
     # Load fold metadata
-    with open(MODELS_DIR / "folds_metadata.json") as f:
+    with open(ARTIFACTS_DIR / "folds" / "folds_metadata.json") as f:
         folds_metadata = json.load(f)
     
     fold_key = f"fold_{fold_id}"
@@ -53,5 +51,5 @@ def load_fold_data(
 
 def load_folds_metadata() -> dict:
     """Load cross-validation fold metadata."""
-    with open(MODELS_DIR / "folds_metadata.json") as f:
+    with open(ARTIFACTS_DIR / "folds" / "folds_metadata.json") as f:
         return json.load(f)
