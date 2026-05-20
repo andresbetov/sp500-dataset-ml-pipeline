@@ -8,11 +8,9 @@ import joblib
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import TimeSeriesSplit
+from utils import ARTIFACTS_DIR
 
 logger = logging.getLogger(__name__)
-
-SCRIPT_DIR = Path(__file__).resolve().parent
-MODELS_DIR = SCRIPT_DIR / "models"
 
 
 def phase_3_cross_validation() -> dict:
@@ -29,9 +27,9 @@ def phase_3_cross_validation() -> dict:
     
     # Load Phase 2 outputs
     logger.info("Loading Phase 2 outputs...")
-    X = joblib.load(MODELS_DIR / "X.pkl")
-    y = joblib.load(MODELS_DIR / "Y.pkl")
-    metadata = joblib.load(MODELS_DIR / "metadata.pkl")
+    X = joblib.load(ARTIFACTS_DIR / "inputs" / "X.pkl")
+    y = joblib.load(ARTIFACTS_DIR / "inputs" / "Y.pkl")
+    metadata = joblib.load(ARTIFACTS_DIR / "inputs" / "metadata.pkl")
     
     logger.info(f"Loaded X: {X.shape}, y: {y.shape}")
     
@@ -104,7 +102,8 @@ def phase_3_cross_validation() -> dict:
         )
     
     # Save fold metadata to JSON
-    folds_metadata_path = MODELS_DIR / "folds_metadata.json"
+    (ARTIFACTS_DIR / "folds").mkdir(parents=True, exist_ok=True)
+    folds_metadata_path = ARTIFACTS_DIR / "folds" / "folds_metadata.json"
     
     # Convert to JSON-serializable format
     folds_json = {
