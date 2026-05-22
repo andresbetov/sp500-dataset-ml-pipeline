@@ -12,7 +12,7 @@ from utils import ARTIFACTS_DIR
 logger = logging.getLogger(__name__)
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-DATASET_PATH = SCRIPT_DIR.parent.parent.parent / "data" / "processed" / "dataset.parquet"
+DATASET_PATH = SCRIPT_DIR.parent.parent.parent.parent / "data" / "processed" / "dataset.parquet"
 
 # 34 technical indicators (all engineered by dataset pipeline)
 INDICATORS = [

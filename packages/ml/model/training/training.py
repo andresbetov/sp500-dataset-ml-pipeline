@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 import json
 import logging
 import time
@@ -7,10 +8,10 @@ import joblib
 import numpy as np
 import pandas as pd
 
-from cv_utils import load_folds_metadata
-from inference import generate_predictions
+from cross_validation.cv_utils import load_folds_metadata
+from training.inference import generate_predictions
+from training.model_trainer import train_xgboost_model
 from utils import ARTIFACTS_DIR
-from model_trainer import train_xgboost_model
 
 logger = logging.getLogger(__name__)
 

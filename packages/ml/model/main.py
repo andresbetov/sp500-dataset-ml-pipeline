@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import logging
 
-from feature_engineering import phase_2_feature_selection
-from cross_validator import phase_3_cross_validation
-from training import phase_4_training
+from features.feature_engineering import phase_2_feature_selection
+from cross_validation.cross_validator import phase_3_cross_validation
+from training.training import phase_4_training
 from utils import ARTIFACTS_DIR, setup_logging
 
 logger = logging.getLogger(__name__)
@@ -18,11 +18,11 @@ def _ensure_model_directories() -> None:
 
 
 def main() -> None:
-    """Orchestrate ML pipeline: Phase 2 → Phase 3 → Phase 4."""
+    """Orchestrate ML pipeline: Phase 2 → Phase 3 → Phase 4 → Phase 5."""
     setup_logging()
     _ensure_model_directories()
-    logger.info("ML Pipeline - Phases 2, 3, & 4")
-    
+    logger.info("ML Pipeline - Phases 2, 3, 4, & 5")
+
     try:
         # Phase 2: Feature selection and encoding
         logger.info("Phase 2: Feature Selection & Encoding")
@@ -38,7 +38,7 @@ def main() -> None:
         logger.info("Phase 4: Model Training")
         validation_predictions, fold_training_summary, fold_model_paths = phase_4_training()
         logger.info(f"Phase 4 complete: {len(fold_model_paths)} models trained")
-        
+
     except Exception as e:
         logger.error(f"Pipeline failed: {e}", exc_info=True)
         raise
