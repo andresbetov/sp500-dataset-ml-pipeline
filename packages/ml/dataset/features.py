@@ -50,7 +50,7 @@ MIN_HISTORY_BY_FEATURE = {
 	"rolling_max_10": 11,
 	"rolling_min_10": 11,
 	"high_low_range": 1,
-	"price_direction_5d": 6,
+	"realized_volatility_5d": 11,
 }
 
 LEGACY_FEATURE_ALIASES = {
@@ -410,15 +410,26 @@ def _add_price_action_range_features(df: pd.DataFrame) -> pd.DataFrame:
 	return _add_basic_range_features(df)
 
 
-def _add_target_price_direction(df: pd.DataFrame) -> pd.DataFrame:
-	featured = df
-	future_close = featured.groupby("ticker", sort=False, group_keys=False)["adj_close"].shift(-5)
-	price_change = (future_close - featured["adj_close"]) / featured["adj_close"]
+def _add_target_realized_volatility_5d(df: pd.DataFrame) -> pd.DataFrame:
+	"""
+	Compute realized volatility: rolling std of log_return for next 5 trading days.
 
-	featured["price_direction_5d"] = np.where(
-		price_change > DIRECTION_TOLERANCE, 1,
-		np.where(price_change < -DIRECTION_TOLERANCE, -1, 0)
+	For each row, this is the actual volatility that occurred in the forward window.
+	Uses shift(-5) to prevent look-ahead bias: volatility is computed THEN shifted back.
+
+	This represents the true realized volatility that would occur in the next 5 days,
+	making it a perfect target for teaching the model about volatility forecasting.
+	"""
+	featured = df
+
+	# Group by ticker to prevent cross-ticker leakage
+	# Compute rolling 5-day std of log_return, then shift -5 to get realized volatility
+	featured["realized_volatility_5d"] = featured.groupby(
+		"ticker", sort=False, group_keys=False
+	)["log_return"].transform(
+		lambda x: x.rolling(window=5, min_periods=5).std().shift(-5)
 	).astype("float64")
+
 	return featured
 
 
@@ -532,7 +543,7 @@ def build_features_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 	featured = _add_legacy_feature_aliases(featured)
 	featured = _sort_stably_by_ticker_date(featured)
 	featured = _reorder_columns_deterministically(featured)
-	featured = _add_target_price_direction(featured)
+	featured = _add_target_realized_volatility_5d(featured)
 
 	logger.info(
 		"build_features_dataframe: rows=%d, tickers=%d",

@@ -59,7 +59,7 @@ def phase_2_feature_selection() -> tuple[np.ndarray, np.ndarray, dict, OneHotEnc
     
     Returns:
         X: Feature matrix (n_samples, 534) = 34 indicators + 500 ticker dummies
-        Y: Target vector (n_samples,) with values in {-1, 0, 1}
+        Y: Target vector (n_samples,) with continuous volatility values
         metadata: Dict with 'date' and 'ticker' columns (original, pre-encoding)
         encoder: Fitted OneHotEncoder for ticker column
     """
@@ -97,9 +97,9 @@ def phase_2_feature_selection() -> tuple[np.ndarray, np.ndarray, dict, OneHotEnc
     # X: Combine 34 technical indicators + 500 one-hot ticker columns. Shape=(n_rows, 534)
     logger.info(f"Combined feature matrix X: {X.shape}")
 
-    # Extract target: price_direction_5d (values: -1, 0, 1)
-    Y = df["price_direction_5d"].values
-    logger.info(f"Target Y: shape {Y.shape}, unique values {np.unique(Y)}")  # np.unique(Y) # [-1  0  1]
+    # Extract target: realized_volatility_5d (continuous volatility values)
+    Y = df["realized_volatility_5d"].values
+    logger.info(f"Target Y (realized volatility): shape {Y.shape}, range [{Y.min():.6f}, {Y.max():.6f}], mean {Y.mean():.6f}")
 
     # Create metadata dict for cross-validation
     metadata = {

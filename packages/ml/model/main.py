@@ -5,6 +5,7 @@ import logging
 from features.feature_engineering import phase_2_feature_selection
 from cross_validation.cross_validator import phase_3_cross_validation
 from training.training import phase_4_training
+# from evaluation.evaluation import phase_5_evaluation
 from utils import ARTIFACTS_DIR, setup_logging
 
 logger = logging.getLogger(__name__)
@@ -38,6 +39,11 @@ def main() -> None:
         logger.info("Phase 4: Model Training")
         validation_predictions, fold_training_summary, fold_model_paths = phase_4_training()
         logger.info(f"Phase 4 complete: {len(fold_model_paths)} models trained")
+
+        # # Phase 5: Evaluation & Analytics
+        # logger.info("Phase 5: Comprehensive Evaluation & Analytics")
+        # evaluation_results = phase_5_evaluation()
+        # logger.info(f"Phase 5 complete: {evaluation_results['execution_time']:.1f}s")
 
     except Exception as e:
         logger.error(f"Pipeline failed: {e}", exc_info=True)
