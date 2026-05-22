@@ -206,11 +206,11 @@ def phase_4_training() -> tuple[dict, dict, list]:
     """
     Orchestrate Phase 4: Validate → Train → Aggregate → Save.
 
-    Returns:
-        validation_predictions: Dict with predictions + probabilities per fold
-        fold_training_summary: Dict with training metadata per fold
-        fold_model_paths: List of saved model paths
-    """
+	Returns:
+		validation_predictions: Dict with predictions and metrics per fold
+		fold_training_summary: Dict with training metadata per fold
+		fold_model_paths: List of saved model paths
+	"""
     logger.info("Phase 4: Model Training")
     overall_start_time = time.time()
 

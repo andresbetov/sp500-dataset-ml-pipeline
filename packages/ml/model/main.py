@@ -19,10 +19,10 @@ def _ensure_model_directories() -> None:
 
 
 def main() -> None:
-    """Orchestrate ML pipeline: Phase 2 → Phase 3 → Phase 4 → Phase 5."""
+    """Orchestrate ML pipeline: Phase 2 → Phase 3 → Phase 4 (Phase 5 commented out)."""
     setup_logging()
     _ensure_model_directories()
-    logger.info("ML Pipeline - Phases 2, 3, 4, & 5")
+    logger.info("ML Pipeline - Phases 2, 3, 4 (Volatility Regression)")
 
     try:
         # Phase 2: Feature selection and encoding
