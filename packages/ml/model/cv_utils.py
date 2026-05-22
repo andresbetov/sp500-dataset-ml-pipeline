@@ -24,12 +24,11 @@ def load_fold_data(
         X_train, X_test, y_train, y_test, train_indices, test_indices
     """
     # Load Phase 2 outputs
-    X = joblib.load(ARTIFACTS_DIR / "inputs" / "X.pkl")
-    y = joblib.load(ARTIFACTS_DIR / "inputs" / "Y.pkl")
+    X = np.load(ARTIFACTS_DIR / "inputs" / "X.npy", mmap_mode="r")
+    y = np.load(ARTIFACTS_DIR / "inputs" / "Y.npy", mmap_mode="r")
     
     # Load fold metadata
-    with open(ARTIFACTS_DIR / "folds" / "folds_metadata.json") as f:
-        folds_metadata = json.load(f)
+    folds_metadata = joblib.load(ARTIFACTS_DIR / "folds" / "folds_metadata.pkl")
     
     fold_key = f"fold_{fold_id}"
     fold_data = folds_metadata[fold_key]
@@ -51,5 +50,4 @@ def load_fold_data(
 
 def load_folds_metadata() -> dict:
     """Load cross-validation fold metadata."""
-    with open(ARTIFACTS_DIR / "folds" / "folds_metadata.json") as f:
-        return json.load(f)
+    return joblib.load(ARTIFACTS_DIR / "folds" / "folds_metadata.pkl")

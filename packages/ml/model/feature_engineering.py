@@ -119,12 +119,12 @@ def phase_2_feature_selection() -> tuple[np.ndarray, np.ndarray, dict, OneHotEnc
     logger.info(f"Saved encoder to {encoder_path}")
 
     # Save X, Y, metadata to inputs
-    X_path = ARTIFACTS_DIR / "inputs" / "X.pkl"
-    y_path = ARTIFACTS_DIR / "inputs" / "Y.pkl"
+    X_path = ARTIFACTS_DIR / "inputs" / "X.npy"
+    y_path = ARTIFACTS_DIR / "inputs" / "Y.npy"
     metadata_path = ARTIFACTS_DIR / "inputs" / "metadata.pkl"
 
-    joblib.dump(X, X_path)
-    joblib.dump(Y, y_path)
+    np.save(X_path, X)
+    np.save(y_path, Y)
     joblib.dump(metadata, metadata_path)
     logger.info(f"Saved X to {X_path}")
     logger.info(f"Saved Y to {y_path}")
