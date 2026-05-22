@@ -14,51 +14,44 @@ logger = logging.getLogger(__name__)
 SCRIPT_DIR = Path(__file__).resolve().parent
 DATASET_PATH = SCRIPT_DIR.parent.parent.parent.parent / "data" / "processed" / "dataset.parquet"
 
-# 34 technical indicators (all engineered by dataset pipeline)
 INDICATORS = [
-    "atr_14",
-    "ema_12",
-    "ema_26",
-    "high_low_range",
-    "log_return",
-    "log_return_std_10",
-    "log_return_std_20",
-    "macd",
-    "macd_hist",
-    "macd_signal",
-    "price_vs_sma_10",
-    "price_vs_sma_20",
-    "price_vs_sma_50",
-    "return_lag_1",
-    "return_lag_10",
-    "return_lag_2",
-    "return_lag_3",
-    "return_lag_5",
-    "rolling_max_10",
-    "rolling_mean_5",
-    "rolling_min_10",
-    "rolling_std_10",
-    "rolling_std_20",
-    "rsi_14",
-    "simple_return",
-    "volume_lag_1",
-    "volume_lag_3",
-    "volume_lag_5",
-    "volume_sma_10",
-    "volume_sma_20",
-    "volume_zscore",
-    "zscore_price_20",
-    "zscore_price_vs_sma_20",
-    "zscore_volume_20",
+	"ema_12",
+	"ema_26",
+	"macd",
+	"macd_hist",
+	"macd_signal",
+	"price_vs_sma_10",
+	"price_vs_sma_20",
+	"price_vs_sma_50",
+	"return_lag_1",
+	"return_lag_10",
+	"return_lag_2",
+	"return_lag_3",
+	"return_lag_5",
+	"rolling_max_10",
+	"rolling_mean_5",
+	"rolling_min_10",
+	"rsi_14",
+	"simple_return",
+	"volume_lag_1",
+	"volume_lag_3",
+	"volume_lag_5",
+	"volume_sma_10",
+	"volume_sma_20",
+	"volume_zscore",
+	"zscore_price_20",
+	"zscore_price_vs_sma_20",
+	"zscore_volume_20",
+	"log_return",
 ]
 
 
 def phase_2_feature_selection() -> tuple[np.ndarray, np.ndarray, dict, OneHotEncoder]:
     """
-    Load dataset. Select 34 technical indicators. One-hot encode ticker.
-    
+    Load dataset. Select 28 technical indicators. One-hot encode ticker.
+
     Returns:
-        X: Feature matrix (n_samples, 534) = 34 indicators + 500 ticker dummies
+        X: Feature matrix (n_samples, n_features) = 28 indicators + 467 ticker dummies
         Y: Target vector (n_samples,) with continuous volatility values
         metadata: Dict with 'date' and 'ticker' columns (original, pre-encoding)
         encoder: Fitted OneHotEncoder for ticker column
