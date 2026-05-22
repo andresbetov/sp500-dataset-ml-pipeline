@@ -1,11 +1,11 @@
 from __future__ import annotations
-
 import json
 import logging
 import time
 
 import joblib
 import numpy as np
+import pandas as pd
 
 from cv_utils import load_folds_metadata
 from inference import generate_predictions
@@ -39,6 +39,7 @@ def _train_fold_model(
     fold_idx: int,
     X: np.ndarray,
     y: np.ndarray,
+    metadata: dict,
     folds_metadata: dict,
 ) -> dict:
     """
@@ -54,39 +55,61 @@ def _train_fold_model(
     train_indices = np.array(fold_data["train_indices"])
     test_indices = np.array(fold_data["test_indices"])
 
-    X_train = X[train_indices]
     X_test = X[test_indices]
-    y_train = y[train_indices]
     y_test = y[test_indices]
+
+    # Build a temporal validation slice from the most recent part of the train window
+    if len(train_indices) < 2:
+        raise ValueError(f"Fold {fold_idx}: not enough train samples for temporal validation split")
+
+    train_dates = pd.to_datetime(metadata["date"][train_indices], errors="raise")
+    temporal_order = np.argsort(train_dates.values)
+    train_indices_temporal = train_indices[temporal_order]
+
+    val_size = max(1, int(len(train_indices_temporal) * 0.10))
+    val_size = min(val_size, len(train_indices_temporal) - 1)
+
+    model_train_indices = train_indices_temporal[:-val_size]
+    model_val_indices = train_indices_temporal[-val_size:]
+
+    X_model_train = X[model_train_indices]
+    y_model_train = y[model_train_indices]
+    X_model_val = X[model_val_indices]
+    y_model_val = y[model_val_indices]
 
     train_date_min = fold_data["train_date_min"]
     train_date_max = fold_data["train_date_max"]
     test_date_min = fold_data["test_date_min"]
     test_date_max = fold_data["test_date_max"]
 
-    # Verify no temporal overlap
-    if test_date_min < train_date_max:
+    # Verify no temporal overlap with typed date comparisons
+    if pd.Timestamp(test_date_min) < pd.Timestamp(train_date_max):
         raise ValueError(f"Fold {fold_idx} temporal leakage: test_date_min ({test_date_min}) < train_date_max ({train_date_max})")
 
     # Class distribution
-    unique_train, counts_train = np.unique(y_train, return_counts=True)
+    unique_train, counts_train = np.unique(y_model_train, return_counts=True)
     class_dist = dict(zip(unique_train, counts_train))
 
     # Train model and generate predictions
-    model, label_mapping = train_xgboost_model(X_train, y_train)
+    model, label_mapping = train_xgboost_model(
+        X_model_train,
+        y_model_train,
+        X_val=X_model_val,
+        y_val=y_model_val,
+    )
     fold_predictions = generate_predictions(
         model,
-        X_train,
+        X_model_train,
         X_test,
-        y_train,
+        y_model_train,
         y_test,
-        train_indices,
+        model_train_indices,
         test_indices,
         label_mapping,
     )
 
     # Validate prediction shapes
-    if fold_predictions["train_proba"].shape != (len(X_train), 3):
+    if fold_predictions["train_proba"].shape != (len(X_model_train), 3):
         raise ValueError(f"Fold {fold_idx} train_proba shape mismatch")
     if fold_predictions["test_proba"].shape != (len(X_test), 3):
         raise ValueError(f"Fold {fold_idx} test_proba shape mismatch")
@@ -108,7 +131,8 @@ def _train_fold_model(
         "fold_idx": fold_idx,
         "predictions": fold_predictions,
         "summary": {
-            "train_samples": int(len(X_train)),
+            "train_samples": int(len(X_model_train)),
+            "validation_samples": int(len(X_model_val)),
             "test_samples": int(len(X_test)),
             "train_date_min": train_date_min,
             "train_date_max": train_date_max,
@@ -137,8 +161,12 @@ def _aggregate_fold_results(fold_results: list) -> tuple[dict, dict, list]:
         fold_key = f"fold_{fold_idx}"
 
         # Store predictions
+        fold_predictions = fold_result["predictions"]
         validation_predictions[fold_key] = {
-            **fold_result["predictions"],
+            "test_indices": fold_predictions["test_indices"],
+            "test_pred": fold_predictions["test_pred"],
+            "test_proba": fold_predictions["test_proba"],
+            "test_true": fold_predictions["test_true"],
             "fold_model_path": fold_result["model_path"],
             "train_date_range": (fold_result["summary"]["train_date_min"], fold_result["summary"]["train_date_max"]),
             "test_date_range": (fold_result["summary"]["test_date_min"], fold_result["summary"]["test_date_max"]),
@@ -150,7 +178,7 @@ def _aggregate_fold_results(fold_results: list) -> tuple[dict, dict, list]:
 
         # Verify temporal validity (no overlaps)
         summary = fold_result["summary"]
-        if summary["test_date_min"] < summary["train_date_max"]:
+        if pd.Timestamp(summary["test_date_min"]) < pd.Timestamp(summary["train_date_max"]):
             raise ValueError(f"Fold {fold_idx} temporal leakage detected")
 
     logger.info(f"Aggregated {len(fold_results)} fold(s)")
@@ -182,8 +210,8 @@ def phase_4_training() -> tuple[dict, dict, list]:
 
     # Load data from Phase 2 and 3
     logger.info("Loading Phase 2-3 outputs...")
-    X = joblib.load(ARTIFACTS_DIR / "inputs" / "X.pkl")
-    y = joblib.load(ARTIFACTS_DIR / "inputs" / "Y.pkl")
+    X = np.load(ARTIFACTS_DIR / "inputs" / "X.npy", mmap_mode="r")
+    y = np.load(ARTIFACTS_DIR / "inputs" / "Y.npy", mmap_mode="r")
     metadata = joblib.load(ARTIFACTS_DIR / "inputs" / "metadata.pkl")
     folds_metadata = load_folds_metadata()
 
@@ -195,8 +223,8 @@ def phase_4_training() -> tuple[dict, dict, list]:
 
     # Train all folds
     fold_results = []
-    for fold_idx in range(1):  # Change to range(5) to train all 5 folds
-        result = _train_fold_model(fold_idx, X, y, folds_metadata)
+    for fold_idx in range(5):
+        result = _train_fold_model(fold_idx, X, y, metadata, folds_metadata)
         fold_results.append(result)
 
     # Aggregate results
@@ -208,6 +236,5 @@ def phase_4_training() -> tuple[dict, dict, list]:
     # Final summary
     total_time = time.time() - overall_start_time
     logger.info(f"Phase 4 complete: {len(fold_results)} model(s), {sum(s['test_samples'] for s in fold_training_summary.values()):,} test samples, {total_time:.1f}s")
-    logger.info(f"Note: To train all 5 folds, change range(1) to range(5) on line 214")
     
     return validation_predictions, fold_training_summary, fold_model_paths

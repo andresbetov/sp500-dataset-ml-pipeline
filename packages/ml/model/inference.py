@@ -10,8 +10,7 @@ logger = logging.getLogger(__name__)
 
 def _unmap_predictions(predictions: np.ndarray, reverse_mapping: dict) -> np.ndarray:
     """Map predictions from {0, 1, 2} back to {-1, 0, 1}."""
-    reverse_map = {v: k for k, v in reverse_mapping.items()}
-    return np.array([reverse_map[int(pred)] for pred in predictions], dtype=np.float32)
+    return (predictions - 1).astype(np.float32)
 
 
 def _validate_predictions(fold_predictions: dict) -> None:
