@@ -467,6 +467,7 @@ def build_features_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 	featured = _sort_stably_by_ticker_date(featured)
 	featured = _reorder_columns_deterministically(featured)
 	featured = _add_target_realized_volatility_5d(featured)
+	featured = _add_market_regime_feature(featured)
 
 	logger.info(
 		"build_features_dataframe: rows=%d, tickers=%d",
@@ -474,3 +475,138 @@ def build_features_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 		featured["ticker"].nunique(),
 	)
 	return featured
+
+
+def _add_market_regime_feature(df: pd.DataFrame) -> pd.DataFrame:
+	"""
+	Assign market regime based on historical periods.
+
+	Regimes:
+	- 0: 2000-2007 (pre-crisis)
+	- 1: 2008-2010 (financial crisis)
+	- 2: 2011-2019 (post-crisis recovery)
+	- 3: 2020-2021 (COVID)
+	- 4: 2022-2026 (post-COVID inflation)
+
+	Returns:
+		DataFrame with new 'market_regime' column (int8: 0-4)
+	"""
+	def get_regime(date: pd.Timestamp) -> int:
+		year = date.year
+		if year <= 2007:
+			return 0
+		elif year <= 2010:
+			return 1
+		elif year <= 2019:
+			return 2
+		elif year <= 2021:
+			return 3
+		else:
+			return 4
+
+	df['market_regime'] = df['date'].apply(get_regime).astype('int8')
+	return df
+
+
+def _characterize_regimes(df: pd.DataFrame) -> dict:
+	"""
+	Calculate statistics per market regime (regime "fingerprint").
+
+	Returns:
+		Dict with regime statistics:
+		{
+			"regime_name": {
+				"volatility_mean": float,
+				"volatility_std": float,
+				"volatility_min": float,
+				"volatility_max": float,
+				"volatility_median": float,
+				"return_mean": float,
+				"return_std": float,
+				"return_skewness": float,
+				"return_kurtosis": float,
+				"volume_mean": float,
+				"volume_std": float,
+				"ticker_correlation_mean": float,
+				"ticker_correlation_std": float,
+				"n_samples": int,
+				"unique_tickers": int,
+				"date_range": str,
+			}
+		}
+	"""
+	regime_names = {
+		0: "pre-crisis (2000-2007)",
+		1: "financial-crisis (2008-2010)",
+		2: "post-crisis (2011-2019)",
+		3: "covid (2020-2021)",
+		4: "post-covid (2022-2026)"
+	}
+
+	stats = {}
+
+	for regime_id in range(5):
+		regime_data = df[df['market_regime'] == regime_id]
+
+		if len(regime_data) == 0:
+			logger.warning(f"Regime {regime_id}: no data found")
+			continue
+
+		# Volatility statistics
+		volatility_values = regime_data['realized_volatility_5d']
+
+		# Return statistics
+		returns_values = regime_data['simple_return'].dropna()
+
+		# Volume statistics
+		volume_values = regime_data['volume']
+
+		# Ticker correlation (per regime)
+		ticker_correlations = []
+		for _, date_group in regime_data.groupby('date'):
+			if len(date_group) > 2:
+				date_returns = date_group[['ticker', 'simple_return']].dropna()
+				if len(date_returns) > 2:
+					try:
+						corr_matrix = date_returns.set_index('ticker')['simple_return'].corr()
+						# Extract upper triangle correlations
+						if len(corr_matrix) > 1:
+							correlations = corr_matrix.values[np.triu_indices_from(corr_matrix.values, k=1)]
+							ticker_correlations.extend(correlations)
+					except Exception:
+						pass
+
+		stats[regime_names[regime_id]] = {
+			# Volatility characteristics
+			'volatility_mean': float(volatility_values.mean()),
+			'volatility_std': float(volatility_values.std()),
+			'volatility_min': float(volatility_values.min()),
+			'volatility_max': float(volatility_values.max()),
+			'volatility_median': float(volatility_values.median()),
+
+			# Return characteristics
+			'return_mean': float(returns_values.mean()),
+			'return_std': float(returns_values.std()),
+			'return_skewness': float(returns_values.skew()),
+			'return_kurtosis': float(returns_values.kurtosis()),
+
+			# Volume characteristics
+			'volume_mean': float(volume_values.mean()),
+			'volume_std': float(volume_values.std()),
+
+			# Correlation characteristics
+			'ticker_correlation_mean': float(np.mean(ticker_correlations)) if ticker_correlations else 0.0,
+			'ticker_correlation_std': float(np.std(ticker_correlations)) if ticker_correlations else 0.0,
+
+			# Sample count
+			'n_samples': len(regime_data),
+			'unique_tickers': len(regime_data['ticker'].unique()),
+			'date_range': f"{regime_data['date'].min()} to {regime_data['date'].max()}",
+		}
+
+	logger.info("Regime Characterization Complete:")
+	for regime_name, regime_stats in stats.items():
+		logger.info(f"  {regime_name}: vol_mean={regime_stats['volatility_mean']:.6f}, vol_std={regime_stats['volatility_std']:.6f}, n_samples={regime_stats['n_samples']}")
+
+	return stats
+
