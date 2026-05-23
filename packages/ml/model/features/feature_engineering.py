@@ -6,7 +6,6 @@ from pathlib import Path
 import joblib
 import numpy as np
 import pandas as pd
-from sklearn.preprocessing import OneHotEncoder
 from utils import ARTIFACTS_DIR
 
 logger = logging.getLogger(__name__)
@@ -47,49 +46,31 @@ INDICATORS = [
 ]
 
 
-def phase_2_feature_selection() -> tuple[np.ndarray, np.ndarray, dict, OneHotEncoder]:
+def phase_2_feature_selection() -> tuple[np.ndarray, np.ndarray, dict, None]:
     """
-    Load dataset. Select 29 technical indicators (28 + market_regime). One-hot encode ticker.
+    Load dataset and select technical indicators only (no ticker encoding).
 
     Returns:
-        X: Feature matrix (n_samples, n_features) = 29 indicators + ticker dummies
+        X: Feature matrix (n_samples, n_features) = 29 indicators only
         Y: Target vector (n_samples,) with continuous volatility values
-        metadata: Dict with 'date' and 'ticker' columns (original, pre-encoding)
-        encoder: Fitted OneHotEncoder for ticker column
+        metadata: Dict with 'date' and 'ticker' columns, n_indicators, n_ticker_features
+        encoder: None (no ticker encoding applied)
     """
-    logger.info("Phase 2: Feature Selection & Encoding")
+    logger.info("Phase 2: Feature Selection (No Ticker Encoding)")
 
     # Load dataset (already validated and cleaned by dataset pipeline)
     logger.info(f"Loading dataset from {DATASET_PATH}")
     df = pd.read_parquet(DATASET_PATH)
     logger.info(f"Loaded: {df.shape[0]} rows × {df.shape[1]} columns")
 
-    # Extract metadata (original ticker and date columns before encoding)
+    # Extract metadata (original ticker and date columns for reference)
     date_column = df["date"].values
     ticker_column = df["ticker"].values
 
     # Select 29 technical indicators (28 indicators + market_regime)
-    logger.info(f"Selecting {len(INDICATORS)} technical indicators")
-    x_indicators = df[
-        INDICATORS].values  # DataFrame (pandas) -> numpy.ndarray. Same structure without labels, just info.
-    logger.info(f"Indicators shape: {x_indicators.shape}")
-
-    # One-hot encode ticker column (500+ unique stocks)
-    logger.info("One-hot encoding ticker column")
-    encoder = OneHotEncoder(
-        sparse_output=False,
-        handle_unknown="ignore",
-        dtype=np.float32,
-    )
-    x_ticker = encoder.fit_transform(df[["ticker"]])
-    # x_ticker: ndarray(n_rows, n_unique_tickers).Value = 1 if row's ticker matches column, else 0.
-    logger.info(f"Ticker encoded shape: {x_ticker.shape}")
-    # logger.info(type(x_ticker)) # <class 'numpy.ndarray'>
-
-    # Combine indicators + ticker features
-    X = np.hstack([x_indicators, x_ticker])
-    # X: Combine 34 technical indicators + 500 one-hot ticker columns. Shape=(n_rows, 534)
-    logger.info(f"Combined feature matrix X: {X.shape}")
+    logger.info(f"Selecting {len(INDICATORS)} technical indicators (no ticker encoding)")
+    X = df[INDICATORS].values
+    logger.info(f"Feature matrix X: {X.shape}")
 
     # Extract target: realized_volatility_5d (continuous volatility values)
     Y = df["realized_volatility_5d"].values
@@ -100,17 +81,12 @@ def phase_2_feature_selection() -> tuple[np.ndarray, np.ndarray, dict, OneHotEnc
         "date": date_column,
         "ticker": ticker_column,
         "n_indicators": len(INDICATORS),
-        "n_ticker_features": x_ticker.shape[1],
+        "n_ticker_features": 0,
     }
 
     # Create subdirectories
     (ARTIFACTS_DIR / "inputs").mkdir(parents=True, exist_ok=True)
     (ARTIFACTS_DIR / "legacy").mkdir(parents=True, exist_ok=True)
-
-    # Save encoder to legacy
-    encoder_path = ARTIFACTS_DIR / "legacy" / "ticker_encoder.joblib"
-    joblib.dump(encoder, encoder_path)
-    logger.info(f"Saved encoder to {encoder_path}")
 
     # Save X, Y, metadata to inputs
     X_path = ARTIFACTS_DIR / "inputs" / "X.npy"
@@ -126,4 +102,4 @@ def phase_2_feature_selection() -> tuple[np.ndarray, np.ndarray, dict, OneHotEnc
 
     logger.info(f"✓ Phase 2 complete: X {X.shape}, Y {Y.shape}")
 
-    return X, Y, metadata, encoder
+    return X, Y, metadata, None
