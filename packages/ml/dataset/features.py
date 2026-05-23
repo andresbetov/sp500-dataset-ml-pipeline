@@ -36,9 +36,6 @@ MIN_HISTORY_BY_FEATURE = {
 	"macd": 1,
 	"macd_signal": 1,
 	"macd_hist": 1,
-	"log_return_std_10": 12,
-	"log_return_std_20": 22,
-	"atr_14": 16,
 	"volume_sma_10": 11,
 	"volume_sma_20": 21,
 	"zscore_volume_20": 21,
@@ -49,13 +46,10 @@ MIN_HISTORY_BY_FEATURE = {
 	"rolling_mean_5": 6,
 	"rolling_max_10": 11,
 	"rolling_min_10": 11,
-	"high_low_range": 1,
 	"realized_volatility_5d": 11,
 }
 
 LEGACY_FEATURE_ALIASES = {
-	"rolling_std_10": "log_return_std_10",
-	"rolling_std_20": "log_return_std_20",
 	"volume_zscore": "zscore_volume_20",
 	"zscore_price_20": "zscore_price_vs_sma_20",
 }
@@ -233,54 +227,6 @@ def _add_momentum_features(df: pd.DataFrame) -> pd.DataFrame:
 	return featured
 
 
-def _add_rolling_std_features(df: pd.DataFrame) -> pd.DataFrame:
-	featured = df
-	by_ticker_return = featured.groupby("ticker", sort=False, group_keys=False)["log_return"]
-
-	for window in (10, 20):
-		featured[f"log_return_std_{window}"] = (
-			by_ticker_return.transform(
-				lambda s: s.rolling(window=window, min_periods=window).std().shift(1)
-			).astype("float64")
-		)
-
-	return featured
-
-
-
-def _add_atr_feature(df: pd.DataFrame) -> pd.DataFrame:
-	featured = df
-	required_columns = {ADJUSTED_OHLC_HIGH_COLUMN, ADJUSTED_OHLC_LOW_COLUMN}
-	missing_columns = required_columns - set(featured.columns)
-	if missing_columns:
-		missing_list = ", ".join(sorted(missing_columns))
-		raise ValueError(f"Adjusted OHLC columns are required before ATR computation: {missing_list}")
-
-	by_ticker_adj_close = featured.groupby("ticker", sort=False, group_keys=False)["adj_close"]
-	prev_adj_close = by_ticker_adj_close.shift(1)
-	true_range = pd.concat(
-		[
-			(featured[ADJUSTED_OHLC_HIGH_COLUMN] - featured[ADJUSTED_OHLC_LOW_COLUMN]),
-			(featured[ADJUSTED_OHLC_HIGH_COLUMN] - prev_adj_close).abs(),
-			(featured[ADJUSTED_OHLC_LOW_COLUMN] - prev_adj_close).abs(),
-		],
-		axis=1,
-	).max(axis=1)
-
-	featured["atr_14"] = (
-		true_range.groupby(featured["ticker"], sort=False, group_keys=False)
-		.transform(lambda s: s.rolling(window=14, min_periods=14).mean().shift(1))
-		.div(prev_adj_close)
-		.astype("float64")
-	)
-	return featured
-
-
-def _add_volatility_features(df: pd.DataFrame) -> pd.DataFrame:
-	with_rolling_std = _add_rolling_std_features(df)
-	return _add_atr_feature(with_rolling_std)
-
-
 def _add_volume_sma_features(df: pd.DataFrame) -> pd.DataFrame:
 	featured = df
 	by_ticker_volume = featured.groupby("ticker", sort=False, group_keys=False)["volume"]
@@ -387,27 +333,6 @@ def _add_rolling_extreme_features(df: pd.DataFrame) -> pd.DataFrame:
 def _add_rolling_statistics_features(df: pd.DataFrame) -> pd.DataFrame:
 	with_rolling_mean = _add_rolling_mean_features(df)
 	return _add_rolling_extreme_features(with_rolling_mean)
-
-
-def _add_basic_range_features(df: pd.DataFrame) -> pd.DataFrame:
-	featured = df
-	required_columns = {ADJUSTED_OHLC_HIGH_COLUMN, ADJUSTED_OHLC_LOW_COLUMN}
-	missing_columns = required_columns - set(featured.columns)
-	if missing_columns:
-		missing_list = ", ".join(sorted(missing_columns))
-		raise ValueError(f"Adjusted OHLC columns are required before range computation: {missing_list}")
-
-	relative_range_raw = (
-		featured[ADJUSTED_OHLC_HIGH_COLUMN] - featured[ADJUSTED_OHLC_LOW_COLUMN]
-	) / featured["adj_close"]
-	featured["high_low_range"] = (
-		relative_range_raw.groupby(featured["ticker"], sort=False, group_keys=False).shift(1).astype("float64")
-	)
-	return featured
-
-
-def _add_price_action_range_features(df: pd.DataFrame) -> pd.DataFrame:
-	return _add_basic_range_features(df)
 
 
 def _add_target_realized_volatility_5d(df: pd.DataFrame) -> pd.DataFrame:
@@ -532,11 +457,9 @@ def build_features_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 	featured = _add_lag_features(featured)
 	featured = _add_trend_features(featured)
 	featured = _add_momentum_features(featured)
-	featured = _add_volatility_features(featured)
 	featured = _add_volume_features(featured)
 	featured = _add_relative_normalization_features(featured)
 	featured = _add_rolling_statistics_features(featured)
-	featured = _add_price_action_range_features(featured)
 	featured = _drop_internal_feature_columns(featured)
 	featured = _enforce_history_based_nan_consistency(featured)
 	featured = _cast_numeric_columns_to_float64(featured)
