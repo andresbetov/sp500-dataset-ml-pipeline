@@ -43,15 +43,16 @@ INDICATORS = [
 	"zscore_price_vs_sma_20",
 	"zscore_volume_20",
 	"log_return",
+	"market_regime",  # Market regime as categorical feature (learned by XGBoost)
 ]
 
 
 def phase_2_feature_selection() -> tuple[np.ndarray, np.ndarray, dict, OneHotEncoder]:
     """
-    Load dataset. Select 28 technical indicators. One-hot encode ticker.
+    Load dataset. Select 29 technical indicators (28 + market_regime). One-hot encode ticker.
 
     Returns:
-        X: Feature matrix (n_samples, n_features) = 28 indicators + 467 ticker dummies
+        X: Feature matrix (n_samples, n_features) = 29 indicators + ticker dummies
         Y: Target vector (n_samples,) with continuous volatility values
         metadata: Dict with 'date' and 'ticker' columns (original, pre-encoding)
         encoder: Fitted OneHotEncoder for ticker column
@@ -67,7 +68,7 @@ def phase_2_feature_selection() -> tuple[np.ndarray, np.ndarray, dict, OneHotEnc
     date_column = df["date"].values
     ticker_column = df["ticker"].values
 
-    # Select 34 technical indicators
+    # Select 29 technical indicators (28 indicators + market_regime)
     logger.info(f"Selecting {len(INDICATORS)} technical indicators")
     x_indicators = df[
         INDICATORS].values  # DataFrame (pandas) -> numpy.ndarray. Same structure without labels, just info.
