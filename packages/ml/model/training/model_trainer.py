@@ -28,23 +28,6 @@ def train_xgboost_model(
 	Target: realized_volatility_5d (continuous volatility values)
 	Objective: Minimize prediction error for future volatility
 
-	Hyperparameter Configuration:
-	─────────────────────────────
-	- max_depth=8: 496 features (29 indicators + 467 ticker dummies) need deeper
-	  trees to capture ticker-indicator interactions (e.g., TSLA x RSI_14).
-	- min_child_weight=3: Volatility is noisy with long tails. Higher weight
-	  prevents leaves from fitting outlier spikes at the cost of bias.
-	- gamma=0.1: Mild split regularization to avoid fitting noise in calm periods.
-	- n_estimators=1000: 2M+ training samples per fold support more iterations;
-	  with learning_rate=0.05 the model sees more structure without overfitting.
-	- reg_alpha=0.5: L1 regularization encourages sparsity across the 467 ticker
-	  one-hot columns, forcing the model to rely more on financial indicators.
-	- reg_lambda=2.0: L2 regularization controls overall complexity on noisy data.
-	- colsample_bytree=0.7: With 496 features, aggressive column subsampling forces
-	  diverse trees — some focus on ticker effects, others on indicator patterns.
-	- subsample=0.85: Slightly more data per tree than default (0.8), justified
-	  by the large dataset size reducing sampling variance.
-
 	Args:
 		X_train: Training features (n_samples, n_features)
 		y_train: Training target (n_samples,) with continuous volatility values
@@ -72,32 +55,31 @@ def train_xgboost_model(
 		eval_metric="rmse",
 
 		# Tree structure
-		max_depth=8,                   # Deeper trees for 496-feature interaction discovery
-		min_child_weight=3.0,          # Prevents leaf overfitting on noisy vol spikes
-		gamma=0.1,                     # Mild split regularization
+		max_depth=6,
+		min_child_weight=1.0,
+		gamma=0.0,
 
 		# Learning rate & iterations
-		learning_rate=0.05,            # Conservative for stable convergence
-		n_estimators=1000,             # 2M+ samples support more boosting rounds
+		learning_rate=0.05,
+		n_estimators=500,
 
 		# Regularization
-		reg_alpha=0.5,                 # L1 sparsity on 467 ticker one-hot columns
-		reg_lambda=2.0,                # General regularization for noisy target
+		reg_alpha=0.1,
+		reg_lambda=1.0,
 
 		# Subsampling
-		subsample=0.85,                # Slightly more data per tree
-		colsample_bytree=0.7,          # Forces diverse trees across 496 features
-		colsample_bylevel=0.7,         # Consistent subsampling per level
+		subsample=0.8,
+		colsample_bytree=0.8,
+		colsample_bylevel=0.8,
 	)
 
 	logger.info("Training with regression hyperparameters:")
-	logger.info("  - objective: reg:squarederror")
-	logger.info("  - max_depth: 8 (interaction discovery)")
-	logger.info("  - min_child_weight: 3.0 (outlier robustness)")
-	logger.info("  - gamma: 0.1 (split regularization)")
-	logger.info("  - learning_rate: 0.05, n_estimators: 1000")
-	logger.info("  - reg_alpha: 0.5, reg_lambda: 2.0")
-	logger.info("  - subsample: 0.85, colsample: 0.7/0.7")
+	logger.info("  - max_depth: 6")
+	logger.info("  - min_child_weight: 1.0")
+	logger.info("  - gamma: 0.0")
+	logger.info("  - learning_rate: 0.05, n_estimators: 500")
+	logger.info("  - reg_alpha: 0.1, reg_lambda: 1.0")
+	logger.info("  - subsample: 0.8, colsample: 0.8/0.8")
 
 	if X_val is not None and y_val is not None:
 		y_val_reg = y_val.astype(np.float64)
