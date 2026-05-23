@@ -113,7 +113,7 @@ def train_xgboost_model(
 	else:
 		model.fit(X_train, y_train_reg, verbose=False)
 
-	logger.info("✓ Regression model training complete")
+	logger.info("Regression model training complete")
 	best_iteration = getattr(model, "best_iteration", None)
 	if best_iteration is not None:
 		logger.info(f"  - Best iteration (early stopping): {best_iteration}")
