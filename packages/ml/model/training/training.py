@@ -65,13 +65,17 @@ def _train_fold_model(
 
 	# Train model on fold_i_train data only (no leakage)
 	try:
+		train_start = time.time()
 		model, label_mapping = train_xgboost_model(X_train, y_train, X_val=None, y_val=None)
+		train_time = time.time() - train_start
 	except Exception as e:
 		logger.error(f"Fold {fold_idx} model training failed: {e}")
 		raise
 
 	# Generate predictions on fold_i_test data
+	inference_start = time.time()
 	y_pred = model.predict(X_test)
+	inference_time = time.time() - inference_start
 
 	# Compute metrics
 	try:
@@ -85,7 +89,8 @@ def _train_fold_model(
 		test_rmse = float('nan')
 
 	fold_elapsed = time.time() - fold_start
-	logger.info(f"  Fold {fold_idx} complete: R²={test_r2:.4f}, MAE={test_mae:.6f}, RMSE={test_rmse:.6f} ({fold_elapsed:.1f}s)")
+	logger.info(f"  Fold {fold_idx}: R²={test_r2:.4f}, MAE={test_mae:.6f}, RMSE={test_rmse:.6f}")
+	logger.info(f"    └─ Timing: {train_time:.1f}s train + {inference_time:.1f}s inference = {fold_elapsed:.1f}s total")
 
 	# Save model
 	checkpoints_dir = ARTIFACTS_DIR / "checkpoints"
@@ -101,6 +106,12 @@ def _train_fold_model(
 		"test_r2": test_r2,
 		"test_mae": test_mae,
 		"test_rmse": test_rmse,
+		"n_train_samples": len(X_train),
+		"n_test_samples": len(X_test),
+		"n_features": X_train.shape[1],
+		"train_time_seconds": train_time,
+		"inference_time_seconds": inference_time,
+		"fold_time_seconds": fold_elapsed,
 		"fold_model_path": str(model_path),
 		"train_date_range": (fold_data["train_date_min"], fold_data["train_date_max"]),
 		"test_date_range": (fold_data["test_date_min"], fold_data["test_date_max"]),
@@ -128,10 +139,16 @@ def _aggregate_fold_results(fold_predictions_list: list) -> tuple[dict, dict]:
 			"train_date_max": pred_dict["train_date_range"][1],
 			"test_date_min": pred_dict["test_date_range"][0],
 			"test_date_max": pred_dict["test_date_range"][1],
+			"n_train_samples": int(pred_dict["n_train_samples"]),
+			"n_test_samples": int(pred_dict["n_test_samples"]),
+			"n_features": int(pred_dict["n_features"]),
 			"model_path": pred_dict["fold_model_path"],
 			"test_r2": pred_dict["test_r2"],
 			"test_mae": pred_dict["test_mae"],
 			"test_rmse": pred_dict["test_rmse"],
+			"train_time_seconds": pred_dict["train_time_seconds"],
+			"inference_time_seconds": pred_dict["inference_time_seconds"],
+			"fold_time_seconds": pred_dict["fold_time_seconds"],
 		}
 
 	return validation_predictions, fold_training_summary
@@ -215,6 +232,11 @@ def phase_4_training() -> tuple[dict, dict, list]:
 	# Aggregate predictions and metrics across all folds
 	validation_predictions, fold_training_summary = _aggregate_fold_results(fold_predictions_list)
 
+	# Add feature breakdown (indicators vs ticker one-hot) from metadata
+	for fold_key in fold_training_summary:
+		fold_training_summary[fold_key]["n_features_indicators"] = int(metadata["n_indicators"])
+		fold_training_summary[fold_key]["n_features_ticker"] = int(metadata["n_ticker_features"])
+
 	# Save outputs
 	_save_training_results(validation_predictions, fold_training_summary)
 
@@ -238,9 +260,12 @@ def phase_4_training() -> tuple[dict, dict, list]:
 		mean_rmse = np.mean(valid_rmse)
 		std_rmse = np.std(valid_rmse)
 
+		# Aggregate timing
+		total_train_time = sum(s.get("train_time_seconds", 0) for s in fold_training_summary.values())
+		total_inference_time = sum(s.get("inference_time_seconds", 0) for s in fold_training_summary.values())
 		total_test_samples = sum(len(p["test_pred"]) for p in fold_predictions_list)
 
-		logger.info(f"Phase 4 complete: 5 fold model(s), {total_test_samples:,} test samples total, {total_time:.1f}s")
+		logger.info(f"Phase 4 complete: 5 fold model(s), {total_test_samples:,} test samples total, {total_time:.1f}s ({total_train_time:.1f}s train + {total_inference_time:.1f}s inference)")
 		logger.info(f"Cross-validation results (GLOBAL): R²={mean_r2:.4f}±{std_r2:.4f}, MAE={mean_mae:.6f}±{std_mae:.6f}, RMSE={mean_rmse:.6f}±{std_rmse:.6f}")
 
 		# Log per-fold metrics
@@ -248,6 +273,8 @@ def phase_4_training() -> tuple[dict, dict, list]:
 			fold_r2 = fold_training_summary[fold_key].get("test_r2", float('nan'))
 			fold_mae = fold_training_summary[fold_key].get("test_mae", float('nan'))
 			fold_rmse = fold_training_summary[fold_key].get("test_rmse", float('nan'))
+			train_time = fold_training_summary[fold_key].get("train_time_seconds", 0)
+			inference_time = fold_training_summary[fold_key].get("inference_time_seconds", 0)
 			train_date_min = fold_training_summary[fold_key].get("train_date_min", "?")
 			train_date_max = fold_training_summary[fold_key].get("train_date_max", "?")
 			test_date_min = fold_training_summary[fold_key].get("test_date_min", "?")
@@ -255,6 +282,7 @@ def phase_4_training() -> tuple[dict, dict, list]:
 
 			logger.info(f"  {fold_key}: R²={fold_r2:.4f}, MAE={fold_mae:.6f}, RMSE={fold_rmse:.6f}")
 			logger.info(f"    └─ Train: {train_date_min} to {train_date_max} | Test: {test_date_min} to {test_date_max}")
+			logger.info(f"    └─ Timing: {train_time:.1f}s train + {inference_time:.1f}s inference")
 	else:
 		logger.info(f"Phase 4 complete: 5 fold model(s), {total_time:.1f}s (no valid metrics)")
 
