@@ -36,9 +36,6 @@ MIN_HISTORY_BY_FEATURE = {
 	"macd": 1,
 	"macd_signal": 1,
 	"macd_hist": 1,
-	"log_return_std_10": 12,
-	"log_return_std_20": 22,
-	"atr_14": 16,
 	"volume_sma_10": 11,
 	"volume_sma_20": 21,
 	"zscore_volume_20": 21,
@@ -49,13 +46,10 @@ MIN_HISTORY_BY_FEATURE = {
 	"rolling_mean_5": 6,
 	"rolling_max_10": 11,
 	"rolling_min_10": 11,
-	"high_low_range": 1,
-	"price_direction_5d": 6,
+	"realized_volatility_5d": 11,
 }
 
 LEGACY_FEATURE_ALIASES = {
-	"rolling_std_10": "log_return_std_10",
-	"rolling_std_20": "log_return_std_20",
 	"volume_zscore": "zscore_volume_20",
 	"zscore_price_20": "zscore_price_vs_sma_20",
 }
@@ -233,54 +227,6 @@ def _add_momentum_features(df: pd.DataFrame) -> pd.DataFrame:
 	return featured
 
 
-def _add_rolling_std_features(df: pd.DataFrame) -> pd.DataFrame:
-	featured = df
-	by_ticker_return = featured.groupby("ticker", sort=False, group_keys=False)["log_return"]
-
-	for window in (10, 20):
-		featured[f"log_return_std_{window}"] = (
-			by_ticker_return.transform(
-				lambda s: s.rolling(window=window, min_periods=window).std().shift(1)
-			).astype("float64")
-		)
-
-	return featured
-
-
-
-def _add_atr_feature(df: pd.DataFrame) -> pd.DataFrame:
-	featured = df
-	required_columns = {ADJUSTED_OHLC_HIGH_COLUMN, ADJUSTED_OHLC_LOW_COLUMN}
-	missing_columns = required_columns - set(featured.columns)
-	if missing_columns:
-		missing_list = ", ".join(sorted(missing_columns))
-		raise ValueError(f"Adjusted OHLC columns are required before ATR computation: {missing_list}")
-
-	by_ticker_adj_close = featured.groupby("ticker", sort=False, group_keys=False)["adj_close"]
-	prev_adj_close = by_ticker_adj_close.shift(1)
-	true_range = pd.concat(
-		[
-			(featured[ADJUSTED_OHLC_HIGH_COLUMN] - featured[ADJUSTED_OHLC_LOW_COLUMN]),
-			(featured[ADJUSTED_OHLC_HIGH_COLUMN] - prev_adj_close).abs(),
-			(featured[ADJUSTED_OHLC_LOW_COLUMN] - prev_adj_close).abs(),
-		],
-		axis=1,
-	).max(axis=1)
-
-	featured["atr_14"] = (
-		true_range.groupby(featured["ticker"], sort=False, group_keys=False)
-		.transform(lambda s: s.rolling(window=14, min_periods=14).mean().shift(1))
-		.div(prev_adj_close)
-		.astype("float64")
-	)
-	return featured
-
-
-def _add_volatility_features(df: pd.DataFrame) -> pd.DataFrame:
-	with_rolling_std = _add_rolling_std_features(df)
-	return _add_atr_feature(with_rolling_std)
-
-
 def _add_volume_sma_features(df: pd.DataFrame) -> pd.DataFrame:
 	featured = df
 	by_ticker_volume = featured.groupby("ticker", sort=False, group_keys=False)["volume"]
@@ -389,36 +335,26 @@ def _add_rolling_statistics_features(df: pd.DataFrame) -> pd.DataFrame:
 	return _add_rolling_extreme_features(with_rolling_mean)
 
 
-def _add_basic_range_features(df: pd.DataFrame) -> pd.DataFrame:
+def _add_target_realized_volatility_5d(df: pd.DataFrame) -> pd.DataFrame:
+	"""
+	Compute realized volatility: rolling std of log_return for next 5 trading days.
+
+	For each row, this is the actual volatility that occurred in the forward window.
+	Uses shift(-5) to prevent look-ahead bias: volatility is computed THEN shifted back.
+
+	This represents the true realized volatility that would occur in the next 5 days,
+	making it a perfect target for teaching the model about volatility forecasting.
+	"""
 	featured = df
-	required_columns = {ADJUSTED_OHLC_HIGH_COLUMN, ADJUSTED_OHLC_LOW_COLUMN}
-	missing_columns = required_columns - set(featured.columns)
-	if missing_columns:
-		missing_list = ", ".join(sorted(missing_columns))
-		raise ValueError(f"Adjusted OHLC columns are required before range computation: {missing_list}")
 
-	relative_range_raw = (
-		featured[ADJUSTED_OHLC_HIGH_COLUMN] - featured[ADJUSTED_OHLC_LOW_COLUMN]
-	) / featured["adj_close"]
-	featured["high_low_range"] = (
-		relative_range_raw.groupby(featured["ticker"], sort=False, group_keys=False).shift(1).astype("float64")
-	)
-	return featured
-
-
-def _add_price_action_range_features(df: pd.DataFrame) -> pd.DataFrame:
-	return _add_basic_range_features(df)
-
-
-def _add_target_price_direction(df: pd.DataFrame) -> pd.DataFrame:
-	featured = df
-	future_close = featured.groupby("ticker", sort=False, group_keys=False)["adj_close"].shift(-5)
-	price_change = (future_close - featured["adj_close"]) / featured["adj_close"]
-
-	featured["price_direction_5d"] = np.where(
-		price_change > DIRECTION_TOLERANCE, 1,
-		np.where(price_change < -DIRECTION_TOLERANCE, -1, 0)
+	# Group by ticker to prevent cross-ticker leakage
+	# Compute rolling 5-day std of log_return, then shift -5 to get realized volatility
+	featured["realized_volatility_5d"] = featured.groupby(
+		"ticker", sort=False, group_keys=False
+	)["log_return"].transform(
+		lambda x: x.rolling(window=5, min_periods=5).std().shift(-5)
 	).astype("float64")
+
 	return featured
 
 
@@ -521,18 +457,17 @@ def build_features_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 	featured = _add_lag_features(featured)
 	featured = _add_trend_features(featured)
 	featured = _add_momentum_features(featured)
-	featured = _add_volatility_features(featured)
 	featured = _add_volume_features(featured)
 	featured = _add_relative_normalization_features(featured)
 	featured = _add_rolling_statistics_features(featured)
-	featured = _add_price_action_range_features(featured)
 	featured = _drop_internal_feature_columns(featured)
 	featured = _enforce_history_based_nan_consistency(featured)
 	featured = _cast_numeric_columns_to_float64(featured)
 	featured = _add_legacy_feature_aliases(featured)
 	featured = _sort_stably_by_ticker_date(featured)
 	featured = _reorder_columns_deterministically(featured)
-	featured = _add_target_price_direction(featured)
+	featured = _add_target_realized_volatility_5d(featured)
+	featured = _add_market_regime_feature(featured)
 
 	logger.info(
 		"build_features_dataframe: rows=%d, tickers=%d",
@@ -540,3 +475,138 @@ def build_features_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 		featured["ticker"].nunique(),
 	)
 	return featured
+
+
+def _add_market_regime_feature(df: pd.DataFrame) -> pd.DataFrame:
+	"""
+	Assign market regime based on historical periods.
+
+	Regimes:
+	- 0: 2000-2007 (pre-crisis)
+	- 1: 2008-2010 (financial crisis)
+	- 2: 2011-2019 (post-crisis recovery)
+	- 3: 2020-2021 (COVID)
+	- 4: 2022-2026 (post-COVID inflation)
+
+	Returns:
+		DataFrame with new 'market_regime' column (int8: 0-4)
+	"""
+	def get_regime(date: pd.Timestamp) -> int:
+		year = date.year
+		if year <= 2007:
+			return 0
+		elif year <= 2010:
+			return 1
+		elif year <= 2019:
+			return 2
+		elif year <= 2021:
+			return 3
+		else:
+			return 4
+
+	df['market_regime'] = df['date'].apply(get_regime).astype('int8')
+	return df
+
+
+def _characterize_regimes(df: pd.DataFrame) -> dict:
+	"""
+	Calculate statistics per market regime (regime "fingerprint").
+
+	Returns:
+		Dict with regime statistics:
+		{
+			"regime_name": {
+				"volatility_mean": float,
+				"volatility_std": float,
+				"volatility_min": float,
+				"volatility_max": float,
+				"volatility_median": float,
+				"return_mean": float,
+				"return_std": float,
+				"return_skewness": float,
+				"return_kurtosis": float,
+				"volume_mean": float,
+				"volume_std": float,
+				"ticker_correlation_mean": float,
+				"ticker_correlation_std": float,
+				"n_samples": int,
+				"unique_tickers": int,
+				"date_range": str,
+			}
+		}
+	"""
+	regime_names = {
+		0: "pre-crisis (2000-2007)",
+		1: "financial-crisis (2008-2010)",
+		2: "post-crisis (2011-2019)",
+		3: "covid (2020-2021)",
+		4: "post-covid (2022-2026)"
+	}
+
+	stats = {}
+
+	for regime_id in range(5):
+		regime_data = df[df['market_regime'] == regime_id]
+
+		if len(regime_data) == 0:
+			logger.warning(f"Regime {regime_id}: no data found")
+			continue
+
+		# Volatility statistics
+		volatility_values = regime_data['realized_volatility_5d']
+
+		# Return statistics
+		returns_values = regime_data['simple_return'].dropna()
+
+		# Volume statistics
+		volume_values = regime_data['volume']
+
+		# Ticker correlation (per regime)
+		ticker_correlations = []
+		for _, date_group in regime_data.groupby('date'):
+			if len(date_group) > 2:
+				date_returns = date_group[['ticker', 'simple_return']].dropna()
+				if len(date_returns) > 2:
+					try:
+						corr_matrix = date_returns.set_index('ticker')['simple_return'].corr()
+						# Extract upper triangle correlations
+						if len(corr_matrix) > 1:
+							correlations = corr_matrix.values[np.triu_indices_from(corr_matrix.values, k=1)]
+							ticker_correlations.extend(correlations)
+					except Exception:
+						pass
+
+		stats[regime_names[regime_id]] = {
+			# Volatility characteristics
+			'volatility_mean': float(volatility_values.mean()),
+			'volatility_std': float(volatility_values.std()),
+			'volatility_min': float(volatility_values.min()),
+			'volatility_max': float(volatility_values.max()),
+			'volatility_median': float(volatility_values.median()),
+
+			# Return characteristics
+			'return_mean': float(returns_values.mean()),
+			'return_std': float(returns_values.std()),
+			'return_skewness': float(returns_values.skew()),
+			'return_kurtosis': float(returns_values.kurtosis()),
+
+			# Volume characteristics
+			'volume_mean': float(volume_values.mean()),
+			'volume_std': float(volume_values.std()),
+
+			# Correlation characteristics
+			'ticker_correlation_mean': float(np.mean(ticker_correlations)) if ticker_correlations else 0.0,
+			'ticker_correlation_std': float(np.std(ticker_correlations)) if ticker_correlations else 0.0,
+
+			# Sample count
+			'n_samples': len(regime_data),
+			'unique_tickers': len(regime_data['ticker'].unique()),
+			'date_range': f"{regime_data['date'].min()} to {regime_data['date'].max()}",
+		}
+
+	logger.info("Regime Characterization Complete:")
+	for regime_name, regime_stats in stats.items():
+		logger.info(f"  {regime_name}: vol_mean={regime_stats['volatility_mean']:.6f}, vol_std={regime_stats['volatility_std']:.6f}, n_samples={regime_stats['n_samples']}")
+
+	return stats
+
