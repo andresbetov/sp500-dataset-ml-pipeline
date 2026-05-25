@@ -41,6 +41,8 @@ function displayModelInfo() {
     setText('trainTestSplit', formatNumber(tr.train_samples) + ' / ' + formatNumber(tr.test_samples));
     setText('trainDateRange', tr.date_ranges.train.min + ' → ' + tr.date_ranges.train.max);
     setText('testDateRange', tr.date_ranges.test.min + ' → ' + tr.date_ranges.test.max);
+    setText('trainDateRange2', tr.date_ranges.train.min + ' → ' + tr.date_ranges.train.max);
+    setText('testDateRange2', tr.date_ranges.test.min + ' → ' + tr.date_ranges.test.max);
     setText('cvGap', tr.gap_days + ' días');
     setText('targetMean', (d.target.mean * 100).toFixed(3) + '%');
     setText('targetStd', (d.target.std * 100).toFixed(3) + '%');
