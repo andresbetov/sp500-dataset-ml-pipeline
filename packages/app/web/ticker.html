@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>S&P 500 Volatility Predictor | Ticker Analysis</title>
+    <link rel="stylesheet" href="css/style.css">
+    <link rel="stylesheet" href="css/ticker.css">
+</head>
+<body class="bg-slate-900">
+    <!-- Navigation -->
+    <nav class="navbar">
+        <div class="navbar-container">
+            <div class="navbar-brand">
+                <svg class="logo-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <polyline points="23 6 13.5 15.5 8.5 10.5 1 17"></polyline>
+                    <polyline points="17 6 23 6 23 12"></polyline>
+                </svg>
+                <div class="brand-text">
+                    <h1>S&P 500 Volatility Predictor</h1>
+                    <p>ML-Powered 5D Volatility Forecasting</p>
+                </div>
+            </div>
+
+            <div class="navbar-search">
+                <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="11" cy="11" r="8"></circle>
+                    <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                </svg>
+                <input type="text" id="globalSearch" placeholder="Buscar ticker..." class="search-input">
+                <div id="searchSuggestions" class="search-suggestions hidden"></div>
+            </div>
+
+            <div class="navbar-menu">
+                <a href="index.html" class="nav-link">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="18" rx="1"></rect><rect x="14" y="8" width="7" height="13" rx="1"></rect></svg>
+                    Dashboard
+                </a>
+                <a href="screener.html" class="nav-link">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"></rect><line x1="3" y1="9" x2="21" y2="9"></line><line x1="9" y1="21" x2="9" y2="9"></line></svg>
+                    Screener
+                </a>
+                <a href="model-hub.html" class="nav-link">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a10 10 0 1 0 10 10h-10V2z"></path><path d="M21.5 12H12V2.5A9.5 9.5 0 0 1 21.5 12z"></path></svg>
+                    Model Hub
+                </a>
+                <button id="settingsBtn" class="nav-btn" title="Configuración">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"></circle><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"></path></svg>
+                </button>
+                <button id="healthBtn" class="nav-btn" title="Estado de la API">
+                    <span id="healthStatus"></span>
+                </button>
+            </div>
+        </div>
+    </nav>
+
+    <main class="main-container-full">
+        <!-- Hero Header -->
+        <div class="ticker-hero">
+            <div class="hero-content">
+                <button id="backBtn" class="btn-back" title="Volver">← Volver</button>
+                <div class="hero-info">
+                    <h1 id="tickerTitle" class="hero-title">LOADING...</h1>
+                    <p id="tickerSubtitle" class="hero-subtitle">Cargando datos...</p>
+                </div>
+            </div>
+        </div>
+
+        <section class="content-full">
+            <!-- Main Prediction Card (Top Priority) -->
+            <div class="card card-prediction-hero">
+                <div class="card-header-premium">
+                    <div>
+                        <h2>Predicción de Volatilidad 5D</h2>
+                        <p class="subtitle-text">Volatilidad realizada esperada en los próximos 5 días</p>
+                    </div>
+                    <button id="refreshPred" class="btn-refresh-large" title="Actualizar">↻</button>
+                </div>
+                <div class="card-body-prediction">
+                    <div class="prediction-hero">
+                        <div class="prediction-main">
+                            <div class="pred-circle">
+                                <div class="pred-value-large" id="predVolatility">0.0234</div>
+                                <div class="pred-unit">daily</div>
+                            </div>
+                            <div class="prediction-details">
+                                <div class="pred-detail-item">
+                                    <span class="label">Annualized (√252)</span>
+                                    <span class="value-highlight" id="annualized">37.10%</span>
+                                </div>
+                                <div class="pred-detail-item">
+                                    <span class="label">vs Historical Mean</span>
+                                    <span class="value-trend" id="vsMean">▲ +8.7%</span>
+                                </div>
+                                <div class="pred-detail-item">
+                                    <span class="label">Model Confidence (R²)</span>
+                                    <span class="value-confidence" id="confidence">78.21%</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Data Quality Bar -->
+                    <div class="data-quality-bar">
+                        <div class="dq-item">
+                            <div class="dq-label">Downloaded</div>
+                            <div class="dq-value" id="dqDownloaded">127</div>
+                        </div>
+                        <div class="dq-divider"></div>
+                        <div class="dq-item">
+                            <div class="dq-label">OHLC Valid</div>
+                            <div class="dq-value" id="dqValid">127</div>
+                        </div>
+                        <div class="dq-divider"></div>
+                        <div class="dq-item">
+                            <div class="dq-label">Features Complete</div>
+                            <div class="dq-value" id="dqComplete">122</div>
+                        </div>
+                        <div class="dq-divider"></div>
+                        <div class="dq-item">
+                            <div class="dq-label">Date Range</div>
+                            <div class="dq-value dq-date" id="dqDateRange">2025-11-24 → 2026-05-23</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Two Column Layout: Chart + Indicators -->
+            <div class="grid-ticker-main">
+                <!-- History Chart (Left - Larger) -->
+                <div class="card card-chart-large">
+                    <div class="card-header">
+                        <h3>6-Month Volatility History</h3>
+                        <span class="chart-subtitle">Daily Volatility with Trend</span>
+                    </div>
+                    <div class="card-body-chart">
+                        <canvas id="historyChart" height="320"></canvas>
+                    </div>
+                </div>
+
+                <!-- Right: Sticky Sidebar (Indicators + Actions) -->
+                <div class="sticky-sidebar">
+                    <!-- Technical Indicators -->
+                    <div class="card card-indicators-sticky">
+                        <div class="card-header">
+                            <h3>Technical Indicators (29)</h3>
+                        </div>
+                        <div class="card-body">
+                        <div class="indicator-select-wrapper">
+                            <select id="indicatorCategory" class="indicator-select">
+                                <option value="trend">Trend</option>
+                                <option value="momentum">Momentum</option>
+                                <option value="volatility">Volatility</option>
+                                <option value="volume">Volume</option>
+                                <option value="regime">Regime</option>
+                            </select>
+                        </div>
+                        <div class="tab-content-sticky">
+                            <div id="trend" class="tab-pane active">
+                                <div class="indicator-list-compact">
+                                    <div class="ind-row">
+                                        <span class="ind-label">EMA-12</span>
+                                        <span class="ind-value" id="ema12">--</span>
+                                    </div>
+                                    <div class="ind-row">
+                                        <span class="ind-label">EMA-26</span>
+                                        <span class="ind-value" id="ema26">--</span>
+                                    </div>
+                                    <div class="ind-row">
+                                        <span class="ind-label">SMA-50</span>
+                                        <span class="ind-value" id="sma50">--</span>
+                                    </div>
+                                    <div class="ind-row">
+                                        <span class="ind-label">vs SMA-50</span>
+                                        <span class="ind-value trend" id="priceSma50">--</span>
+                                    </div>
+                                    <div class="ind-row">
+                                        <span class="ind-label">Z-Score</span>
+                                        <span class="ind-value" id="zscoceSma">--</span>
+                                    </div>
+                                </div>
+                            </div>
+                            <div id="momentum" class="tab-pane">
+                                <div class="indicator-list-compact">
+                                    <div class="ind-row">
+                                        <span class="ind-label">RSI-14</span>
+                                        <span class="ind-value" id="rsi14">--</span>
+                                    </div>
+                                    <div class="ind-row">
+                                        <span class="ind-label">MACD</span>
+                                        <span class="ind-value" id="macd">--</span>
+                                    </div>
+                                    <div class="ind-row">
+                                        <span class="ind-label">Signal</span>
+                                        <span class="ind-value" id="macdSignal">--</span>
+                                    </div>
+                                    <div class="ind-row">
+                                        <span class="ind-label">Histogram</span>
+                                        <span class="ind-value" id="macdHist">--</span>
+                                    </div>
+                                </div>
+                            </div>
+                            <div id="volatility" class="tab-pane">
+                                <div class="indicator-list-compact">
+                                    <div class="ind-row">
+                                        <span class="ind-label">ATR-14</span>
+                                        <span class="ind-value" id="atr14">--</span>
+                                    </div>
+                                    <div class="ind-row">
+                                        <span class="ind-label">Vol 10d</span>
+                                        <span class="ind-value" id="vol10">--</span>
+                                    </div>
+                                    <div class="ind-row">
+                                        <span class="ind-label">Vol 20d</span>
+                                        <span class="ind-value" id="vol20">--</span>
+                                    </div>
+                                    <div class="ind-row">
+                                        <span class="ind-label">Log Return</span>
+                                        <span class="ind-value" id="logReturn">--</span>
+                                    </div>
+                                </div>
+                            </div>
+                            <div id="volume" class="tab-pane">
+                                <div class="indicator-list-compact">
+                                    <div class="ind-row">
+                                        <span class="ind-label">Avg Vol 20d</span>
+                                        <span class="ind-value" id="avgVol20">--</span>
+                                    </div>
+                                    <div class="ind-row">
+                                        <span class="ind-label">Z-Score Vol</span>
+                                        <span class="ind-value" id="volZscore">--</span>
+                                    </div>
+                                    <div class="ind-row">
+                                        <span class="ind-label">Vol Change</span>
+                                        <span class="ind-value trend" id="volChange">--</span>
+                                    </div>
+                                </div>
+                            </div>
+                            <div id="regime" class="tab-pane">
+                                <div class="indicator-list-compact">
+                                    <div class="ind-row">
+                                        <span class="ind-label">Regime ID</span>
+                                        <span class="ind-value" id="regimeId">--</span>
+                                    </div>
+                                    <div class="ind-row">
+                                        <span class="ind-label">Label</span>
+                                        <span class="ind-value regime" id="regimeLabel">--</span>
+                                    </div>
+                                    <div class="ind-row">
+                                        <span class="ind-label">Period</span>
+                                        <span class="ind-value" id="regimePeriod">--</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                    <!-- Export Actions inside sidebar -->
+                    <div class="card-actions-sidebar">
+                        <button id="exportDataBtn" class="btn btn-secondary btn-action">
+                            📥 Export Data (CSV)
+                        </button>
+                        <button id="exportChartBtn" class="btn btn-secondary btn-action">
+                            📤 Export Chart (PNG)
+                        </button>
+                        <button id="openScreenerBtn" class="btn btn-primary btn-action">
+                            ↩️ Back to Screener
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Statistics Grid (3 columns) -->
+            <div class="grid-stats">
+                <!-- Historical Stats -->
+                <div class="card card-stats">
+                    <div class="card-header">
+                        <h3>Historical Stats (6m)</h3>
+                    </div>
+                    <div class="card-body-stats">
+                        <div class="stat-row">
+                            <span class="stat-label">Mean</span>
+                            <span class="stat-value" id="histMean">0.0215</span>
+                        </div>
+                        <div class="stat-row">
+                            <span class="stat-label">Median</span>
+                            <span class="stat-value" id="histMedian">0.0209</span>
+                        </div>
+                        <div class="stat-row">
+                            <span class="stat-label">Std Dev</span>
+                            <span class="stat-value" id="histStd">0.0032</span>
+                        </div>
+                        <div class="stat-row">
+                            <span class="stat-label">Min</span>
+                            <span class="stat-value accent-green" id="histMin">0.0087</span>
+                        </div>
+                        <div class="stat-row">
+                            <span class="stat-label">Max</span>
+                            <span class="stat-value accent-red" id="histMax">0.0876</span>
+                        </div>
+                        <div class="stat-row">
+                            <span class="stat-label">Q1-Q3</span>
+                            <span class="stat-value" id="histQ1Q3">0.0167-0.0289</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Feature Importance -->
+                <div class="card card-importance">
+                    <div class="card-header">
+                        <h3>Top Features</h3>
+                        <span class="subtitle-small">Global Model</span>
+                    </div>
+                    <div class="card-body-importance">
+                        <table class="table-compact-importance">
+                            <tbody id="featureImportanceBody">
+                                <tr><td colspan="3" class="loading">Cargando...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Prediction Context -->
+                <div class="card card-context">
+                    <div class="card-header">
+                        <h3>Prediction Context</h3>
+                    </div>
+                    <div class="card-body-context">
+                        <div class="context-item">
+                            <span class="context-label">Dataset Updated</span>
+                            <span class="context-value" id="contextLastUpdate">2026-05-23</span>
+                        </div>
+                        <div class="context-item">
+                            <span class="context-label">Model Version</span>
+                            <span class="context-value">Fold 4 (Production)</span>
+                        </div>
+                        <div class="context-item">
+                            <span class="context-label">Confidence Range</span>
+                            <span class="context-value">±0.0033 (95%)</span>
+                        </div>
+                        <div class="context-item">
+                            <span class="context-label">Training Samples</span>
+                            <span class="context-value">2.1M (5 years)</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+        </section>
+    </main>
+
+    <script src="js/common.js"></script>
+    <script src="js/api-client.js"></script>
+    <script src="js/ticker.js"></script>
+</body>
+</html>
+
