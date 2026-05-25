@@ -1,0 +1,7 @@
+.idea
+.env
+/data/processed/dataset.parquet
+*.md
+*.joblib
+*.pkl
+/packages/ml/model/artifacts

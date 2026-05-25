@@ -1,0 +1,224 @@
+/* ========================================
+   DASHBOARD - Premium Design
+   ======================================== */
+
+.card-status {
+    border: 1px solid var(--border-color);
+}
+
+.status-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: var(--spacing-md);
+}
+
+/* Regime Distribution */
+.regime-distribution {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.regime-row {
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-sm);
+    padding: 4px 0;
+    font-size: var(--font-size-xs);
+}
+
+.regime-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+
+.regime-dot.regime-0 { background: #6B7280; }
+.regime-dot.regime-1 { background: #EF4444; }
+.regime-dot.regime-2 { background: #F59E0B; }
+.regime-dot.regime-3 { background: #8B5CF6; }
+.regime-dot.regime-4 { background: #10B981; }
+
+.regime-label {
+    color: var(--text-muted);
+    flex: 1;
+}
+
+.regime-count {
+    color: var(--text-light);
+    font-weight: 600;
+    min-width: 24px;
+    text-align: right;
+}
+
+.regime-pct {
+    color: var(--text-muted);
+    min-width: 32px;
+    text-align: right;
+}
+
+.regime-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+}
+
+.regime-badge.regime-0 { background: rgba(107, 114, 128, 0.15); color: #9CA3AF; }
+.regime-badge.regime-1 { background: rgba(239, 68, 68, 0.15); color: #FCA5A5; }
+.regime-badge.regime-2 { background: rgba(245, 158, 11, 0.15); color: #FCD34D; }
+.regime-badge.regime-3 { background: rgba(139, 92, 246, 0.15); color: #C4B5FD; }
+.regime-badge.regime-4 { background: rgba(16, 185, 129, 0.15); color: #6EE7B7; }
+
+#distributionChart {
+    max-width: 100%;
+    height: auto;
+    display: block;
+}
+
+/* Top Tickers Table */
+#topTickersBody tr {
+    cursor: pointer;
+    transition: background-color 0.2s ease;
+}
+
+#topTickersBody tr:hover {
+    background-color: rgba(30, 64, 175, 0.06);
+}
+
+.rank {
+    color: var(--text-muted);
+    font-weight: 600;
+    width: 32px;
+}
+
+.ticker-name {
+    color: var(--primary);
+    font-size: var(--font-size-sm);
+}
+
+.vol-cell {
+    font-family: 'Courier New', monospace;
+    font-weight: 600;
+    color: var(--text-light);
+}
+
+/* Performance Section */
+.performance-meta {
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-sm);
+    margin-bottom: var(--spacing-lg);
+    padding-bottom: var(--spacing-md);
+    border-bottom: 1px solid var(--border-color);
+}
+
+.meta-item {
+    font-size: var(--font-size-xs);
+    color: var(--text-muted);
+    font-weight: 600;
+}
+
+.meta-divider {
+    color: var(--border-color);
+    font-size: var(--font-size-xs);
+}
+
+.performance-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: var(--spacing-md);
+}
+
+.performance-item {
+    background-color: var(--bg-dark);
+    padding: var(--spacing-md);
+    border-radius: 6px;
+    border: 1px solid var(--border-color);
+}
+
+.performance-item label {
+    display: block;
+    font-size: var(--font-size-xs);
+    color: var(--text-muted);
+    font-weight: 600;
+    text-transform: uppercase;
+    margin-bottom: var(--spacing-sm);
+}
+
+.performance-bar {
+    width: 100%;
+    height: 8px;
+    background-color: rgba(30, 41, 59, 0.8);
+    border-radius: 4px;
+    overflow: hidden;
+    margin-bottom: var(--spacing-xs);
+}
+
+.bar-fill {
+    height: 100%;
+    background: linear-gradient(90deg, var(--primary), var(--secondary));
+    transition: width 0.8s ease-out;
+    border-radius: 4px;
+}
+
+.performance-value {
+    font-size: var(--font-size-lg);
+    font-weight: 700;
+    color: var(--text-light);
+    font-family: 'Courier New', monospace;
+}
+
+/* Health Modal */
+.health-grid {
+    display: flex;
+    flex-direction: column;
+    gap: var(--spacing-sm);
+}
+
+.health-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: var(--spacing-sm) 0;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.health-item:last-child {
+    border-bottom: none;
+}
+
+.health-label {
+    font-size: var(--font-size-sm);
+    color: var(--text-muted);
+    font-weight: 600;
+}
+
+.health-value {
+    font-size: var(--font-size-sm);
+    color: var(--text-light);
+    font-weight: 700;
+    font-family: 'Courier New', monospace;
+}
+
+.performance-bar .bar-fill#perfR2Bar {
+    background: linear-gradient(90deg, #3B82F6, #8B5CF6);
+}
+
+.performance-bar .bar-fill#perfMAEBar {
+    background: linear-gradient(90deg, #F59E0B, #EF4444);
+}
+
+.performance-bar .bar-fill#perfRMSEBar {
+    background: linear-gradient(90deg, #10B981, #3B82F6);
+}
+
+.loading-sm {
+    font-size: var(--font-size-xs);
+    color: var(--text-muted);
+    padding: var(--spacing-xs) 0;
+}

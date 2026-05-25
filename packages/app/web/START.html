@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>S&P 500 Volatility Predictor | Getting Started</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #0F172A 0%, #1E293B 100%);
+            color: #E2E8F0;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 900px;
+            background: #1E293B;
+            border-radius: 12px;
+            padding: 40px;
+            border: 1px solid #334155;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+        }
+
+        h1 {
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+            color: #1E40AF;
+        }
+
+        .subtitle {
+            color: #94A3B8;
+            margin-bottom: 30px;
+            font-size: 1.1rem;
+        }
+
+        .section {
+            margin-bottom: 40px;
+        }
+
+        .section h2 {
+            font-size: 1.5rem;
+            color: #E2E8F0;
+            margin-bottom: 15px;
+            border-bottom: 2px solid #1E40AF;
+            padding-bottom: 10px;
+        }
+
+        .section p {
+            color: #CBD5E1;
+            line-height: 1.8;
+            margin-bottom: 10px;
+        }
+
+        .code-block {
+            background: #0F172A;
+            border: 1px solid #334155;
+            border-radius: 6px;
+            padding: 15px;
+            margin: 15px 0;
+            overflow-x: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 0.9rem;
+            color: #10B981;
+        }
+
+        .steps {
+            background: #0F172A;
+            border-left: 4px solid #1E40AF;
+            padding: 20px;
+            border-radius: 6px;
+            margin: 20px 0;
+        }
+
+        .step {
+            display: flex;
+            margin-bottom: 15px;
+            align-items: flex-start;
+        }
+
+        .step:last-child {
+            margin-bottom: 0;
+        }
+
+        .step-num {
+            background: #1E40AF;
+            width: 30px;
+            height: 30px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            margin-right: 15px;
+            flex-shrink: 0;
+        }
+
+        .step-text {
+            flex: 1;
+        }
+
+        .step-text strong {
+            color: #E2E8F0;
+            display: block;
+            margin-bottom: 5px;
+        }
+
+        .step-text p {
+            color: #CBD5E1;
+            margin: 0;
+        }
+
+        .buttons {
+            display: flex;
+            gap: 15px;
+            margin-top: 30px;
+            flex-wrap: wrap;
+        }
+
+        .btn {
+            padding: 12px 24px;
+            border-radius: 6px;
+            border: none;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+            text-decoration: none;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .btn-primary {
+            background: #1E40AF;
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background: #1e3a8a;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(30, 64, 175, 0.4);
+        }
+
+        .btn-secondary {
+            background: rgba(30, 64, 175, 0.1);
+            color: #1E40AF;
+            border: 1px solid #1E40AF;
+        }
+
+        .btn-secondary:hover {
+            background: rgba(30, 64, 175, 0.2);
+        }
+
+        .feature-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin-top: 20px;
+        }
+
+        .feature-card {
+            background: #0F172A;
+            border: 1px solid #334155;
+            border-radius: 8px;
+            padding: 20px;
+        }
+
+        .feature-card h3 {
+            color: #10B981;
+            margin-bottom: 10px;
+        }
+
+        .feature-card p {
+            color: #CBD5E1;
+            font-size: 0.95rem;
+        }
+
+        .warning {
+            background: rgba(249, 115, 22, 0.1);
+            border-left: 4px solid #F97316;
+            padding: 15px;
+            border-radius: 6px;
+            margin: 20px 0;
+        }
+
+        .warning strong {
+            color: #F97316;
+        }
+
+        .success {
+            background: rgba(16, 185, 129, 0.1);
+            border-left: 4px solid #10B981;
+            padding: 15px;
+            border-radius: 6px;
+            margin: 20px 0;
+            color: #10B981;
+        }
+
+        footer {
+            text-align: center;
+            margin-top: 40px;
+            padding-top: 20px;
+            border-top: 1px solid #334155;
+            color: #6B7280;
+            font-size: 0.9rem;
+        }
+
+        @media (max-width: 768px) {
+            .container {
+                padding: 25px;
+            }
+
+            h1 {
+                font-size: 1.8rem;
+            }
+
+            .buttons {
+                flex-direction: column;
+            }
+
+            .btn {
+                width: 100%;
+                justify-content: center;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🚀 S&P 500 Volatility Predictor</h1>
+        <p class="subtitle">Getting Started Guide - Guía de Inicio Rápido</p>
+
+        <!-- Quick Start -->
+        <div class="section">
+            <h2>Inicio Rapido (5 minutos)</h2>
+            <div class="steps">
+                <div class="step">
+                    <div class="step-num">1</div>
+                    <div class="step-text">
+                        <strong>Inicie la API FastAPI</strong>
+                        <p>Desde el terminal en la carpeta del proyecto:</p>
+                        <div class="code-block">cd packages/app && python -m uvicorn api:app --host 0.0.0.0 --port 8080 --reload</div>
+                    </div>
+                </div>
+
+                <div class="step">
+                    <div class="step-num">2</div>
+                    <div class="step-text">
+                        <strong>Sirva los archivos web</strong>
+                        <p>En otra terminal, desde la carpeta `web`:</p>
+                        <div class="code-block">cd packages/app/web && python -m http.server 8000</div>
+                        <p>O con Node.js: <code>npx http-server</code></p>
+                    </div>
+                </div>
+
+                <div class="step">
+                    <div class="step-num">3</div>
+                    <div class="step-text">
+                        <strong>Abra en el navegador</strong>
+                        <p>Visite: <strong>http://localhost:8000</strong></p>
+                    </div>
+                </div>
+            </div>
+
+            <div class="success">
+                ✓ ¡Listo! Ahora puede explorar el dashboard, screener y análisis de tickers.
+            </div>
+        </div>
+
+        <!-- Pages Overview -->
+        <div class="section">
+            <h2>Paginas Disponibles</h2>
+            <div class="feature-grid">
+                <div class="feature-card">
+                    <h3>Dashboard</h3>
+                    <p>Resumen del mercado, estadísticas globales, top 10 tickers, performance del modelo</p>
+                </div>
+                <div class="feature-card">
+                    <h3>Screener</h3>
+                    <p>Tabla de 485 tickers filtrable, ordenable, paginable. Exportar a CSV.</p>
+                </div>
+                <div class="feature-card">
+                    <h3>Ticker Analysis</h3>
+                    <p>Predicción detallada, 29 indicadores técnicos, histórico 6m, exportación</p>
+                </div>
+                <div class="feature-card">
+                    <h3>Model Hub</h3>
+                    <p>Arquitectura del modelo, hiperparámetros, cross-validation, feature importance</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- API Endpoints -->
+        <div class="section">
+            <h2>Endpoints de la API</h2>
+            <p>La aplicación web consume estos endpoints:</p>
+            <div class="code-block">
+GET /api/health                     → Estado de la API
+GET /api/screener/summary           → Resumen de mercado
+GET /api/screener?limit=50&offset=0 → Datos paginados
+GET /api/predict/AAPL?period=6mo    → Predicción de ticker
+GET /api/model/info                 → Info del modelo
+            </div>
+        </div>
+
+        <!-- Features -->
+        <div class="section">
+            <h2>Caracteristicas Principales</h2>
+            <ul style="margin-left: 20px; line-height: 2;">
+                <li>Interfaz moderna y responsiva (Desktop, Tablet, Mobile)</li>
+                <li>Caché inteligente (5 minutos) para mejor performance</li>
+                <li>Gráficos nativos con Canvas API (sin dependencias)</li>
+                <li>Búsqueda global y filtros dinámicos</li>
+                <li>Exportación a CSV y JSON</li>
+                <li>Tema oscuro profesional</li>
+                <li>29 indicadores técnicos displayados</li>
+                <li>Validación y mensaje error amigable</li>
+            </ul>
+        </div>
+
+        <!-- Configuration -->
+        <div class="section">
+            <h2>Configuracion</h2>
+            <p><strong>API URL:</strong> Configurables en `js/common.js`</p>
+            <div class="code-block">CONFIG.API_BASE_URL = 'http://localhost:8080/api'</div>
+
+            <p style="margin-top: 15px;"><strong>Preferencias del usuario:</strong> Guardadas en LocalStorage</p>
+            <div class="code-block">
+settings.decimalPlaces = 4           // Precisión numérica
+settings.period = '6mo'              // Período por defecto
+settings.theme = 'dark'              // Tema (futuro)
+            </div>
+        </div>
+
+        <!-- Troubleshooting -->
+        <div class="section">
+            <h2>🐛 Troubleshooting</h2>
+
+            <div class="warning">
+                <strong>⚠️ "Cannot fetch from http://localhost:8080"</strong>
+                <p>Asegúrese que la API FastAPI está corriendo y CORS está habilitado en `api.py`</p>
+            </div>
+
+            <div class="warning">
+                <strong>⚠️ "Network Error 404"</strong>
+                <p>Verificar que el dataset.parquet existe en `data/processed/` y que los modelos están en `packages/ml/model/artifacts/`</p>
+            </div>
+
+            <div class="warning">
+                <strong>⚠️ "Feature not found"</strong>
+                <p>Ejecutar primero: `cd packages/ml/dataset && python main.py` para generar el dataset con todas las features</p>
+            </div>
+        </div>
+
+        <!-- Documentation -->
+        <div class="section">
+            <h2>📚 Documentación Adicional</h2>
+            <p>Para más detalles, revisar:</p>
+            <ul style="margin-left: 20px; line-height: 2; color: #CBD5E1;">
+                <li><strong>`web/README.md`</strong> - Documentación completa de la web</li>
+                <li><strong>`../api.py`</strong> - Documentación de endpoints API</li>
+                <li><strong>`AGENTS.md`</strong> - Arquitectura del proyecto ML</li>
+                <li><strong>`copilot-instructions.md`</strong> - Guía completa del proyecto</li>
+            </ul>
+        </div>
+
+        <div class="buttons">
+            <a href="index.html" class="btn btn-primary">
+                Ir al Dashboard
+            </a>
+            <a href="README.md" class="btn btn-secondary">
+                📖 Ver Documentación
+            </a>
+        </div>
+
+        <footer>
+            <p>S&P 500 Volatility Predictor | ML-Powered 5D Forecasting</p>
+            <p style="font-size: 0.85rem; margin-top: 10px;">Para soporte, revisar los logs de la API y la consola del navegador (F12)</p>
+        </footer>
+    </div>
+</body>
+</html>
+
