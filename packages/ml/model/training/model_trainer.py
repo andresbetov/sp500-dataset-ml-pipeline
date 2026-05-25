@@ -53,20 +53,16 @@ def train_xgboost_model(
 		n_jobs=-1,
 		tree_method="hist",
 		eval_metric="rmse",
-
 		# Tree structure
 		max_depth=6,
 		min_child_weight=1.0,
 		gamma=0.0,
-
 		# Learning rate & iterations
 		learning_rate=0.05,
 		n_estimators=500,
-
 		# Regularization
 		reg_alpha=0.1,
 		reg_lambda=1.0,
-
 		# Subsampling
 		subsample=0.8,
 		colsample_bytree=0.8,

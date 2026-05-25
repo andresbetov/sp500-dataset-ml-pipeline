@@ -5,7 +5,7 @@ import logging
 from features.feature_engineering import phase_2_feature_selection
 from cross_validation.cross_validator import phase_3_cross_validation
 from training.training import phase_4_training
-# from evaluation.evaluation import phase_5_evaluation
+from visualization.visualize import generate_all_visualizations
 from utils import ARTIFACTS_DIR, setup_logging
 
 logger = logging.getLogger(__name__)
@@ -19,10 +19,10 @@ def _ensure_model_directories() -> None:
 
 
 def main() -> None:
-    """Orchestrate ML pipeline: Phase 2 → Phase 3 → Phase 4 (Phase 5 commented out)."""
+    """Orchestrate ML pipeline: Phase 2 → Phase 3 → Phase 4 → Phase 5 (Visualization)."""
     setup_logging()
     _ensure_model_directories()
-    logger.info("ML Pipeline - Phases 2, 3, 4 (Volatility Regression)")
+    logger.info("ML Pipeline - Phases 2-5 (Volatility Regression + Visualization)")
 
     try:
         # Phase 2: Feature selection and encoding
@@ -40,10 +40,11 @@ def main() -> None:
         validation_predictions, fold_training_summary, fold_model_paths = phase_4_training()
         logger.info(f"Phase 4 complete: {len(fold_model_paths)} models trained")
 
-        # # Phase 5: Evaluation & Analytics
-        # logger.info("Phase 5: Comprehensive Evaluation & Analytics")
-        # evaluation_results = phase_5_evaluation()
-        # logger.info(f"Phase 5 complete: {evaluation_results['execution_time']:.1f}s")
+        # Phase 5: Visualization & Diagnostics
+        logger.info("Phase 5: Visualization & Diagnostics")
+        viz_results = generate_all_visualizations()
+        total_viz = sum(len(paths) for paths in viz_results.values())
+        logger.info(f"Phase 5 complete: {total_viz} visualizations generated")
 
     except Exception as e:
         logger.error(f"Pipeline failed: {e}", exc_info=True)
