@@ -240,10 +240,6 @@ sp500-dataset-ml-pipeline/
 │   │       ├── visualization/ # Phase 5: 14 evaluation charts
 │   │       ├── artifacts/     # Trained models + metadata
 │   │       └── main.py        # Phases 2-5 orchestration
-│   │
-│   └── app/                   # API and Web UI
-│       ├── api.py             # FastAPI backend
-│       └── web/               # Frontend HTML/CSS/JS
 │
 ├── data/
 │   ├── processed/dataset.parquet   # Phase 1 output: 2.67M rows × 40 columns
@@ -251,7 +247,7 @@ sp500-dataset-ml-pipeline/
 │   └── eda/                         # EDA visualizations
 │
 ├── AGENTS.md      # Guide for AI coding agents
-├── run_pipeline.py   # End-to-end orchestrator
+├── packages/ml/run_pipeline.py   # End-to-end orchestrator (dataset + model)
 └── README.md (this file)
 ```
 
@@ -287,14 +283,8 @@ uv sync
 ### 2. Run Full Pipeline
 
 ```bash
-# Entire pipeline: Phase 1 (data) + Phases 2-5 (model) + API
-python run_pipeline.py
-
-# Skip API
-python run_pipeline.py --no-api
-
-# API only (if models already trained)
-python run_pipeline.py --api-only
+# Entire pipeline: Phase 1 (data) + Phases 2-5 (model)
+python packages/ml/run_pipeline.py
 ```
 
 ### 3. Stepwise Execution
@@ -309,76 +299,8 @@ cd packages/ml/model && python main.py
 # Output: 5 XGBoost models + fold_training_summary.json + 14 PNGs
 ```
 
-### 4. Start API Server
-
-```bash
-cd packages/app && python -m uvicorn api:app --host 0.0.0.0 --port 8080
-
-# Endpoints:
-# GET  /api/health                        # Model status + 5-fold metrics
-# GET  /api/model/info                    # Detailed fold 4 report
-# GET  /api/predict/{ticker}              # Single ticker prediction (live yfinance)
-# GET  /api/screener?limit=50             # All 467 tickers ranked by volatility
-```
-
-### 5. Web UI
-
-```bash
-cd packages/app/web && python -m http.server 8000
-# Open http://localhost:8000 → Dashboard + Screener + Model Hub
-```
-
 ---
 
-## 📊 API Endpoints (Post-Training)
-
-### `GET /api/health`
-**Model status and global metrics**
-```json
-{
-  "status": "ready",
-  "cross_validation": {
-    "r2_mean": 0.3265,
-    "r2_std": 0.1197,
-    "mae_mean": 0.006941,
-    "rmse_mean": 0.010952
-  },
-  "dataset": {
-    "n_samples": 2668192,
-    "n_tickers": 467,
-    "date_range": "2000-03-16 to 2026-02-12"
-  }
-}
-```
-
-### `GET /api/predict/AAPL?period=6mo`
-**Volatility prediction for a ticker + recent history**
-```json
-{
-  "ticker": "AAPL",
-  "prediction": {
-    "volatility_5d": 0.0185,
-    "volatility_annualized": 0.4157
-  },
-  "recent_data": [
-    {"date": "2026-02-10", "price": 235.45, "close": 235.45},
-    ...
-  ]
-}
-```
-
-### `GET /api/screener?limit=50&sort=volatility_daily`
-**All S&P 500 tickers ranked by predicted volatility**
-```json
-{
-  "tickers": [
-    {"ticker": "TSLA", "volatility_daily": 0.0345, "regime": 2},
-    {"ticker": "NVDA", "volatility_daily": 0.0298, "regime": 2},
-    ...
-  ],
-  "generated_at": "2026-02-12T10:30:00Z"
-}
-```
 ## 🔴 Known Limitations
 
 ### 1. Poor Performance During Calm Periods
