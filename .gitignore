@@ -5,3 +5,8 @@
 *.joblib
 *.pkl
 /packages/ml/model/artifacts
+/data/model_outputs/
+__pycache__/
+*.pyc
+*.pyo
+.venv/
