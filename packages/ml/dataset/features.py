@@ -13,11 +13,6 @@ REGIME_CORRELATION_WINDOW = 60
 ADJUSTED_OHLC_OPEN_COLUMN = "_adj_open"
 ADJUSTED_OHLC_HIGH_COLUMN = "_adj_high"
 ADJUSTED_OHLC_LOW_COLUMN = "_adj_low"
-INTERNAL_FEATURE_COLUMNS = (
-	ADJUSTED_OHLC_OPEN_COLUMN,
-	ADJUSTED_OHLC_HIGH_COLUMN,
-	ADJUSTED_OHLC_LOW_COLUMN,
-)
 
 MIN_HISTORY_BY_FEATURE = {
 	"simple_return": 1,
@@ -423,13 +418,6 @@ def _cast_numeric_columns_to_float64(df: pd.DataFrame) -> pd.DataFrame:
 	return df
 
 
-def _drop_internal_feature_columns(df: pd.DataFrame) -> pd.DataFrame:
-	columns_to_drop = [column for column in INTERNAL_FEATURE_COLUMNS if column in df.columns]
-	if columns_to_drop:
-		df.drop(columns=columns_to_drop, inplace=True)
-	return df
-
-
 def _sort_stably_by_ticker_date(df: pd.DataFrame) -> pd.DataFrame:
 	df.sort_values(["ticker", "date"], kind="mergesort", inplace=True)
 	df.reset_index(drop=True, inplace=True)
@@ -465,7 +453,6 @@ def build_features_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 	featured = _add_volume_features(featured)
 	featured = _add_relative_normalization_features(featured)
 	featured = _add_rolling_statistics_features(featured)
-	featured = _drop_internal_feature_columns(featured)
 	featured = _enforce_history_based_nan_consistency(featured)
 	featured = _cast_numeric_columns_to_float64(featured)
 	featured = _add_legacy_feature_aliases(featured)
