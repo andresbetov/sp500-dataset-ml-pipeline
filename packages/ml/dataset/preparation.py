@@ -131,7 +131,39 @@ def _filter_by_zero_volume_ratio(
     return filtered
 
 
-def prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+def _check_survivor_cross_section(df: pd.DataFrame, survivors_only: bool) -> None:
+    """Fail when a survivors-only frame's ticker cross-section shrinks over time.
+
+    Every name in a survivors-only universe is still listed at the end of the panel, so
+    the number of distinct tickers per calendar year can only grow. A decline means the
+    frame contains exits, so treating it as survivors-only would silently misuse it.
+    """
+    if not survivors_only:
+        logger.warning(
+            "_check_survivor_cross_section: skipped for a membership-aware frame "
+            "(survivors_only=False)"
+        )
+        return
+
+    yearly_counts = df.groupby(df["date"].dt.year)["ticker"].nunique()
+    if yearly_counts.is_monotonic_increasing:
+        logger.info(
+            "_check_survivor_cross_section: non-decreasing (%d in %d -> %d in %d)",
+            yearly_counts.iloc[0],
+            yearly_counts.index[0],
+            yearly_counts.iloc[-1],
+            yearly_counts.index[-1],
+        )
+        return
+
+    summary = ", ".join(f"{year}: {count}" for year, count in yearly_counts.items())
+    raise ValueError(
+        "Frame labelled survivors-only has a declining per-year ticker cross-section "
+        f"(unique tickers per year must be non-decreasing): {summary}"
+    )
+
+
+def prepare_dataframe(df: pd.DataFrame, survivors_only: bool = True) -> pd.DataFrame:
     logger.info(
         "prepare_dataframe: start rows=%d, tickers=%d",
         len(df),
@@ -140,6 +172,7 @@ def prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     normalized = _normalize_column_names(df)
     _validate_required_columns(normalized)
     _cast_columns(normalized)
+    _check_survivor_cross_section(normalized, survivors_only)
     cleaned = _drop_invalid_ohlc_rows(normalized)
     deduplicated = _sort_and_deduplicate(cleaned)
     filtered_by_volume = _filter_by_zero_volume_ratio(deduplicated)
