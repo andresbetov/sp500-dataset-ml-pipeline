@@ -562,11 +562,13 @@ def _window_mean_pairwise_correlation(block: np.ndarray) -> float | None:
 			ticker_count * (ticker_count - 1)
 		)
 
-	correlation = np.corrcoef(block, rowvar=False)
-	upper_triangle = correlation[np.triu_indices_from(correlation, k=1)]
-	upper_triangle = upper_triangle[np.isfinite(upper_triangle)]
-	if upper_triangle.size == 0:
+	# A ticker with zero variance over the window has an undefined correlation, so drop
+	# the matrix down to the tickers that moved and average the remaining pairs.
+	correlation_block = block[:, standard_deviation > 0]
+	if correlation_block.shape[1] < 2:
 		return None
+	correlation = np.corrcoef(correlation_block, rowvar=False)
+	upper_triangle = correlation[np.triu_indices_from(correlation, k=1)]
 	return float(upper_triangle.mean())
 
 
