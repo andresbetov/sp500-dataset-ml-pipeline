@@ -13,7 +13,7 @@ Given a multi-ticker daily OHLCV panel, the pipeline:
 3. Trains one gradient-boosted regression model per temporal fold, evaluating each only on strictly later data.
 4. Writes an evaluation report and charts for that run.
 
-The prediction target is `realized_volatility_5d` — the standard deviation of log returns over the next five trading days. This is continuous regression, not classification.
+The prediction target is `realized_volatility_5d` — the Yang–Zhang daily volatility estimate over the next five trading days (per-day σ, not annualized). This is continuous regression, not classification.
 
 Features come from price and volume only. There is deliberately no per-ticker identity encoding: a ticker's behaviour is already carried by its own indicator magnitudes (larger returns, more extreme momentum, different volume patterns), so per-ticker columns would add sparse inputs without adding generalizable signal.
 
