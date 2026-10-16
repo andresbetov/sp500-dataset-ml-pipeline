@@ -54,6 +54,13 @@ def _validate_required_columns(df: pd.DataFrame) -> None:
 
 
 def _cast_columns(df: pd.DataFrame) -> None:
+    """Cast the raw columns in place; returns None by contract, so callers never rebind.
+
+    Volume stays integer-valued while every value is a non-missing integer, and is
+    kept as float64 - never coerced to zero - as soon as any value is missing or
+    fractional, so volumes treated as missing survive the cast instead of silently
+    counting as no-trade days.
+    """
     df["ticker"] = df["ticker"].astype("string").str.strip()
     empty_tickers = int(df["ticker"].eq("").sum())
     if empty_tickers:
@@ -69,42 +76,105 @@ def _cast_columns(df: pd.DataFrame) -> None:
         df[column] = pd.to_numeric(df[column], errors="raise").astype("float64")
 
     volume_numeric = pd.to_numeric(df["volume"], errors="raise")
-    if volume_numeric.notna().all() and (volume_numeric % 1 == 0).all():
+    missing_volume = int(volume_numeric.isna().sum())
+    if missing_volume == 0 and (volume_numeric % 1 == 0).all():
         df["volume"] = volume_numeric.astype("int64")
     else:
         df["volume"] = volume_numeric.astype("float64")
 
     logger.debug(
-        "_cast_columns: rows=%d, volume_dtype=%s",
+        "_cast_columns: rows=%d, volume_dtype=%s, missing_volume=%d",
         len(df),
         df["volume"].dtype,
+        missing_volume,
     )
 
 
 def _sort_and_deduplicate(df: pd.DataFrame) -> pd.DataFrame:
     rows_in = len(df)
-    ordered = df.sort_values(by=["ticker", "date"])
+    # A stable sort keeps equal (ticker, date) rows in file order, so keep="first"
+    # resolves a duplicate conflict deterministically instead of by quicksort's
+    # internal ordering, which is not defined for ties.
+    ordered = df.sort_values(by=["ticker", "date"], kind="mergesort")
+    duplicate_pairs = ordered.loc[
+        ordered.duplicated(subset=["ticker", "date"], keep=False), ["ticker", "date"]
+    ].drop_duplicates()
     unique = ordered.drop_duplicates(subset=["ticker", "date"], keep="first")
     deduplicated = unique.reset_index(drop=True)
-    logger.debug(
-        "_sort_and_deduplicate: rows_in=%d, rows_out=%d, removed=%d",
-        rows_in,
-        len(deduplicated),
-        rows_in - len(deduplicated),
-    )
+    removed = rows_in - len(deduplicated)
+    if removed:
+        sample = ", ".join(
+            f"({row.ticker}, {row.date.date()})"
+            for row in duplicate_pairs.head(5).itertuples(index=False)
+        )
+        logger.info(
+            "_sort_and_deduplicate: rows_in=%d, rows_out=%d, removed=%d, "
+            "conflicting pairs=%d; sample=[%s]",
+            rows_in,
+            len(deduplicated),
+            removed,
+            len(duplicate_pairs),
+            sample,
+        )
+    else:
+        logger.debug(
+            "_sort_and_deduplicate: rows_in=%d, rows_out=%d, removed=0",
+            rows_in,
+            len(deduplicated),
+        )
     return deduplicated
 
 
-def _drop_invalid_ohlc_rows(df: pd.DataFrame) -> pd.DataFrame:
+def _repair_invalid_ohlc_rows(df: pd.DataFrame) -> pd.DataFrame:
+    """Repair single-cell open slips in place, then drop rows that stay invalid.
+
+    An open price outside [low, high] is a vendor rounding slip that can be repaired
+    by clipping it back into its own bar; the close and the range are trusted. A row
+    whose high/low range or close is invalid cannot be repaired without inventing
+    prices, so it is dropped with an INFO reason line - and the frame contiguity
+    assertion before the write catches any interior hole such a drop would create.
+    """
     rows_in = len(df)
-    valid_range = (df["high"] >= df["low"])
+    valid_range = df["high"] >= df["low"]
     valid_close = (df["close"] <= df["high"]) & (df["close"] >= df["low"])
+    open_outside = (df["open"] < df["low"]) | (df["open"] > df["high"])
+    repairable = open_outside & valid_range & valid_close
+    repaired_count = int(repairable.sum())
+    if repaired_count:
+        repaired = df.loc[repairable, ["ticker", "date", "open", "low", "high"]].copy()
+        repaired["repaired_open"] = df.loc[repairable, "open"].clip(
+            lower=df.loc[repairable, "low"], upper=df.loc[repairable, "high"]
+        )
+        df.loc[repairable, "open"] = repaired["repaired_open"]
+        for row in repaired.itertuples(index=False):
+            logger.info(
+                "_repair_invalid_ohlc_rows: repaired %s %s open %.4f -> %.4f",
+                row.ticker,
+                row.date.date(),
+                row.open,
+                row.repaired_open,
+            )
+
     valid_open = (df["open"] <= df["high"]) & (df["open"] >= df["low"])
     valid_rows = valid_range & valid_close & valid_open
+    for row in df.loc[~valid_rows, ["ticker", "date", "open", "high", "low", "close"]].itertuples(
+        index=False
+    ):
+        logger.info(
+            "_repair_invalid_ohlc_rows: dropping invalid bar %s %s "
+            "(open=%.4f high=%.4f low=%.4f close=%.4f)",
+            row.ticker,
+            row.date.date(),
+            row.open,
+            row.high,
+            row.low,
+            row.close,
+        )
     filtered = df.loc[valid_rows].reset_index(drop=True)
-    logger.debug(
-        "_drop_invalid_ohlc_rows: rows_in=%d, rows_out=%d, removed=%d",
+    logger.info(
+        "_repair_invalid_ohlc_rows: rows_in=%d, repaired=%d, rows_out=%d, dropped=%d",
         rows_in,
+        repaired_count,
         len(filtered),
         rows_in - len(filtered),
     )
@@ -242,7 +312,7 @@ def prepare_dataframe(df: pd.DataFrame, survivors_only: bool = True) -> pd.DataF
     _validate_required_columns(normalized)
     _cast_columns(normalized)
     _check_survivor_cross_section(normalized, survivors_only)
-    cleaned = _drop_invalid_ohlc_rows(normalized)
+    cleaned = _repair_invalid_ohlc_rows(normalized)
     deduplicated = _sort_and_deduplicate(cleaned)
     treated = _treat_zero_volume_price_moves(deduplicated)
     prepared = _filter_by_min_trading_days(treated)
