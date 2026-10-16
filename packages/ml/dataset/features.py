@@ -619,7 +619,7 @@ def _characterize_regimes(df: pd.DataFrame) -> dict:
 				"return_mean": float,
 				"return_std": float,
 				"return_skewness": float,
-				"return_kurtosis": float,
+				"return_excess_kurtosis": float,
 				"volume_mean": float,
 				"volume_std": float,
 				"ticker_correlation_mean": float,
@@ -650,13 +650,13 @@ def _characterize_regimes(df: pd.DataFrame) -> dict:
 			continue
 
 		# Volatility statistics
-		volatility_values = regime_data['realized_volatility_5d']
+		volatility_values = regime_data['realized_volatility_5d'].dropna()
 
 		# Return statistics
 		returns_values = regime_data['simple_return'].dropna()
 
 		# Volume statistics
-		volume_values = regime_data['volume']
+		volume_values = regime_data['volume'].dropna()
 
 		# Ticker correlation (per regime)
 		(
@@ -673,6 +673,10 @@ def _characterize_regimes(df: pd.DataFrame) -> dict:
 				REGIME_CORRELATION_WINDOW,
 			)
 
+		# The date span describes rows with a finite target — the window these statistics
+		# can actually be used on; the target's trailing NaNs are excluded.
+		target_rows = regime_data['realized_volatility_5d'].notna()
+
 		stats[regime_names[regime_id]] = {
 			# Volatility characteristics
 			'volatility_mean': float(volatility_values.mean()),
@@ -685,7 +689,7 @@ def _characterize_regimes(df: pd.DataFrame) -> dict:
 			'return_mean': float(returns_values.mean()),
 			'return_std': float(returns_values.std()),
 			'return_skewness': float(returns_values.skew()),
-			'return_kurtosis': float(returns_values.kurtosis()),
+			'return_excess_kurtosis': float(returns_values.kurtosis()),
 
 			# Volume characteristics
 			'volume_mean': float(volume_values.mean()),
@@ -700,7 +704,7 @@ def _characterize_regimes(df: pd.DataFrame) -> dict:
 			# Sample count
 			'n_samples': len(regime_data),
 			'unique_tickers': len(regime_data['ticker'].unique()),
-			'date_range': f"{regime_data['date'].min()} to {regime_data['date'].max()}",
+			'date_range': f"{regime_data.loc[target_rows, 'date'].min()} to {regime_data.loc[target_rows, 'date'].max()}",
 		}
 
 	logger.info("Regime Characterization Complete:")

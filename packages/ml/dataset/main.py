@@ -53,28 +53,30 @@ def generate_featured_dataset() -> None:
     logger.info("Characterizing regimes...")
     regime_stats = _characterize_regimes(featured_df)
 
-    # The source only carries constituents still listed when the panel ends; record that
-    # contract (and the bias it carries) alongside the regime statistics.
+    logger.info("Dropping NaN rows...")
+    pre_dropna_rows = len(featured_df)
+    featured_df = featured_df.dropna()
+    logger.info(f"Dropped {pre_dropna_rows - len(featured_df):,} NaN rows ({len(featured_df):,} remaining)")
+
+    _save_parquet(featured_df, "dataset")
+    logger.info("Dataset saved to data/processed/dataset.parquet")
+
+    # The JSON is written after the parquet so a failure here cannot leave a stale
+    # characterization describing a dataset that was never written. The reserved
+    # _frame key labels the source universe and records both row counts.
     regime_stats["_frame"] = {
         "label": SURVIVORS_ONLY_FRAME_LABEL,
         "survivors_only": True,
         "bias_note": SURVIVORSHIP_BIAS_NOTE,
+        "pre_dropna_rows": pre_dropna_rows,
+        "shipped_rows": len(featured_df),
     }
 
-    # Save regime characterization to JSON
     artifacts_dir = PROJECT_ROOT / "packages" / "ml" / "model" / "artifacts" / "results"
     artifacts_dir.mkdir(parents=True, exist_ok=True)
     regime_stats_path = artifacts_dir / "regime_characterization.json"
     with open(regime_stats_path, "w") as f:
         json.dump(regime_stats, f, indent=2)
     logger.info(f"Regime stats saved to {regime_stats_path}")
-
-    logger.info("Dropping NaN rows...")
-    before = len(featured_df)
-    featured_df = featured_df.dropna()
-    logger.info(f"Dropped {before - len(featured_df):,} NaN rows ({len(featured_df):,} remaining)")
-
-    _save_parquet(featured_df, "dataset")
-    logger.info("Dataset saved to data/processed/dataset.parquet")
 
 generate_featured_dataset()
