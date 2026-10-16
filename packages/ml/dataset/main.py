@@ -79,4 +79,6 @@ def generate_featured_dataset() -> None:
         json.dump(regime_stats, f, indent=2)
     logger.info(f"Regime stats saved to {regime_stats_path}")
 
-generate_featured_dataset()
+
+if __name__ == "__main__":
+    generate_featured_dataset()
