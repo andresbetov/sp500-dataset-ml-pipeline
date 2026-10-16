@@ -8,10 +8,36 @@ import joblib
 import numpy as np
 from cross_validation.cv_utils import load_folds_metadata
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from training.har_benchmark import fit_har_benchmark, load_har_regressors
 from training.model_trainer import train_xgboost_model
 from utils import ARTIFACTS_DIR
 
 logger = logging.getLogger(__name__)
+
+# Daily-volatility floor for the log target. The Yang-Zhang target is exactly zero on
+# flat windows, where log(0) is undefined; 1e-12 only binds those rows, since the
+# smallest positive target in the frame is ~2.6e-10.
+RV_FLOOR = 1e-12
+
+
+def qlike_loss(actual_log: np.ndarray, forecast_log: np.ndarray) -> float:
+	"""QLIKE loss for log-RV forecasts (Patton 2011; Hansen-Lunde 2005).
+
+	QLIKE(h, f) = h/f - ln(h/f) - 1 with h = exp(actual_log) and f = exp(forecast_log),
+	so in log space the loss is exp(delta) - delta - 1 for delta = actual - forecast.
+	This is the robust form for volatility-forecast comparison — the same ranking as
+	the Hansen-Lunde loss log(f) + h/f, up to the target-only term ln(h) + 1.
+
+	Unlike the R²/MAE/RMSE block this metric never swallows errors: non-finite inputs
+	or outputs raise.
+	"""
+	delta = np.asarray(actual_log, dtype=np.float64) - np.asarray(forecast_log, dtype=np.float64)
+	if not np.isfinite(delta).all():
+		raise ValueError("QLIKE received non-finite log targets or forecasts")
+	loss = np.exp(delta) - delta - 1.0
+	if not np.isfinite(loss).all():
+		raise ValueError("QLIKE produced non-finite values")
+	return float(loss.mean())
 
 
 def _validate_training_prerequisites(y: np.ndarray, folds_metadata: dict) -> None:
@@ -45,15 +71,16 @@ def _train_fold_model(
 	fold_data: dict,
 ) -> tuple:
 	"""
-	Train one XGBoost model per fold. No temporal leakage: model trained only on fold_i_train,
-	evaluated on fold_i_test (which is strictly future to train dates).
+	Train one XGBoost model per fold on the log target. No temporal leakage: model
+	trained only on fold_i_train, evaluated on fold_i_test (which is strictly future to
+	train dates).
 
 	Args:
 		fold_idx: Fold index (0-4)
 		X_train: Training features from fold_i_train
-		y_train: Training target from fold_i_train
+		y_train: Training log-target from fold_i_train
 		X_test: Test features from fold_i_test
-		y_test: Test target from fold_i_test
+		y_test: Test log-target from fold_i_test
 		fold_data: Fold metadata (dates, counts)
 
 	Returns:
@@ -77,7 +104,9 @@ def _train_fold_model(
 	y_pred = model.predict(X_test)
 	inference_time = time.time() - inference_start
 
-	# Compute metrics
+	# Compute metrics on the log target. R² follows sklearn's convention, whose
+	# denominator is the fold's own test variance (fold-own-mean); it is not comparable
+	# to a non-demeaned R²_oos. The block below swallows failures into NaN metrics.
 	try:
 		test_r2 = r2_score(y_test, y_pred)
 		test_mae = mean_absolute_error(y_test, y_pred)
@@ -88,8 +117,12 @@ def _train_fold_model(
 		test_mae = float('nan')
 		test_rmse = float('nan')
 
+	# QLIKE is computed outside the block above on purpose: it must fail loudly rather
+	# than write a NaN metric.
+	test_qlike = qlike_loss(y_test, y_pred)
+
 	fold_elapsed = time.time() - fold_start
-	logger.info(f"  Fold {fold_idx}: R²={test_r2:.4f}, MAE={test_mae:.6f}, RMSE={test_rmse:.6f}")
+	logger.info(f"  Fold {fold_idx}: R²={test_r2:.4f}, MAE={test_mae:.6f}, RMSE={test_rmse:.6f}, QLIKE={test_qlike:.6f}")
 	logger.info(f"    └─ Timing: {train_time:.1f}s train + {inference_time:.1f}s inference = {fold_elapsed:.1f}s total")
 
 	# Save model
@@ -106,6 +139,7 @@ def _train_fold_model(
 		"test_r2": test_r2,
 		"test_mae": test_mae,
 		"test_rmse": test_rmse,
+		"test_qlike": test_qlike,
 		"n_train_samples": len(X_train),
 		"n_test_samples": len(X_test),
 		"n_features": X_train.shape[1],
@@ -146,6 +180,9 @@ def _aggregate_fold_results(fold_predictions_list: list) -> tuple[dict, dict]:
 			"test_r2": pred_dict["test_r2"],
 			"test_mae": pred_dict["test_mae"],
 			"test_rmse": pred_dict["test_rmse"],
+			"test_qlike": pred_dict["test_qlike"],
+			"har_r2": pred_dict["har_r2"],
+			"har_qlike": pred_dict["har_qlike"],
 			"train_time_seconds": pred_dict["train_time_seconds"],
 			"inference_time_seconds": pred_dict["inference_time_seconds"],
 			"fold_time_seconds": pred_dict["fold_time_seconds"],
@@ -154,10 +191,15 @@ def _aggregate_fold_results(fold_predictions_list: list) -> tuple[dict, dict]:
 	return validation_predictions, fold_training_summary
 
 
-def _save_training_results(validation_predictions: dict, fold_training_summary: dict) -> None:
-	"""Save training results to disk."""
+def _save_training_results(
+	validation_predictions: dict,
+	fold_training_summary: dict,
+	har_benchmark_results: dict,
+) -> None:
+	"""Save training results and the HAR benchmark report to disk."""
 	val_pred_path = ARTIFACTS_DIR / "results" / "validation_predictions.pkl"
 	summary_path = ARTIFACTS_DIR / "results" / "fold_training_summary.json"
+	har_report_path = ARTIFACTS_DIR / "results" / "har_benchmark.json"
 
 	joblib.dump(validation_predictions, val_pred_path)
 
@@ -172,13 +214,34 @@ def _save_training_results(validation_predictions: dict, fold_training_summary: 
 	with open(summary_path, "w") as f:
 		json.dump(summary_json, f, indent=2, default=str)
 
-	logger.info("Training outputs saved")
+	# HAR benchmark report: per-fold coefficients and metrics next to the fold model's,
+	# so the mandatory benchmark is auditable without reloading the predictions.
+	har_report = {
+		"benchmark": "HAR-RV (Corsi 2008): canonical 1/5/22 trailing variance components, OLS in variance levels",
+		"target": "log(realized_volatility_5d)",
+		"r2_convention": "log-target scale, fold-own-mean (sklearn r2_score)",
+		"folds": {
+			fold_key: {
+				**result,
+				"model_r2": fold_training_summary[fold_key]["test_r2"],
+				"model_qlike": fold_training_summary[fold_key]["test_qlike"],
+			}
+			for fold_key, result in har_benchmark_results.items()
+		},
+	}
+	with open(har_report_path, "w") as f:
+		json.dump(har_report, f, indent=2, default=str)
+
+	logger.info(f"Training outputs saved (HAR benchmark report: {har_report_path})")
 
 
 def phase_4_training() -> tuple[dict, dict, list]:
 	"""
 	Orchestrate Phase 4: Train 5 fold-specific XGBoost models (1 per fold) with no temporal leakage.
-	Each fold_i_model trained exclusively on fold_i_train, evaluated on fold_i_test.
+	Each fold_i_model trains exclusively on fold_i_train and is evaluated on fold_i_test.
+	The modeled target is log(RV) — the Yang-Zhang variance is closer to log-normal and
+	QLIKE is the robust loss for it — and every fold also fits the canonical HAR-RV
+	benchmark on its training rows only.
 
 	Returns:
 		validation_predictions, fold_training_summary, fold_model_paths
@@ -199,9 +262,19 @@ def phase_4_training() -> tuple[dict, dict, list]:
 	# Validate prerequisites
 	_validate_training_prerequisites(y, folds_metadata)
 
+	# Model the log of the target; the floor only touches the exact-zero Yang-Zhang
+	# windows (flat 5-day prices), which would otherwise make log(0) undefined.
+	y_log = np.log(np.maximum(y, RV_FLOOR))
+	logger.info(
+		f"Log target: log(RV) with floor {RV_FLOOR:g}; floored rows = {int(np.count_nonzero(y < RV_FLOOR)):,}"
+	)
+
+	har_regressors = load_har_regressors(metadata["date"])
+
 	# Train 5 models (1 per fold) with strict temporal separation
 	fold_predictions_list = []
 	fold_model_paths = []
+	har_benchmark_results = {}
 
 	for fold_idx in range(5):
 		fold_key = f"fold_{fold_idx}"
@@ -212,9 +285,9 @@ def phase_4_training() -> tuple[dict, dict, list]:
 		test_indices = np.array(fold_data["test_indices"])
 
 		X_train = X[train_indices]
-		y_train = y[train_indices]
+		y_train = y_log[train_indices]
 		X_test = X[test_indices]
-		y_test = y[test_indices]
+		y_test = y_log[test_indices]
 
 		# Train fold model (1 model per fold, only on fold_i_train data, no leakage)
 		model, predictions_dict = _train_fold_model(
@@ -224,6 +297,24 @@ def phase_4_training() -> tuple[dict, dict, list]:
 			X_test=X_test,
 			y_test=y_test,
 			fold_data=fold_data,
+		)
+
+		# Canonical HAR-RV benchmark on the same fold rows, fitted on train only.
+		har_result = fit_har_benchmark(
+			train_indices=train_indices,
+			test_indices=test_indices,
+			target_log_train=y_train,
+			target_log_test=y_test,
+			regressors=har_regressors,
+			forecast_floor=RV_FLOOR,
+		)
+		har_result["har_qlike"] = qlike_loss(y_test, har_result.pop("forecast_log"))
+		predictions_dict["har_r2"] = har_result["har_r2"]
+		predictions_dict["har_qlike"] = har_result["har_qlike"]
+		har_benchmark_results[fold_key] = har_result
+
+		logger.info(
+			f"    └─ HAR benchmark: R²={har_result['har_r2']:.4f}, QLIKE={har_result['har_qlike']:.6f}"
 		)
 
 		fold_predictions_list.append(predictions_dict)
@@ -238,7 +329,7 @@ def phase_4_training() -> tuple[dict, dict, list]:
 		fold_training_summary[fold_key]["n_features_ticker"] = int(metadata["n_ticker_features"])
 
 	# Save outputs
-	_save_training_results(validation_predictions, fold_training_summary)
+	_save_training_results(validation_predictions, fold_training_summary, har_benchmark_results)
 
 	# Final summary with metrics
 	total_time = time.time() - overall_start_time
@@ -265,14 +356,24 @@ def phase_4_training() -> tuple[dict, dict, list]:
 		total_inference_time = sum(s.get("inference_time_seconds", 0) for s in fold_training_summary.values())
 		total_test_samples = sum(len(p["test_pred"]) for p in fold_predictions_list)
 
+		mean_qlike = np.mean([s["test_qlike"] for s in fold_training_summary.values()])
+		std_qlike = np.std([s["test_qlike"] for s in fold_training_summary.values()])
+		mean_har_qlike = np.mean([s["har_qlike"] for s in fold_training_summary.values()])
+		std_har_qlike = np.std([s["har_qlike"] for s in fold_training_summary.values()])
+		mean_har_r2 = np.mean([s["har_r2"] for s in fold_training_summary.values()])
+
 		logger.info(f"Phase 4 complete: 5 fold model(s), {total_test_samples:,} test samples total, {total_time:.1f}s ({total_train_time:.1f}s train + {total_inference_time:.1f}s inference)")
 		logger.info(f"Cross-validation results (GLOBAL): R²={mean_r2:.4f}±{std_r2:.4f}, MAE={mean_mae:.6f}±{std_mae:.6f}, RMSE={mean_rmse:.6f}±{std_rmse:.6f}")
+		logger.info(f"QLIKE (GLOBAL, log-target): model={mean_qlike:.6f}±{std_qlike:.6f} | HAR benchmark={mean_har_qlike:.6f}±{std_har_qlike:.6f} (R²={mean_har_r2:.4f})")
 
 		# Log per-fold metrics
 		for fold_key in sorted(fold_training_summary.keys()):
 			fold_r2 = fold_training_summary[fold_key].get("test_r2", float('nan'))
 			fold_mae = fold_training_summary[fold_key].get("test_mae", float('nan'))
 			fold_rmse = fold_training_summary[fold_key].get("test_rmse", float('nan'))
+			fold_qlike = fold_training_summary[fold_key].get("test_qlike", float('nan'))
+			fold_har_qlike = fold_training_summary[fold_key].get("har_qlike", float('nan'))
+			fold_har_r2 = fold_training_summary[fold_key].get("har_r2", float('nan'))
 			train_time = fold_training_summary[fold_key].get("train_time_seconds", 0)
 			inference_time = fold_training_summary[fold_key].get("inference_time_seconds", 0)
 			train_date_min = fold_training_summary[fold_key].get("train_date_min", "?")
@@ -280,7 +381,8 @@ def phase_4_training() -> tuple[dict, dict, list]:
 			test_date_min = fold_training_summary[fold_key].get("test_date_min", "?")
 			test_date_max = fold_training_summary[fold_key].get("test_date_max", "?")
 
-			logger.info(f"  {fold_key}: R²={fold_r2:.4f}, MAE={fold_mae:.6f}, RMSE={fold_rmse:.6f}")
+			logger.info(f"  {fold_key}: R²={fold_r2:.4f}, MAE={fold_mae:.6f}, RMSE={fold_rmse:.6f}, QLIKE={fold_qlike:.6f}")
+			logger.info(f"    └─ HAR benchmark: R²={fold_har_r2:.4f}, QLIKE={fold_har_qlike:.6f}")
 			logger.info(f"    └─ Train: {train_date_min} to {train_date_max} | Test: {test_date_min} to {test_date_max}")
 			logger.info(f"    └─ Timing: {train_time:.1f}s train + {inference_time:.1f}s inference")
 	else:

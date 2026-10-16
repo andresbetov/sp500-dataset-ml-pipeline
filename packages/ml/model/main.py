@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 
+import numpy as np
 from features.feature_engineering import phase_2_feature_selection
 from cross_validation.cross_validator import phase_3_cross_validation
 from training.training import phase_4_training
@@ -39,6 +40,9 @@ def main() -> None:
         logger.info("Phase 4: Model Training")
         validation_predictions, fold_training_summary, fold_model_paths = phase_4_training()
         logger.info(f"Phase 4 complete: {len(fold_model_paths)} models trained")
+        mean_qlike = np.mean([summary["test_qlike"] for summary in fold_training_summary.values()])
+        mean_har_qlike = np.mean([summary["har_qlike"] for summary in fold_training_summary.values()])
+        logger.info(f"Evaluation: mean QLIKE {mean_qlike:.6f} (HAR benchmark {mean_har_qlike:.6f})")
 
         # Phase 5: Visualization & Diagnostics
         logger.info("Phase 5: Visualization & Diagnostics")
