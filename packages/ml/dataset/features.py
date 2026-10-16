@@ -308,12 +308,20 @@ def _add_momentum_features(df: pd.DataFrame) -> pd.DataFrame:
 	macd_raw = ema_fast_aligned - ema_slow_aligned
 	featured["macd"] = (macd_raw / lagged_adj_close).astype("float64")
 
-	featured["macd_signal"] = (
-		featured["macd"]
-		.groupby(featured["ticker"], sort=False, group_keys=False)
-		.transform(lambda s: s.ewm(span=9, adjust=False).mean())
-		.astype("float64")
+	# Re-anchor the signal line: average the unshifted EMA difference (each value
+	# anchored at its own bar) and shift once, instead of averaging the
+	# already-shifted macd series, whose EMA recursion then runs over values that
+	# were each lagged and normalized one bar back (a double lag).
+	ema_fast_unshifted = by_ticker_adj_close.transform(
+		lambda s: s.ewm(span=12, adjust=False).mean()
 	)
+	ema_slow_unshifted = by_ticker_adj_close.transform(
+		lambda s: s.ewm(span=26, adjust=False).mean()
+	)
+	macd_signal_unshifted = (ema_fast_unshifted - ema_slow_unshifted).groupby(
+		featured["ticker"], sort=False, group_keys=False
+	).transform(lambda s: s.ewm(span=9, adjust=False).mean().shift(1))
+	featured["macd_signal"] = (macd_signal_unshifted / lagged_adj_close).astype("float64")
 
 	featured["macd_hist"] = (featured["macd"] - featured["macd_signal"]).astype("float64")
 
