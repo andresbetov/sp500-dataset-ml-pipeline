@@ -1,0 +1,50 @@
+name: checks
+
+on:
+  pull_request:
+    branches: [develop, main]
+  push:
+    branches: [develop, main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.14"
+      - name: Sync dependencies (locked)
+        run: uv sync --frozen
+      - name: Byte-compile packages (syntax only, no execution)
+        run: uv run --frozen python -m compileall -q packages
+
+  dataset-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.14"
+      - name: Cache Kaggle dataset download
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/kagglehub
+          key: kagglehub-${{ runner.os }}-jacksaleeby-s-and-p500-historical-data
+      - name: Sync dependencies (locked)
+        run: uv sync --frozen
+      - name: Run Phase 1 (dataset) — run-as-script per AGENTS.md
+        run: uv run --frozen python packages/ml/dataset/main.py 2>&1 | tail -c 4000
+      - name: Verify artifact and report stats
+        run: |
+          test -f data/processed/dataset.parquet
+          uv run --frozen python -c "import os, pyarrow.parquet as pq; p='data/processed/dataset.parquet'; m=pq.ParquetFile(p).metadata; print(f'dataset.parquet: rows={m.num_rows} cols={m.num_columns} bytes={os.path.getsize(p)}')" | tee -a "$GITHUB_STEP_SUMMARY"
