@@ -30,7 +30,7 @@ Both take no arguments and read no environment variables. They are cwd-independe
 ## Invariants — breaking these corrupts artifacts or silently mislabels results
 
 - **Exactly 5 folds.** `model/training/training.py` raises `ValueError` for any other count, and `visualization/training_diagnostics.py` bakes in five via `FOLD_NAMES = [f"fold_{i}" for i in range(5)]` and bare `range(5)` loops.
-- **`INDICATORS` order is positional.** `X = df[INDICATORS].values` fixes column order, and feature-importance arrays are mapped onto `INDICATORS` by index. Reorder the list and every importance chart silently mislabels. Changing a name means updating both spellings of an alias pair.
+- **`INDICATORS` order is positional.** `X = df[INDICATORS].values` fixes column order, and feature-importance arrays are mapped onto `INDICATORS` by index. Reorder the list and every importance chart silently mislabels. Renaming an entry means updating the dataset columns it reads — Phase 2 asserts every name exists in the parquet before training, and the module-level count assertion fails on list drift. The legacy alias columns were removed from the dataset, so no alias-pair bookkeeping remains.
 - **`INDICATORS` holds 37 entries** — the pinned model-input list after dedup: the two legacy alias copies, both volume SMAs, `macd_signal`, `log_return` and `market_regime` left the list, and the volatility family joined it. `macd_signal`, `log_return` and `market_regime` stay in the dataset as columns (the first is re-anchored, the second feeds the target, the third is analysis metadata). A module-level count assertion fails fast on drift.
 - **`market_regime` is a hardcoded calendar label**, not data-derived: seven calendar buckets cover 2000-2007 through 2026 and a date past 2026 raises. Extend `packages/ml/dataset/features.py` before ingesting data past 2026.
 - **Folds are date-group blocks with a two-sided purge.** `cross_validation/cross_validator.py` splits the sorted unique trading dates into six contiguous blocks; fold k tests on block k+1 and trains on blocks 0..k minus the two-sided purge of the 5-day label overlap. The embargo predicate `first_test_idx - last_train_idx >= 6` (unique-date index space) is asserted per fold, so same-date, different-ticker overlap across the train/test boundary cannot occur.
@@ -66,7 +66,7 @@ Cap long-running or chatty commands: `python packages/ml/model/main.py 2>&1 | ta
 ## Where to look next
 
 - `README.md` — what the project is, install, and run commands (human-facing).
-- `packages/ml/dataset/features.py` — read before adding or changing any feature; defines the target, `market_regime`, and the alias map.
+- `packages/ml/dataset/features.py` — read before adding or changing any feature; defines the target and `market_regime`.
 - `packages/ml/model/features/feature_engineering.py` — `INDICATORS`, the single source of truth for model inputs.
 - `packages/ml/model/cross_validation/cross_validator.py` — fold construction and the leakage guard.
 - `packages/ml/model/training/model_trainer.py` — XGBoost hyperparameters.
