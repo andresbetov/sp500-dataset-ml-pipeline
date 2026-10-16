@@ -24,34 +24,36 @@ ADJUSTED_OHLC_OPEN_COLUMN = "_adj_open"
 ADJUSTED_OHLC_HIGH_COLUMN = "_adj_high"
 ADJUSTED_OHLC_LOW_COLUMN = "_adj_low"
 
+# The first row position (0-based, within a ticker) at which a feature is defined.
+# Every rolling(window)+shift(1) entry needs window prior rows, so its first defined
+# position equals the window length; lag entries need the lag count.
 MIN_HISTORY_BY_FEATURE = {
 	"simple_return": 1,
 	"log_return": 1,
-	"return_lag_1": 2,
-	"return_lag_2": 3,
-	"return_lag_3": 4,
-	"return_lag_5": 6,
-	"return_lag_10": 11,
+	"return_lag_1": 1,
+	"return_lag_2": 2,
+	"return_lag_3": 3,
+	"return_lag_5": 5,
+	"return_lag_10": 10,
 	"volume_lag_1": 1,
 	"volume_lag_3": 3,
 	"volume_lag_5": 5,
 	"ema_12": 1,
 	"ema_26": 1,
-	"rsi_14": 28,
+	"rsi_14": 15,
 	"macd": 1,
 	"macd_signal": 1,
 	"macd_hist": 1,
-	"volume_sma_10": 11,
-	"volume_sma_20": 21,
-	"zscore_volume_20": 21,
-	"price_vs_sma_10": 11,
-	"price_vs_sma_20": 21,
-	"price_vs_sma_50": 51,
-	"zscore_price_vs_sma_20": 41,
-	"rolling_mean_5": 6,
-	"rolling_max_10": 11,
-	"rolling_min_10": 11,
-	"realized_volatility_5d": 11,
+	"volume_sma_10": 10,
+	"volume_sma_20": 20,
+	"zscore_volume_20": 20,
+	"price_vs_sma_10": 10,
+	"price_vs_sma_20": 20,
+	"price_vs_sma_50": 50,
+	"zscore_price_vs_sma_20": 40,
+	"rolling_mean_5": 5,
+	"rolling_max_10": 10,
+	"rolling_min_10": 10,
 }
 
 LEGACY_FEATURE_ALIASES = {
@@ -494,11 +496,23 @@ def _normalize_and_validate_date_column(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _enforce_history_based_nan_consistency(df: pd.DataFrame) -> pd.DataFrame:
+	unproduced_columns = [column for column in MIN_HISTORY_BY_FEATURE if column not in df.columns]
+	if unproduced_columns:
+		unproduced_list = ", ".join(sorted(unproduced_columns))
+		raise ValueError(
+			f"History-constrained columns are not produced by the feature build: {unproduced_list}"
+		)
+
 	position_in_ticker = df.groupby("ticker", sort=False, group_keys=False).cumcount()
 
 	for column, min_history in MIN_HISTORY_BY_FEATURE.items():
-		if column in df.columns:
-			df.loc[position_in_ticker < min_history, column] = np.nan
+		df.loc[position_in_ticker < min_history, column] = np.nan
+
+	logger.info(
+		"_enforce_history_based_nan_consistency: constrained columns=%d, longest warm-up=%d rows",
+		len(MIN_HISTORY_BY_FEATURE),
+		max(MIN_HISTORY_BY_FEATURE.values()),
+	)
 
 	return df
 
