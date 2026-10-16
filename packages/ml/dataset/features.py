@@ -26,7 +26,8 @@ ADJUSTED_OHLC_LOW_COLUMN = "_adj_low"
 
 # The first row position (0-based, within a ticker) at which a feature is defined.
 # Every rolling(window)+shift(1) entry needs window prior rows, so its first defined
-# position equals the window length; lag entries need the lag count.
+# position equals the window length; entries built on log_return start one row later
+# because each ticker's first return is undefined; lag entries need the lag count.
 MIN_HISTORY_BY_FEATURE = {
 	"simple_return": 1,
 	"log_return": 1,
@@ -61,6 +62,14 @@ MIN_HISTORY_BY_FEATURE = {
 	"gk5": 5,
 	"rs5": 5,
 	"gap5": 5,
+	"rv5_past": 6,
+	"rv22": 23,
+	"rv63": 64,
+	"har5": 6,
+	"har22": 23,
+	"har63": 64,
+	"market_abs_ret_5d": 6,
+	"volvol22": 23,
 }
 
 LEGACY_FEATURE_ALIASES = {
@@ -462,6 +471,81 @@ def _add_range_volatility_features(df: pd.DataFrame) -> pd.DataFrame:
 	return featured
 
 
+def _add_trailing_volatility_features(df: pd.DataFrame) -> pd.DataFrame:
+	"""Trailing realized-volatility stack, HAR sums, market factor and vol-of-vol.
+
+	Every window is shifted one day (t-w..t-1), so no feature sees its own bar:
+
+	- rv5_past: mean |log_return| over 5 days (the established trailing-RV level).
+	- rv22 / rv63: rolling close-to-close standard deviation of log_return (ddof=1);
+	  the dual-definition rv63 is pinned to this rolling-std convention.
+	- har5 / har22 / har63: sums of squared log_return over the same windows.
+	- volvol22: standard deviation of |log_return| over 22 days.
+	- market_abs_ret_5d: per-ticker trailing 5-day mean of the per-date
+	  cross-sectional mean |log_return|; the cross-sectional mean skips tickers
+	  without a return on a date, and the panel's first date carries no return at
+	  all, so the earliest window there is blank (inside the head cut).
+	"""
+	featured = df
+	required_columns = {"ticker", "date", "log_return"}
+	missing_columns = required_columns - set(featured.columns)
+	if missing_columns:
+		missing_list = ", ".join(sorted(missing_columns))
+		raise ValueError(f"Columns required to compute trailing volatility are missing: {missing_list}")
+
+	ticker = featured["ticker"]
+	grouped_log_return = featured.groupby("ticker", sort=False, group_keys=False)["log_return"]
+	absolute_log_return = featured["log_return"].abs()
+
+	def trailing_mean(values: pd.Series, window: int) -> pd.Series:
+		return values.groupby(ticker, sort=False, group_keys=False).transform(
+			lambda s: s.rolling(window=window, min_periods=window).mean().shift(1)
+		)
+
+	def trailing_std(values: pd.Series, window: int) -> pd.Series:
+		return values.groupby(ticker, sort=False, group_keys=False).transform(
+			lambda s: s.rolling(window=window, min_periods=window).std().shift(1)
+		)
+
+	def trailing_sum(values: pd.Series, window: int) -> pd.Series:
+		return values.groupby(ticker, sort=False, group_keys=False).transform(
+			lambda s: s.rolling(window=window, min_periods=window).sum().shift(1)
+		)
+
+	market_absolute_return = absolute_log_return.groupby(featured["date"]).transform("mean")
+
+	featured["rv5_past"] = trailing_mean(absolute_log_return, 5).astype("float64")
+	featured["rv22"] = trailing_std(featured["log_return"], 22).astype("float64")
+	featured["rv63"] = trailing_std(featured["log_return"], 63).astype("float64")
+	featured["har5"] = trailing_sum(featured["log_return"] ** 2, 5).astype("float64")
+	featured["har22"] = trailing_sum(featured["log_return"] ** 2, 22).astype("float64")
+	featured["har63"] = trailing_sum(featured["log_return"] ** 2, 63).astype("float64")
+	featured["market_abs_ret_5d"] = trailing_mean(market_absolute_return, 5).astype("float64")
+	featured["volvol22"] = trailing_std(absolute_log_return, 22).astype("float64")
+
+	new_columns = (
+		"rv5_past",
+		"rv22",
+		"rv63",
+		"har5",
+		"har22",
+		"har63",
+		"market_abs_ret_5d",
+		"volvol22",
+	)
+	for name in new_columns:
+		defined_values = featured[name].notna()
+		if not np.isfinite(featured.loc[defined_values, name]).all():
+			raise ValueError(f"Column {name} produced non-finite values")
+
+	logger.info(
+		"_add_trailing_volatility_features: columns=%d, longest window=%d rows",
+		len(new_columns),
+		63,
+	)
+	return featured
+
+
 def _forward_window_aggregate(
 	series: pd.Series,
 	ticker: pd.Series,
@@ -655,6 +739,7 @@ def build_features_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 	featured = _add_relative_normalization_features(featured)
 	featured = _add_rolling_statistics_features(featured)
 	featured = _add_range_volatility_features(featured)
+	featured = _add_trailing_volatility_features(featured)
 	featured = _enforce_history_based_nan_consistency(featured)
 	featured = _cast_numeric_columns_to_float64(featured)
 	featured = _add_legacy_feature_aliases(featured)
