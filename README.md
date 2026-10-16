@@ -94,7 +94,7 @@ For the numbers, read `packages/ml/model/artifacts/results/fold_training_summary
 - **Survivors-only universe.** The source carries current and recent S&P 500 constituents only — companies that were delisted are absent. Long-horizon return statistics are therefore biased upward by roughly 1.4–3.9 percentage points per year (CAGR), and the ticker cross-section grows monotonically by construction. Phase 1 fails fast if the per-year ticker count ever declines, which is how a frame containing exits would present itself; a membership-aware frame must waive that check explicitly via `prepare_dataframe(..., survivors_only=False)`. The regime characterization JSON records the frame label and the bias note under `_frame`.
 - **Price and volume only.** No macro data, fundamentals, sentiment, or cross-ticker features.
 - **No sector information.** The source data carries no sector labels, so sector dynamics cannot be learned.
-- **`market_regime` is a hardcoded calendar label**, not something derived from the data. Its buckets end at "2022 and later", so more recent data needs a new bucket added.
+- **`market_regime` is a hardcoded calendar label**, not something derived from the data. Seven calendar buckets span 2000-2007 through 2026; a date past 2026 raises instead of joining the last bucket.
 - **Squared-error training predicts conditional means.** Predictions are compressed toward the centre of the historical range by construction; tail-risk use requires post-hoc calibration.
 - **No automated test or lint suite.** Changes are verified by running the affected phase and reading the logs.
 - **A fresh clone needs Phase 1 first.** Nothing downstream can run without the generated parquet file.
