@@ -57,7 +57,7 @@ Phase 2 fails immediately if Phase 1 has not been run first. Because generated d
 
 | Path | Phase | Contents |
 |---|---|---|
-| `data/processed/dataset.parquet` | 1 | Cleaned survivors-only panel: raw OHLCV columns, per-ticker features plus `log_price`, `realized_volatility_5d`, `market_regime` |
+| `data/processed/dataset.parquet` | 1 | Cleaned survivors-only panel: raw OHLCV columns plus the retained adjusted OHLC columns (`_adj_open`, `_adj_high`, `_adj_low`), per-ticker features plus `log_price`, `realized_volatility_5d`, `market_regime` |
 | `packages/ml/model/artifacts/inputs/` | 2 | `X.npy`, `Y.npy`, `metadata.pkl` — exactly what training consumes |
 | `packages/ml/model/artifacts/folds/` | 3 | Fold indices and date ranges for temporal validation |
 | `packages/ml/model/artifacts/checkpoints/` | 4 | One trained model per fold |
