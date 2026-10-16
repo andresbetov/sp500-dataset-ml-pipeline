@@ -78,6 +78,6 @@ def load_dataframe(file_name: str | None = None) -> pd.DataFrame:
     """
     dataset_path = Path(kagglehub.dataset_download(DATASET_HANDLE))
     csv_path = _pick_csv_file(dataset_path, file_name)
-    df = pd.read_csv(csv_path)
+    df = pd.read_csv(csv_path, keep_default_na=False)
     _write_ingestion_manifest(csv_path, df)
     return df
