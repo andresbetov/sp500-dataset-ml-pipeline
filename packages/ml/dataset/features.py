@@ -496,6 +496,11 @@ def _normalize_and_validate_date_column(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _enforce_history_based_nan_consistency(df: pd.DataFrame) -> pd.DataFrame:
+	"""Blank each feature before its warm-up ends, transactionally.
+
+	Every constrained column is validated up front, and each column is replaced by a
+	freshly computed Series, so a failure cannot leave a half-blanked frame behind.
+	"""
 	unproduced_columns = [column for column in MIN_HISTORY_BY_FEATURE if column not in df.columns]
 	if unproduced_columns:
 		unproduced_list = ", ".join(sorted(unproduced_columns))
@@ -506,7 +511,7 @@ def _enforce_history_based_nan_consistency(df: pd.DataFrame) -> pd.DataFrame:
 	position_in_ticker = df.groupby("ticker", sort=False, group_keys=False).cumcount()
 
 	for column, min_history in MIN_HISTORY_BY_FEATURE.items():
-		df.loc[position_in_ticker < min_history, column] = np.nan
+		df[column] = df[column].where(position_in_ticker >= min_history)
 
 	logger.info(
 		"_enforce_history_based_nan_consistency: constrained columns=%d, longest warm-up=%d rows",
@@ -561,10 +566,13 @@ def build_features_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 	featured = _enforce_history_based_nan_consistency(featured)
 	featured = _cast_numeric_columns_to_float64(featured)
 	featured = _add_legacy_feature_aliases(featured)
-	featured = _sort_stably_by_ticker_date(featured)
-	featured = _reorder_columns_deterministically(featured)
+	# Target and regime are added before the final reorder so the deterministic
+	# column order covers every shipped column; the regime keeps its int8 dtype
+	# because it is added after the float64 cast.
 	featured = _add_target_realized_volatility_5d(featured)
 	featured = _add_market_regime_feature(featured)
+	featured = _sort_stably_by_ticker_date(featured)
+	featured = _reorder_columns_deterministically(featured)
 
 	logger.info(
 		"build_features_dataframe: rows=%d, tickers=%d",
