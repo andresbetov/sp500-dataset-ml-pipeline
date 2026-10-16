@@ -44,8 +44,6 @@ MIN_HISTORY_BY_FEATURE = {
 	"macd": 1,
 	"macd_signal": 1,
 	"macd_hist": 1,
-	"volume_sma_10": 10,
-	"volume_sma_20": 20,
 	"zscore_volume_20": 20,
 	"price_vs_sma_10": 10,
 	"price_vs_sma_20": 20,
@@ -69,11 +67,6 @@ MIN_HISTORY_BY_FEATURE = {
 	"har63": 64,
 	"market_abs_ret_5d": 6,
 	"volvol22": 23,
-}
-
-LEGACY_FEATURE_ALIASES = {
-	"volume_zscore": "zscore_volume_20",
-	"zscore_price_20": "zscore_price_vs_sma_20",
 }
 
 
@@ -327,20 +320,6 @@ def _add_momentum_features(df: pd.DataFrame) -> pd.DataFrame:
 	return featured
 
 
-def _add_volume_sma_features(df: pd.DataFrame) -> pd.DataFrame:
-	featured = df
-	by_ticker_volume = featured.groupby("ticker", sort=False, group_keys=False)["volume"]
-
-	for window in (10, 20):
-		featured[f"volume_sma_{window}"] = (
-			by_ticker_volume.transform(
-				lambda s: s.rolling(window=window, min_periods=window).mean().shift(1)
-			).astype("float64")
-		)
-
-	return featured
-
-
 def _add_volume_zscore_feature(df: pd.DataFrame) -> pd.DataFrame:
 	featured = df
 	featured["zscore_volume_20"] = _compute_stable_rolling_zscore(
@@ -354,8 +333,7 @@ def _add_volume_zscore_feature(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _add_volume_features(df: pd.DataFrame) -> pd.DataFrame:
-	with_volume_sma = _add_volume_sma_features(df)
-	return _add_volume_zscore_feature(with_volume_sma)
+	return _add_volume_zscore_feature(df)
 
 
 def _add_price_vs_sma_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -392,13 +370,6 @@ def _add_relative_normalization_features(df: pd.DataFrame) -> pd.DataFrame:
 	with_price_vs_sma = _add_price_vs_sma_features(df)
 	with_price_zscore = _add_price_zscore_feature(with_price_vs_sma)
 	return with_price_zscore
-
-
-def _add_legacy_feature_aliases(df: pd.DataFrame) -> pd.DataFrame:
-	for legacy_name, canonical_name in LEGACY_FEATURE_ALIASES.items():
-		if canonical_name in df.columns:
-			df[legacy_name] = df[canonical_name]
-	return df
 
 
 def _add_rolling_mean_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -793,7 +764,6 @@ def build_features_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 	featured = _add_trailing_volatility_features(featured)
 	featured = _enforce_history_based_nan_consistency(featured)
 	featured = _cast_numeric_columns_to_float64(featured)
-	featured = _add_legacy_feature_aliases(featured)
 	# Target and regime are added before the final reorder so the deterministic
 	# column order covers every shipped column; the regime keeps its int8 dtype
 	# because it is added after the float64 cast.

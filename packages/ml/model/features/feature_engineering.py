@@ -14,11 +14,20 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 DATASET_PATH = SCRIPT_DIR.parent.parent.parent.parent / "data" / "processed" / "dataset.parquet"
 
 INDICATORS = [
+	"atr20",
+	"atr5",
 	"ema_12",
 	"ema_26",
+	"gap5",
+	"gk5",
+	"har22",
+	"har5",
+	"har63",
 	"macd",
 	"macd_hist",
-	"macd_signal",
+	"market_abs_ret_5d",
+	"park20",
+	"park5",
 	"price_vs_sma_10",
 	"price_vs_sma_20",
 	"price_vs_sma_50",
@@ -31,19 +40,29 @@ INDICATORS = [
 	"rolling_mean_5",
 	"rolling_min_10",
 	"rsi_14",
+	"rv22",
+	"rv5_past",
+	"rv63",
+	"rs5",
 	"simple_return",
+	"volvol22",
 	"volume_lag_1",
 	"volume_lag_3",
 	"volume_lag_5",
-	"volume_sma_10",
-	"volume_sma_20",
-	"volume_zscore",
-	"zscore_price_20",
 	"zscore_price_vs_sma_20",
 	"zscore_volume_20",
-	"log_return",
-	"market_regime",  # Market regime as categorical feature (learned by XGBoost)
 ]
+
+# The pinned model-input contract: 15 volatility inputs in, 7 redundant ones out
+# (the two alias columns, both volume SMAs, and the macd_signal/log_return/
+# market_regime list-only removals). Keep this list and the dataset columns in
+# lockstep; feature-importance arrays are mapped onto INDICATORS by position.
+EXPECTED_INDICATOR_COUNT = 37
+if len(INDICATORS) != EXPECTED_INDICATOR_COUNT:
+	raise ValueError(
+		f"INDICATORS holds {len(INDICATORS)} entries; the pinned contract is "
+		f"{EXPECTED_INDICATOR_COUNT}"
+	)
 
 
 def phase_2_feature_selection() -> tuple[np.ndarray, np.ndarray, dict, None]:
@@ -51,7 +70,7 @@ def phase_2_feature_selection() -> tuple[np.ndarray, np.ndarray, dict, None]:
     Load dataset and select technical indicators only (no ticker encoding).
 
     Returns:
-        X: Feature matrix (n_samples, n_features) = 29 indicators only
+        X: Feature matrix (n_samples, n_features) = the 37 pinned indicators only
         Y: Target vector (n_samples,) with continuous volatility values
         metadata: Dict with 'date' and 'ticker' columns, n_indicators, n_ticker_features
         encoder: None (no ticker encoding applied)
@@ -67,7 +86,12 @@ def phase_2_feature_selection() -> tuple[np.ndarray, np.ndarray, dict, None]:
     date_column = df["date"].values
     ticker_column = df["ticker"].values
 
-    # Select 29 technical indicators (28 indicators + market_regime)
+    missing_indicators = [name for name in INDICATORS if name not in df.columns]
+    if missing_indicators:
+        missing_list = ", ".join(missing_indicators)
+        raise ValueError(f"Dataset is missing INDICATORS columns: {missing_list}")
+
+    # Select the pinned 37 indicators (no ticker encoding)
     logger.info(f"Selecting {len(INDICATORS)} technical indicators (no ticker encoding)")
     X = df[INDICATORS].values
     logger.info(f"Feature matrix X: {X.shape}")
