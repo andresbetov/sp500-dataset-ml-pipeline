@@ -23,6 +23,10 @@ Features come from price and volume only. There is deliberately no per-ticker id
 - [uv](https://docs.astral.sh/uv/) for dependency management
 - Kaggle API credentials — needed only for Phase 1
 
+`uv.lock` pins the full dependency tree. `pyarrow` additionally carries an exact pin in `pyproject.toml` (`==24.0.0`) because it writes the dataset artifact; the reference environment is CPython 3.14.7 with pandas 3.0.2 and numpy 2.4.4.
+
+Byte-identical regeneration is a local property: on the machine that wrote `dataset.parquet`, a fresh Phase 1 run reproduces the file byte for byte, but another platform can produce different bytes for identical content. Across machines, compare content instead of bytes — for example the SHA-256 of the `realized_volatility_5d` payload (`1d107592f19f32f654ef7f83d149446aac968455b5aa972304ca0eb01cd9b77d`), which is machine-independent. Phase 1 writes the parquet with pyarrow's default writer options (Snappy compression, `index=False`).
+
 ## Setup
 
 ```bash
