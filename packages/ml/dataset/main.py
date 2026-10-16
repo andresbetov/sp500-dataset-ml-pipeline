@@ -23,6 +23,12 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent.parent.parent
 DEFAULT_FILE_DIRECTORY = PROJECT_ROOT / "data" / "processed"
 
+SURVIVORS_ONLY_FRAME_LABEL = "current-and-recent S&P 500 constituents, survivors only"
+SURVIVORSHIP_BIAS_NOTE = (
+    "Delisted constituents are absent from the source, so long-horizon return statistics "
+    "are biased upward by roughly 1.4-3.9 percentage points per year (CAGR)."
+)
+
 
 def _save_parquet(df: pd.DataFrame, file_name: str) -> None:
     file_path = Path(DEFAULT_FILE_DIRECTORY / (file_name + ".parquet"))
@@ -48,6 +54,14 @@ def generate_featured_dataset(
     # Characterize regimes before dropping NaN
     logger.info("Characterizing regimes...")
     regime_stats = _characterize_regimes(featured_df)
+
+    # The source only carries constituents still listed when the panel ends; record that
+    # contract (and the bias it carries) alongside the regime statistics.
+    regime_stats["_frame"] = {
+        "label": SURVIVORS_ONLY_FRAME_LABEL,
+        "survivors_only": True,
+        "bias_note": SURVIVORSHIP_BIAS_NOTE,
+    }
 
     # Save regime characterization to JSON
     artifacts_dir = PROJECT_ROOT / "packages" / "ml" / "model" / "artifacts" / "results"

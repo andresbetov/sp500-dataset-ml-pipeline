@@ -53,7 +53,7 @@ Phase 2 fails immediately if Phase 1 has not been run first. Because generated d
 
 | Path | Phase | Contents |
 |---|---|---|
-| `data/processed/dataset.parquet` | 1 | Cleaned panel: raw OHLCV columns, per-ticker features plus `log_price`, `realized_volatility_5d`, `market_regime` |
+| `data/processed/dataset.parquet` | 1 | Cleaned survivors-only panel: raw OHLCV columns, per-ticker features plus `log_price`, `realized_volatility_5d`, `market_regime` |
 | `packages/ml/model/artifacts/inputs/` | 2 | `X.npy`, `Y.npy`, `metadata.pkl` — exactly what training consumes |
 | `packages/ml/model/artifacts/folds/` | 3 | Fold indices and date ranges for temporal validation |
 | `packages/ml/model/artifacts/checkpoints/` | 4 | One trained model per fold |
@@ -87,6 +87,7 @@ For the numbers, read `packages/ml/model/artifacts/results/fold_training_summary
 
 ## Scope and limitations
 
+- **Survivors-only universe.** The source carries current and recent S&P 500 constituents only — companies that were delisted are absent. Long-horizon return statistics are therefore biased upward by roughly 1.4–3.9 percentage points per year (CAGR), and the ticker cross-section grows monotonically by construction. Phase 1 fails fast if the per-year ticker count ever declines, which is how a frame containing exits would present itself; a membership-aware frame must waive that check explicitly via `prepare_dataframe(..., survivors_only=False)`. The regime characterization JSON records the frame label and the bias note under `_frame`.
 - **Price and volume only.** No macro data, fundamentals, sentiment, or cross-ticker features.
 - **No sector information.** The source data carries no sector labels, so sector dynamics cannot be learned.
 - **`market_regime` is a hardcoded calendar label**, not something derived from the data. Its buckets end at "2022 and later", so more recent data needs a new bucket added.
