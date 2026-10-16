@@ -1,6 +1,7 @@
 .idea
 .env
 /data/processed/dataset.parquet
+/data/processed/ingestion_manifest.json
 *.joblib
 *.pkl
 /packages/ml/model/artifacts
