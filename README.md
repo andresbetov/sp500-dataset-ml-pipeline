@@ -25,7 +25,7 @@ Features come from price and volume only. There is deliberately no per-ticker id
 
 `uv.lock` pins the full dependency tree. `pyarrow` additionally carries an exact pin in `pyproject.toml` (`==24.0.0`) because it writes the dataset artifact; the reference environment is CPython 3.14.7 with pandas 3.0.2 and numpy 2.4.4.
 
-Byte-identical regeneration is a local property: on the machine that wrote `dataset.parquet`, a fresh Phase 1 run reproduces the file byte for byte, but another platform can produce different bytes for identical content. Across machines, compare content instead of bytes — for example the SHA-256 of the `realized_volatility_5d` payload (`5f00ab90e6f5d0b7b068f66775ba0fd7f5341a54d49429160523e2fd2f36b0c4`), which is machine-independent. Phase 1 writes the parquet with pyarrow's default writer options (Snappy compression, `index=False`).
+Byte-identical regeneration is a local property: on the machine that wrote `dataset.parquet`, a fresh Phase 1 run reproduces the file byte for byte, but another platform can produce different bytes for identical content. Across machines, compare content instead of bytes — for example the SHA-256 of the `realized_volatility_5d` payload (`a8b097ca3cb9d6b623890aca2dcfa65c3e0d3658761541cc8fb64d51d09aac9f`), which is machine-independent. Phase 1 writes the parquet with pyarrow's default writer options (Snappy compression, `index=False`).
 
 ## Setup
 
