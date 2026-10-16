@@ -72,7 +72,7 @@ Temporal validation uses `TimeSeriesSplit` with five folds and expanding trainin
 
 One caveat worth knowing before trusting the split: the `gap` parameter counts rows, not trading days, and the panel holds hundreds of tickers per date, so the embargo does not separate dates — rows from a test date can appear in the same fold's training set under a different ticker. The leakage guard in `packages/ml/model/cross_validation/cross_validator.py` documents and permits this.
 
-Most price-derived features are computed per ticker and shifted one day, so they never see their own bar. Some model inputs do: `simple_return` and `log_return` are same-bar returns, and the `price_vs_sma_*` and `zscore_*` families divide a current-bar value by a lagged statistic, so they carry information from the close being predicted. The target is the single deliberate exception: it looks five days forward.
+Most price-derived features are computed per ticker and shifted one day, so they never see their own bar. A handful of model inputs deliberately carry the close of day t: `simple_return` and `log_return` are same-bar returns, and the `price_vs_sma_*` and `zscore_*` families divide a current-bar value by a lagged statistic. For those inputs the documented contract is the close of t — they are anchored to the bar being predicted, not to the previous close. The target is the single deliberate exception: it looks five days forward.
 
 ## Model
 
