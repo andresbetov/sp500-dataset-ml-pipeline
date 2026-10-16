@@ -35,6 +35,7 @@ Both take no arguments and read no environment variables. They are cwd-independe
 - **`market_regime` is a hardcoded calendar label**, not data-derived: seven calendar buckets cover 2000-2007 through 2026 and a date past 2026 raises. Extend `packages/ml/dataset/features.py` before ingesting data past 2026.
 - **Folds are date-group blocks with a two-sided purge.** `cross_validation/cross_validator.py` splits the sorted unique trading dates into six contiguous blocks; fold k tests on block k+1 and trains on blocks 0..k minus the two-sided purge of the 5-day label overlap. The embargo predicate `first_test_idx - last_train_idx >= 6` (unique-date index space) is asserted per fold, so same-date, different-ticker overlap across the train/test boundary cannot occur.
 - **Time alignment is load-bearing.** Most price-derived features are shifted one day; the target uses `shift(-5)` and looks forward on purpose. The exceptions — model inputs in `feature_engineering.py:INDICATORS` whose numerator is the current bar — are `simple_return`, `price_vs_sma_{10,20,50}`, `zscore_price_vs_sma_20`, and `zscore_volume_20`. Do not assume a blanket one-day shift.
+- **The training target is log(RV).** `training.py` floors the Yang-Zhang target at `1e-12` before the log (exact-zero flat windows) and computes R²/MAE/RMSE on the log scale — R² follows sklearn's fold-own-mean convention, not the non-demeaned R²_oos of the literature. QLIKE (Patton 2011) is the robust volatility loss, and every fold also fits the canonical HAR-RV benchmark (Corsi 2008, 1/5/22 trailing variance components) on training rows only.
 - **Phase 1 writes into the model package's tree.** `dataset/main.py` writes `packages/ml/model/artifacts/results/`, so relocating model artifacts requires editing the dataset phase.
 
 ## Known dead or broken code
@@ -57,7 +58,7 @@ Both take no arguments and read no environment variables. They are cwd-independe
 There are no tests. To check a change, run the phase you touched — both if the change spans `packages/ml/dataset` and `packages/ml/model`:
 
 1. `python packages/ml/dataset/main.py` — confirm it completes and logs the row and ticker counts it wrote, plus the "Dropped ... NaN rows" line and the parquet-then-JSON save order.
-2. `python packages/ml/model/main.py` — confirm 5 folds train and `artifacts/results/fold_training_summary.json` is written.
+2. `python packages/ml/model/main.py` — confirm 5 folds train and `artifacts/results/fold_training_summary.json` (per-fold R²/QLIKE) plus the HAR benchmark report are written.
 3. If commands or file layout changed, update `README.md` in the same change.
 
 Cap long-running or chatty commands: `python packages/ml/model/main.py 2>&1 | tail -c 4000`.

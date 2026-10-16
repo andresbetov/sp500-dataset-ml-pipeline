@@ -61,7 +61,7 @@ Phase 2 fails immediately if Phase 1 has not been run first. Because generated d
 | `packages/ml/model/artifacts/inputs/` | 2 | `X.npy`, `Y.npy`, `metadata.pkl` — exactly what training consumes |
 | `packages/ml/model/artifacts/folds/` | 3 | Fold indices and date ranges for temporal validation |
 | `packages/ml/model/artifacts/checkpoints/` | 4 | One trained model per fold |
-| `packages/ml/model/artifacts/results/` | 1, 4 | `fold_training_summary.json` (per-fold metrics), `regime_characterization.json`, predictions |
+| `packages/ml/model/artifacts/results/` | 1, 4 | `fold_training_summary.json` (per-fold metrics), `har_benchmark.json` (HAR-RV benchmark per fold), `regime_characterization.json`, predictions |
 | `data/model_outputs/` | 5 | 14 PNG evaluation charts |
 
 Everything in the table is generated output and gitignored.
@@ -78,16 +78,18 @@ Most price-derived features are computed per ticker and shifted one day, so they
 
 One `XGBRegressor` per fold, hyperparameters in `packages/ml/model/training/model_trainer.py`. Keeping one model per fold prevents any fold from being influenced by another fold's evaluation data. Edit hazards in the training path — including a dead early-stopping branch — are listed in AGENTS.md.
 
+The target is modeled as `log(RV)` — the Yang-Zhang variance is closer to log-normal, and QLIKE is the robust loss for it. Exact-zero flat windows are floored at `1e-12` before the log so they stay finite. R²/MAE/RMSE are computed on the log scale, with sklearn's fold-own-mean R² convention. Every fold also fits the canonical HAR-RV benchmark (Corsi 2008, 1/5/22 trailing variance components) on its training rows only and is scored on the same test rows; the comparison lands in `har_benchmark.json`.
+
 ## Evaluation
 
 Phase 5 writes 14 charts to `data/model_outputs/` in four groups:
 
-- **Metrics** — R² per fold, MAE vs RMSE, and a metrics heatmap
+- **Metrics** — R² per fold, MAE vs RMSE, and a metrics heatmap (all on the log target)
 - **Temporal** — fold windows on a timeline, sample counts per fold, metric trend over time
 - **Comparisons** — per-fold R²/MAE/RMSE bars, training vs inference timing, sample distributions, feature counts
 - **Diagnostics** — actual vs predicted, residual distributions, feature importance, error by volatility level
 
-For the numbers, read `packages/ml/model/artifacts/results/fold_training_summary.json` from the run that produced it. They are not reproduced here because they depend on both the data snapshot and the machine.
+For the numbers, read `packages/ml/model/artifacts/results/fold_training_summary.json` and `har_benchmark.json` from the run that produced them. They are not reproduced here because they depend on both the data snapshot and the machine.
 
 ## Scope and limitations
 
