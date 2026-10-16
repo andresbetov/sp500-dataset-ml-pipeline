@@ -19,8 +19,42 @@ REQUIRED_COLUMNS = {
 PRICE_COLUMNS = {"open", "high", "low", "close", "adj_close"}
 MIN_TRADING_DAYS = 500
 ZERO_VOLUME_CENSUS_RATIO = 0.05
+MIN_DISTINCT_CLOSE_PRICES = 50
+LOW_PRICE_CENSUS_THRESHOLD = 0.10
 
 logger = logging.getLogger(__name__)
+
+
+def _check_price_grid(df: pd.DataFrame) -> None:
+    """Fail fast on a coarse close-price grid; census sub-dime closes at INFO.
+
+    A cross-section whose closes collapse onto fewer than MIN_DISTINCT_CLOSE_PRICES
+    distinct 2-decimal values cannot carry the resolution the price features assume;
+    that signature means the source came back rounded or corrupt, so the frame is
+    rejected. Sub-dime closes are a different matter - a back-adjusted total-return
+    series legitimately prices old high-split names below a dime - so they are
+    counted and logged as a census instead of rejected.
+    """
+    distinct_close_prices = int(df["close"].round(2).nunique())
+    if distinct_close_prices < MIN_DISTINCT_CLOSE_PRICES:
+        raise ValueError(
+            f"Close prices collapse onto {distinct_close_prices} distinct 2-decimal "
+            f"values (minimum {MIN_DISTINCT_CLOSE_PRICES}); the source looks rounded "
+            "or corrupt"
+        )
+
+    below_threshold = df["close"] < LOW_PRICE_CENSUS_THRESHOLD
+    below_threshold_rows = int(below_threshold.sum())
+    logger.info(
+        "_check_price_grid: distinct_close_prices=%d, close<%.2f rows=%d (%.4f%%), "
+        "tickers=%d, min_close=%.4f",
+        distinct_close_prices,
+        LOW_PRICE_CENSUS_THRESHOLD,
+        below_threshold_rows,
+        100.0 * below_threshold_rows / len(df),
+        int(df.loc[below_threshold, "ticker"].nunique()),
+        float(df["close"].min()),
+    )
 
 
 def _normalize_column_names(df: pd.DataFrame) -> pd.DataFrame:
@@ -311,6 +345,7 @@ def prepare_dataframe(df: pd.DataFrame, survivors_only: bool = True) -> pd.DataF
     normalized = _normalize_column_names(df)
     _validate_required_columns(normalized)
     _cast_columns(normalized)
+    _check_price_grid(normalized)
     _check_survivor_cross_section(normalized, survivors_only)
     cleaned = _repair_invalid_ohlc_rows(normalized)
     deduplicated = _sort_and_deduplicate(cleaned)
