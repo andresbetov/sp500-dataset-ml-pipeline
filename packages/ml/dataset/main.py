@@ -7,6 +7,8 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 from loader import load_dataframe
 from preparation import prepare_dataframe
@@ -35,7 +37,15 @@ STALENESS_WARNING_DAYS = 30
 def _save_parquet(df: pd.DataFrame, file_name: str) -> None:
     file_path = Path(DEFAULT_FILE_DIRECTORY / (file_name + ".parquet"))
     file_path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_parquet(file_path, index=False)
+    # The pandas string dtype writes Arrow large_string by default; pin the 32-bit
+    # string type so readers without large-offset support can open the artifact.
+    pinned = df.assign(ticker=df["ticker"].astype(pd.ArrowDtype(pa.string())))
+    pinned.to_parquet(file_path, index=False)
+    ticker_type = pq.read_schema(file_path).field("ticker").type
+    if ticker_type != pa.string():
+        raise ValueError(
+            f"Expected the ticker column to be written as string, got {ticker_type}"
+        )
 
 
 def _check_panel_staleness(
@@ -94,15 +104,15 @@ def _assert_contiguous_ticker_frames(df: pd.DataFrame) -> None:
 def generate_featured_dataset() -> None:
     logger.info("Loading raw dataset...")
     raw_df = load_dataframe()
-    logger.info(f"Loaded {len(raw_df):,} rows")
+    logger.info("Loaded %d rows", len(raw_df))
 
     logger.info("Preparing data...")
     prepared_df = prepare_dataframe(raw_df)
-    logger.info(f"Prepared: {len(prepared_df):,} rows")
+    logger.info("Prepared: %d rows", len(prepared_df))
 
     logger.info("Building features...")
     featured_df = build_features_dataframe(prepared_df)
-    logger.info(f"Featured: {len(featured_df):,} rows")
+    logger.info("Featured: %d rows", len(featured_df))
 
     # Characterize regimes before dropping NaN
     logger.info("Characterizing regimes...")
@@ -111,7 +121,11 @@ def generate_featured_dataset() -> None:
     logger.info("Dropping NaN rows...")
     pre_dropna_rows = len(featured_df)
     featured_df = featured_df.dropna()
-    logger.info(f"Dropped {pre_dropna_rows - len(featured_df):,} NaN rows ({len(featured_df):,} remaining)")
+    logger.info(
+        "Dropped %d NaN rows (%d remaining)",
+        pre_dropna_rows - len(featured_df),
+        len(featured_df),
+    )
 
     _assert_contiguous_ticker_frames(featured_df)
     _save_parquet(featured_df, "dataset")
@@ -135,7 +149,7 @@ def generate_featured_dataset() -> None:
     regime_stats_path = artifacts_dir / "regime_characterization.json"
     with open(regime_stats_path, "w") as f:
         json.dump(regime_stats, f, indent=2)
-    logger.info(f"Regime stats saved to {regime_stats_path}")
+    logger.info("Regime stats saved to %s", regime_stats_path)
 
 
 if __name__ == "__main__":

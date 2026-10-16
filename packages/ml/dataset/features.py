@@ -11,7 +11,6 @@ STD_EPSILON = 1e-12
 # meaningful z-score; such windows are treated as constant instead of dividing by
 # a zero standard deviation.
 ZSCORE_RANGE_EPSILON = 1e-12
-DIRECTION_TOLERANCE = 0.005
 REGIME_CORRELATION_WINDOW = 60
 
 TARGET_WINDOW_DAYS = 5
@@ -830,28 +829,29 @@ def _add_market_regime_feature(df: pd.DataFrame) -> pd.DataFrame:
 	Returns:
 		DataFrame with new 'market_regime' column (int8: 0-6)
 	"""
-	def get_regime(date: pd.Timestamp) -> int:
-		year = date.year
-		if year <= 2007:
-			return 0
-		elif year <= 2010:
-			return 1
-		elif year <= 2019:
-			return 2
-		elif year <= 2021:
-			return 3
-		elif year == 2022:
-			return 4
-		elif year <= 2025:
-			return 5
-		elif year == 2026:
-			return 6
+	year = df['date'].dt.year
+	regime = np.select(
+		[
+			year <= 2007,
+			year <= 2010,
+			year <= 2019,
+			year <= 2021,
+			year == 2022,
+			year <= 2025,
+			year == 2026,
+		],
+		[0, 1, 2, 3, 4, 5, 6],
+		default=-1,
+	)
+	uncovered = regime == -1
+	if uncovered.any():
+		uncovered_years = sorted(int(value) for value in year[uncovered].unique())
 		raise ValueError(
-			f"No market regime bucket covers year {year}; extend the calendar "
-			"buckets before ingesting later data"
+			f"No market regime bucket covers year(s) {uncovered_years}; extend the "
+			"calendar buckets before ingesting later data"
 		)
 
-	df['market_regime'] = df['date'].apply(get_regime).astype('int8')
+	df['market_regime'] = regime.astype('int8')
 	return df
 
 
@@ -996,7 +996,7 @@ def _characterize_regimes(df: pd.DataFrame) -> dict:
 		regime_data = df[df['market_regime'] == regime_id]
 
 		if len(regime_data) == 0:
-			logger.warning(f"Regime {regime_id}: no data found")
+			logger.warning("Regime %d: no data found", regime_id)
 			continue
 
 		# Volatility statistics
@@ -1059,7 +1059,13 @@ def _characterize_regimes(df: pd.DataFrame) -> dict:
 
 	logger.info("Regime Characterization Complete:")
 	for regime_name, regime_stats in stats.items():
-		logger.info(f"  {regime_name}: vol_mean={regime_stats['volatility_mean']:.6f}, vol_std={regime_stats['volatility_std']:.6f}, n_samples={regime_stats['n_samples']}")
+		logger.info(
+			"  %s: vol_mean=%.6f, vol_std=%.6f, n_samples=%d",
+			regime_name,
+			regime_stats['volatility_mean'],
+			regime_stats['volatility_std'],
+			regime_stats['n_samples'],
+		)
 
 	return stats
 
