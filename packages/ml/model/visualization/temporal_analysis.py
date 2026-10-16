@@ -18,7 +18,8 @@ def plot_temporal_fold_ranges(summary_df: pd.DataFrame, output_path: Path | None
     """
     Create timeline visualization showing train/test date ranges for each fold.
 
-    Displays temporal splits of TimeSeriesSplit with expanding windows.
+    Displays the fold train/test date ranges: date-group blocks over the sorted
+    unique trading dates with expanding training windows.
 
     Args:
         summary_df: DataFrame from load_fold_training_summary()
