@@ -68,9 +68,9 @@ Everything in the table is generated output and gitignored.
 
 ## How the data is validated
 
-Temporal validation uses `TimeSeriesSplit` with five folds and expanding training windows — each fold trains on all history preceding its test window and is scored only on later rows.
+Temporal validation uses date-group folds with expanding training windows: the sorted unique trading dates are split into six contiguous blocks, and each of the five folds trains on every block before its test block and is scored only on later rows.
 
-One caveat worth knowing before trusting the split: the `gap` parameter counts rows, not trading days, and the panel holds hundreds of tickers per date, so the embargo does not separate dates — rows from a test date can appear in the same fold's training set under a different ticker. The leakage guard in `packages/ml/model/cross_validation/cross_validator.py` documents and permits this.
+Each fold applies a two-sided purge of the 5-day forward target's label overlap — training rows whose label window reaches into the test block and test rows whose label window overlaps the last training row's window are both dropped — so at least five complete trading days separate the kept train and test dates. The per-fold guard in `packages/ml/model/cross_validation/cross_validator.py` enforces this in unique-trading-date index space.
 
 Most price-derived features are computed per ticker and shifted one day, so they never see their own bar. A handful of model inputs deliberately carry the close of day t: `simple_return` is a same-bar return, and the `price_vs_sma_*` and `zscore_*` families divide a current-bar value by a lagged statistic. For those inputs the documented contract is the close of t — they are anchored to the bar being predicted, not to the previous close. `log_return` stays in the dataset as the target's input but is not a model input. The target is the single deliberate exception: it looks five days forward.
 
