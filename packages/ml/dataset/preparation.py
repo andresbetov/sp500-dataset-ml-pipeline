@@ -26,6 +26,11 @@ logger = logging.getLogger(__name__)
 def _normalize_column_names(df: pd.DataFrame) -> pd.DataFrame:
     normalized = df.copy()
     normalized.columns = [str(column).strip().lower().replace(" ", "_") for column in normalized.columns]
+    colliding_columns = sorted(set(normalized.columns[normalized.columns.duplicated()]))
+    if colliding_columns:
+        colliding_list = ", ".join(colliding_columns)
+        logger.error("_normalize_column_names: colliding columns=%s", colliding_list)
+        raise ValueError(f"Column names collide after normalization: {colliding_list}")
     logger.debug(
         "_normalize_column_names: rows=%d, columns=%d",
         len(normalized),
@@ -40,12 +45,25 @@ def _validate_required_columns(df: pd.DataFrame) -> None:
         missing_list = ", ".join(sorted(missing))
         logger.error("_validate_required_columns: missing columns=%s", missing_list)
         raise ValueError(f"Missing required columns: {missing_list}")
+    unexpected = set(df.columns) - REQUIRED_COLUMNS
+    if unexpected:
+        unexpected_list = ", ".join(sorted(unexpected))
+        logger.error("_validate_required_columns: unexpected columns=%s", unexpected_list)
+        raise ValueError(f"Unexpected columns: {unexpected_list}")
     logger.debug("_validate_required_columns: all required columns present")
 
 
 def _cast_columns(df: pd.DataFrame) -> None:
     df["ticker"] = df["ticker"].astype("string").str.strip()
-    df["date"] = pd.to_datetime(df["date"], errors="raise").dt.normalize()
+    empty_tickers = int(df["ticker"].eq("").sum())
+    if empty_tickers:
+        raise ValueError(f"Column 'ticker' contains {empty_tickers} empty values")
+
+    parsed_dates = pd.to_datetime(df["date"], errors="raise")
+    invalid_dates = int(parsed_dates.isna().sum())
+    if invalid_dates:
+        raise ValueError(f"Column 'date' contains {invalid_dates} invalid or empty values")
+    df["date"] = parsed_dates.dt.normalize()
 
     for column in PRICE_COLUMNS:
         df[column] = pd.to_numeric(df[column], errors="raise").astype("float64")
@@ -146,6 +164,8 @@ def _check_survivor_cross_section(df: pd.DataFrame, survivors_only: bool) -> Non
         return
 
     yearly_counts = df.groupby(df["date"].dt.year)["ticker"].nunique()
+    if yearly_counts.empty:
+        raise ValueError("Cannot check the survivors-only cross-section on a frame with no dated rows")
     if yearly_counts.is_monotonic_increasing:
         logger.info(
             "_check_survivor_cross_section: non-decreasing (%d in %d -> %d in %d)",
