@@ -28,12 +28,32 @@ SURVIVORSHIP_BIAS_NOTE = (
     "Delisted constituents are absent from the source, so long-horizon return statistics "
     "are biased upward by roughly 1.4-3.9 percentage points per year (CAGR)."
 )
+STALENESS_WARNING_DAYS = 30
 
 
 def _save_parquet(df: pd.DataFrame, file_name: str) -> None:
     file_path = Path(DEFAULT_FILE_DIRECTORY / (file_name + ".parquet"))
     file_path.parent.mkdir(parents=True, exist_ok=True)
     df.to_parquet(file_path, index=False)
+
+
+def _check_panel_staleness(
+    df: pd.DataFrame,
+    max_staleness_days: int = STALENESS_WARNING_DAYS,
+) -> None:
+    """Warn when the shipped panel's last date lags the run date beyond the threshold."""
+    run_date = pd.Timestamp.today().normalize()
+    last_date = df["date"].max()
+    staleness_days = int((run_date - last_date).days)
+    if staleness_days > max_staleness_days:
+        logger.warning(
+            "Panel is stale: last date %s is %d days before the run date %s "
+            "(threshold %d days)",
+            last_date.date(),
+            staleness_days,
+            run_date.date(),
+            max_staleness_days,
+        )
 
 
 def generate_featured_dataset() -> None:
@@ -60,6 +80,8 @@ def generate_featured_dataset() -> None:
 
     _save_parquet(featured_df, "dataset")
     logger.info("Dataset saved to data/processed/dataset.parquet")
+
+    _check_panel_staleness(featured_df)
 
     # The JSON is written after the parquet so a failure here cannot leave a stale
     # characterization describing a dataset that was never written. The reserved
