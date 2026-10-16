@@ -21,9 +21,9 @@ Both take no arguments and read no environment variables. They are cwd-independe
 
 ## Hard rules
 
-1. **Run these as scripts; never import them.** `packages/ml/dataset/__init__.py` imports `main.py`, and `main.py` calls `generate_featured_dataset()` at module top level, so importing the dataset package executes the whole phase. The in-package imports are also flat (`from loader import ...`), so the import only gets that far when the cwd happens to be `packages/ml/dataset`; from anywhere else it dies first with `ModuleNotFoundError: No module named 'loader'`. Either way, run it as a script.
+1. **Run these as scripts; never import them.** `packages/ml/dataset/__init__.py` re-exports the phase entry point, and `main.py`'s in-package imports are flat (`from loader import ...`), so importing the dataset package only gets that far when the cwd happens to be `packages/ml/dataset`; from anywhere else it dies first with `ModuleNotFoundError: No module named 'loader'`. The phase call itself sits behind `if __name__ == "__main__"` (as does `model/main.py`'s), so a successful import no longer executes work. Either way, run it as a script.
 2. **Phase 1 before Phases 2-5.** Phase 2 reads `data/processed/dataset.parquet` and fails immediately if it is missing. All generated data is gitignored, so a fresh clone has none.
-3. **Never commit generated output.** `packages/ml/model/artifacts/`, `data/model_outputs/`, and `data/processed/dataset.parquet` are gitignored (as are `*.pkl` and `*.joblib` anywhere in the tree, `data/` included); no other `data/` path is ignored, so check before adding anything there. Markdown is no longer ignored — the old blanket `*.md` rule was removed, so `AGENTS.md` and any new `.md` commit normally.
+3. **Never commit generated output.** `packages/ml/model/artifacts/`, `data/model_outputs/`, `data/processed/dataset.parquet`, and `data/processed/ingestion_manifest.json` are gitignored (as are `*.pkl` and `*.joblib` anywhere in the tree, `data/` included); no other `data/` path is ignored, so check before adding anything there. Markdown is no longer ignored — the old blanket `*.md` rule was removed, so `AGENTS.md` and any new `.md` commit normally.
 4. **No absolute or machine-specific paths.** Everything resolves from `__file__`; `model/utils.py:get_project_paths` is the path registry. Keep it that way.
 5. **No evidence, no "done".** With no test suite, verification means running the phase you touched and quoting the log output you saw.
 
@@ -42,7 +42,6 @@ Both take no arguments and read no environment variables. They are cwd-independe
 - `model/training/inference.py` is never imported; the live path inlines `model.predict()` in `training.py`. Editing it changes nothing.
 - The early-stopping branch in `model_trainer.py` is unreachable: `training.py` passes `X_val=None, y_val=None`.
 - `cross_validation/cv_utils.py:load_fold_data` is never called.
-- `regime_characterization.json` reports `ticker_correlation_mean`/`_std` as `0.0` in every regime. A `Series.corr()` call with no argument raises and is swallowed by a catch-all `except Exception: pass` in `dataset/features.py`. Treat those fields as always zero; they are not signal.
 - `metadata.pkl` carries no `regime` key, so per-fold regime distributions are always empty.
 - `.idea/workspace.xml` still carries a `RunManager` entry for the deleted `run_pipeline.py`. It is untracked and stale.
 
@@ -51,13 +50,13 @@ Both take no arguments and read no environment variables. They are cwd-independe
 - Use the `logging` module (`logger = logging.getLogger(__name__)`), not `print`. The handler format is identical in `dataset/main.py` and `model/utils.py`.
 - Match each file's local indentation. These four files are tab-indented: `dataset/features.py`, `model/features/feature_engineering.py`, `model/training/model_trainer.py`, `model/training/training.py`. In `feature_engineering.py` only the `INDICATORS` list uses tabs — its function bodies use 4 spaces. Everything else uses 4 spaces.
 - There are no classes; use module-level functions with type hints. `from __future__ import annotations` leads every module; of the six `__init__.py` files only `model/visualization/__init__.py` carries it.
-- Errors fail fast: `raise ValueError` / `FileNotFoundError` with a message. Log-and-re-raise appears in `model/main.py` and in `training/_train_fold_model`; two blocks swallow instead — the catch-all `except Exception: pass` in `dataset/features.py`, and `training.py`'s metric computation, which writes NaN metrics.
+- Errors fail fast: `raise ValueError` / `FileNotFoundError` with a message. Log-and-re-raise appears in `model/main.py` and in `training/_train_fold_model`; one block swallows instead — `training.py`'s metric computation, which writes NaN metrics.
 
 ## Verification workflow
 
 There are no tests. To check a change, run the phase you touched — both if the change spans `packages/ml/dataset` and `packages/ml/model`:
 
-1. `python packages/ml/dataset/main.py` — confirm it completes and logs the row and ticker counts it wrote, plus the final "Dropped ... NaN rows" line.
+1. `python packages/ml/dataset/main.py` — confirm it completes and logs the row and ticker counts it wrote, plus the "Dropped ... NaN rows" line and the parquet-then-JSON save order.
 2. `python packages/ml/model/main.py` — confirm 5 folds train and `artifacts/results/fold_training_summary.json` is written.
 3. If commands or file layout changed, update `README.md` in the same change.
 
