@@ -18,7 +18,7 @@ REQUIRED_COLUMNS = {
 
 PRICE_COLUMNS = {"open", "high", "low", "close", "adj_close"}
 MIN_TRADING_DAYS = 500
-MAX_ZERO_VOLUME_RATIO = 0.05
+ZERO_VOLUME_CENSUS_RATIO = 0.05
 
 logger = logging.getLogger(__name__)
 
@@ -119,7 +119,7 @@ def _filter_by_min_trading_days(
     tickers_in = df["ticker"].nunique()
     trading_days = df.groupby("ticker")["date"].transform("nunique")
     filtered = df.loc[trading_days >= min_trading_days].reset_index(drop=True)
-    logger.debug(
+    logger.info(
         "_filter_by_min_trading_days: min_days=%d, rows_in=%d, rows_out=%d, tickers_in=%d, tickers_out=%d",
         min_trading_days,
         rows_in,
@@ -130,23 +130,72 @@ def _filter_by_min_trading_days(
     return filtered
 
 
-def _filter_by_zero_volume_ratio(
+def _treat_zero_volume_price_moves(
     df: pd.DataFrame,
-    max_zero_volume_ratio: float = MAX_ZERO_VOLUME_RATIO,
+    census_ratio: float = ZERO_VOLUME_CENSUS_RATIO,
 ) -> pd.DataFrame:
+    """Treat zero-volume observations that moved as missing, per row, no row drops.
+
+    A zero-volume row whose bar is flat and whose close equals the previous close is
+    consistent with a genuine no-trade day. One whose bar moved or whose close moved
+    against the previous close is not: the volume feed dropped out while prices kept
+    moving. Those rows keep their prices, but their volume is treated as missing and
+    carried forward from the ticker's last positive observed volume (backward-filled
+    from the next positive volume when the ticker starts inside a missing run), so no
+    row is dropped, no interior date gap can appear, and a suspect zero never gets
+    propagated. Logs the treated and surviving-zero counts at INFO, plus a per-ticker
+    profile for every ticker above the census ratio.
+    """
     rows_in = len(df)
-    tickers_in = df["ticker"].nunique()
-    zero_volume_ratio = df["volume"].eq(0).groupby(df["ticker"]).transform("mean")
-    filtered = df.loc[zero_volume_ratio <= max_zero_volume_ratio].reset_index(drop=True)
-    logger.debug(
-        "_filter_by_zero_volume_ratio: threshold=%.4f, rows_in=%d, rows_out=%d, tickers_in=%d, tickers_out=%d",
-        max_zero_volume_ratio,
+    previous_close = df.groupby("ticker", sort=False, group_keys=False)["close"].shift(1)
+    zero_volume = df["volume"].eq(0)
+    flat_bar = df["open"].eq(df["high"]) & df["high"].eq(df["low"]) & df["low"].eq(df["close"])
+    price_moved = previous_close.notna() & df["close"].ne(previous_close)
+    treated = zero_volume & (price_moved | ~flat_bar)
+
+    volumes = df["volume"].where(~treated)
+    observed_positive_volume = df["volume"].where(~treated & df["volume"].gt(0))
+    filled_volume = observed_positive_volume.groupby(
+        df["ticker"], sort=False, group_keys=False
+    ).ffill()
+    filled_volume = filled_volume.groupby(
+        df["ticker"], sort=False, group_keys=False
+    ).bfill()
+    volumes = volumes.where(~treated, filled_volume)
+    if volumes.isna().any():
+        raise ValueError("Zero-volume treatment left missing volume values")
+    df["volume"] = volumes
+
+    logger.info(
+        "_treat_zero_volume_price_moves: rows_in=%d, zero_volume_rows=%d, treated_rows=%d, "
+        "surviving_zero_rows=%d, tickers_touched=%d",
         rows_in,
-        len(filtered),
-        tickers_in,
-        filtered["ticker"].nunique(),
+        int(zero_volume.sum()),
+        int(treated.sum()),
+        int((zero_volume & ~treated).sum()),
+        int(df.loc[treated, "ticker"].nunique()),
     )
-    return filtered
+
+    profile = pd.DataFrame(
+        {
+            "zeros": zero_volume.groupby(df["ticker"]).sum(),
+            "treated": treated.groupby(df["ticker"]).sum(),
+            "rows": df.groupby("ticker").size(),
+        }
+    )
+    profile["ratio"] = profile["zeros"] / profile["rows"]
+    flagged = profile.loc[profile["ratio"] > census_ratio].sort_values("ratio", ascending=False)
+    for ticker, row in flagged.iterrows():
+        logger.info(
+            "  zero-volume profile %s: zeros=%d/%d (ratio=%.4f), treated=%d, surviving=%d",
+            ticker,
+            int(row["zeros"]),
+            int(row["rows"]),
+            row["ratio"],
+            int(row["treated"]),
+            int(row["zeros"] - row["treated"]),
+        )
+    return df
 
 
 def _check_survivor_cross_section(df: pd.DataFrame, survivors_only: bool) -> None:
@@ -195,8 +244,8 @@ def prepare_dataframe(df: pd.DataFrame, survivors_only: bool = True) -> pd.DataF
     _check_survivor_cross_section(normalized, survivors_only)
     cleaned = _drop_invalid_ohlc_rows(normalized)
     deduplicated = _sort_and_deduplicate(cleaned)
-    filtered_by_volume = _filter_by_zero_volume_ratio(deduplicated)
-    prepared = _filter_by_min_trading_days(filtered_by_volume)
+    treated = _treat_zero_volume_price_moves(deduplicated)
+    prepared = _filter_by_min_trading_days(treated)
     logger.info(
         "prepare_dataframe: end rows=%d, tickers=%d",
         len(prepared),
