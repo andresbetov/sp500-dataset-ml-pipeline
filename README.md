@@ -78,7 +78,7 @@ Most price-derived features are computed per ticker and shifted one day, so they
 
 One `XGBRegressor` per fold, hyperparameters in `packages/ml/model/training/model_trainer.py`. Keeping one model per fold prevents any fold from being influenced by another fold's evaluation data. Edit hazards in the training path — including a dead early-stopping branch — are listed in AGENTS.md.
 
-The target is modeled as `log(RV)` — the Yang-Zhang variance is closer to log-normal, and QLIKE is the robust loss for it. Exact-zero flat windows are floored at `1e-12` before the log so they stay finite. R²/MAE/RMSE are computed on the log scale, with sklearn's fold-own-mean R² convention. Every fold also fits the canonical HAR-RV benchmark (Corsi 2008, 1/5/22 trailing variance components) on its training rows only and is scored on the same test rows; the comparison lands in `har_benchmark.json`.
+The target is modeled as `log(RV)` — the Yang-Zhang variance is closer to log-normal, and QLIKE is the robust loss for it. Exact-zero flat windows are degenerate labels: they are floored at `1e-12` for the log (so test scoring stays finite), kept in the test sets, and excluded from the fold training sets. R²/MAE/RMSE are computed on the log scale, with sklearn's fold-own-mean R² convention. Every fold also fits the canonical HAR-RV benchmark (Corsi 2008, 1/5/22 trailing variance components) on its training rows only and is scored on the same test rows; the comparison lands in `har_benchmark.json`.
 
 ## Evaluation
 
