@@ -36,11 +36,9 @@ def _save_parquet(df: pd.DataFrame, file_name: str) -> None:
     df.to_parquet(file_path, index=False)
 
 
-def generate_featured_dataset(
-    file_name: str | None = None,
-) -> None:
+def generate_featured_dataset() -> None:
     logger.info("Loading raw dataset...")
-    raw_df = load_dataframe(file_name=file_name)
+    raw_df = load_dataframe()
     logger.info(f"Loaded {len(raw_df):,} rows")
 
     logger.info("Preparing data...")

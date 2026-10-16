@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import functools
 import hashlib
 import json
 import logging
@@ -18,14 +17,8 @@ INGESTION_MANIFEST_PATH = (
 logger = logging.getLogger(__name__)
 
 
-def _pick_csv_file(dataset_path: Path, file_name: str | None) -> Path:
+def _pick_csv_file(dataset_path: Path) -> Path:
     """Resolve the pinned CSV file inside a dataset bundle."""
-    if file_name:
-        csv_path = dataset_path / file_name
-        if not csv_path.exists():
-            raise FileNotFoundError(f"CSV not found: {csv_path}")
-        return csv_path
-
     csv_files = sorted(dataset_path.rglob("*.csv"))
     if not csv_files:
         raise FileNotFoundError(f"No CSV files found in: {dataset_path}")
@@ -70,14 +63,14 @@ def _write_ingestion_manifest(csv_path: Path, df: pd.DataFrame) -> None:
     logger.info("Ingestion manifest written to %s", INGESTION_MANIFEST_PATH)
 
 
-@functools.lru_cache(maxsize=1)
-def load_dataframe(file_name: str | None = None) -> pd.DataFrame:
-    """Load S&P 500 dataset with automatic caching.
-    First call downloads and reads CSV from Kaggle (via kagglehub).
-    Subsequent calls return cached dataframe from memory.
+def load_dataframe() -> pd.DataFrame:
+    """Load the pinned S&P 500 dataset and write its ingestion manifest.
+
+    The Kaggle download is cached on disk by kagglehub; every call re-reads the
+    pinned CSV and returns a fresh frame, so callers never share mutable state.
     """
     dataset_path = Path(kagglehub.dataset_download(DATASET_HANDLE))
-    csv_path = _pick_csv_file(dataset_path, file_name)
+    csv_path = _pick_csv_file(dataset_path)
     df = pd.read_csv(csv_path, keep_default_na=False)
     _write_ingestion_manifest(csv_path, df)
     return df
