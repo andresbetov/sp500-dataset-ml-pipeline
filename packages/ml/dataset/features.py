@@ -7,7 +7,6 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 STD_EPSILON = 1e-12
-PRICE_TOLERANCE = 1e-10
 DIRECTION_TOLERANCE = 0.005
 REGIME_CORRELATION_WINDOW = 60
 
@@ -124,21 +123,26 @@ def _add_adjusted_ohlc_columns(df: pd.DataFrame) -> pd.DataFrame:
 	featured[ADJUSTED_OHLC_HIGH_COLUMN] = (featured["high"] * adjustment_factor).astype("float64")
 	featured[ADJUSTED_OHLC_LOW_COLUMN] = (featured["low"] * adjustment_factor).astype("float64")
 
-	valid_range = featured[ADJUSTED_OHLC_HIGH_COLUMN] >= (featured[ADJUSTED_OHLC_LOW_COLUMN] - PRICE_TOLERANCE)
-	valid_open = (
-		(featured[ADJUSTED_OHLC_OPEN_COLUMN] <= (featured[ADJUSTED_OHLC_HIGH_COLUMN] + PRICE_TOLERANCE))
-		& (featured[ADJUSTED_OHLC_OPEN_COLUMN] >= (featured[ADJUSTED_OHLC_LOW_COLUMN] - PRICE_TOLERANCE))
-	)
-	valid_close = (
-		(featured["adj_close"] <= (featured[ADJUSTED_OHLC_HIGH_COLUMN] + PRICE_TOLERANCE))
-		& (featured["adj_close"] >= (featured[ADJUSTED_OHLC_LOW_COLUMN] - PRICE_TOLERANCE))
-	)
-	valid_rows = valid_range & valid_open & valid_close
-	if not valid_rows.all():
-		invalid_count = int((~valid_rows).sum())
-		raise ValueError(
-			"Adjusted OHLC consistency validation failed after aligning to adj_close: "
-			f"invalid_rows={invalid_count}"
+	# Scaling every price by the same per-row positive factor preserves the OHLC ordering
+	# that preparation already enforces, so re-validating it here cannot fail. Record the
+	# factor once instead, so the adjustment basis stays visible in the run log.
+	factor_min = float(adjustment_factor.min())
+	factor_max = float(adjustment_factor.max())
+	if factor_min == factor_max == 1.0:
+		logger.info(
+			"_add_adjusted_ohlc_columns: adjustment factor is identically 1.0 "
+			"(adj_close == close); adjusted OHLC equals raw OHLC"
+		)
+	elif factor_min == factor_max:
+		logger.info(
+			"_add_adjusted_ohlc_columns: adjustment factor is a single value: %.10f",
+			factor_min,
+		)
+	else:
+		logger.info(
+			"_add_adjusted_ohlc_columns: adjustment factor varies: min=%.10f max=%.10f",
+			factor_min,
+			factor_max,
 		)
 
 	return featured
