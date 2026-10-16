@@ -9,6 +9,7 @@ logger = logging.getLogger(__name__)
 STD_EPSILON = 1e-12
 PRICE_TOLERANCE = 1e-10
 DIRECTION_TOLERANCE = 0.005
+REGIME_CORRELATION_WINDOW = 60
 
 ADJUSTED_OHLC_OPEN_COLUMN = "_adj_open"
 ADJUSTED_OHLC_HIGH_COLUMN = "_adj_high"
@@ -508,6 +509,100 @@ def _add_market_regime_feature(df: pd.DataFrame) -> pd.DataFrame:
 	return df
 
 
+def _geyer_integrated_autocorrelation_time(values: np.ndarray) -> float:
+	"""Integrated autocorrelation time via Geyer's initial positive sequence.
+
+	Trailing windows share most of their observations, so the window-mean series is
+	strongly autocorrelated and the naive standard error (sample standard deviation
+	over sqrt(n)) understates the true one by roughly an order of magnitude; the
+	effective sample size is n / tau.
+	"""
+	n = len(values)
+	if n < 2:
+		return 1.0
+	centered = values - values.mean()
+	denominator = float(np.dot(centered, centered))
+	if denominator == 0.0:
+		return 1.0
+	autocorrelation = np.correlate(centered, centered, mode="full")[n - 1 :] / denominator
+	tau = 1.0
+	lag = 1
+	while lag + 1 < n:
+		pair_sum = autocorrelation[lag] + autocorrelation[lag + 1]
+		if pair_sum <= 0.0:
+			break
+		tau += 2.0 * pair_sum
+		lag += 2
+	return tau
+
+
+def _window_mean_pairwise_correlation(block: np.ndarray) -> float | None:
+	"""Mean pairwise correlation of a window x ticker block, None when not computable.
+
+	A ticker whose returns are missing anywhere in the window sits the window out.
+	"""
+	block = block[:, ~np.isnan(block).any(axis=0)]
+	ticker_count = block.shape[1]
+	if ticker_count < 2:
+		return None
+
+	standard_deviation = block.std(axis=0, ddof=1)
+	if (standard_deviation > 0).all():
+		# With every column standardized over the window, the correlation matrix is
+		# Z'Z / (W - 1); summing its ordered pairs reduces to sum_t (row sum of Z)^2,
+		# and removing the unit diagonal leaves the pairwise mean in closed form.
+		standardised = (block - block.mean(axis=0)) / standard_deviation
+		row_sums = standardised.sum(axis=1)
+		cross_product_sum = float((row_sums**2).sum())
+		return (cross_product_sum / (block.shape[0] - 1) - ticker_count) / (
+			ticker_count * (ticker_count - 1)
+		)
+
+	correlation = np.corrcoef(block, rowvar=False)
+	upper_triangle = correlation[np.triu_indices_from(correlation, k=1)]
+	upper_triangle = upper_triangle[np.isfinite(upper_triangle)]
+	if upper_triangle.size == 0:
+		return None
+	return float(upper_triangle.mean())
+
+
+def _compute_regime_correlation_stats(
+	regime_data: pd.DataFrame,
+	window: int = REGIME_CORRELATION_WINDOW,
+) -> tuple[float, float, float, int]:
+	"""Pooled cross-ticker correlation for one regime.
+
+	The regime is pivoted into a genuine date x ticker matrix; each trailing `window`-day
+	window contributes its mean pairwise cross-ticker correlation; window means are then
+	pooled in Fisher-z space with equal weight per date (mean-of-date-means) and
+	back-transformed. The effective standard error divides by the square root of the
+	Geyer effective sample size instead of the raw window count.
+	"""
+	pivot = regime_data.pivot_table(
+		index="date", columns="ticker", values="simple_return"
+	).sort_index()
+	values = pivot.to_numpy(dtype="float64")
+
+	window_means = []
+	for end in range(window, len(values) + 1):
+		window_mean = _window_mean_pairwise_correlation(values[end - window : end])
+		if window_mean is not None:
+			window_means.append(window_mean)
+
+	if not window_means:
+		return 0.0, 0.0, 0.0, 0
+
+	pair_means = np.asarray(window_means, dtype="float64")
+	fisher_values = np.arctanh(np.clip(pair_means, -1.0 + STD_EPSILON, 1.0 - STD_EPSILON))
+	pooled_mean = float(np.tanh(fisher_values.mean()))
+	if len(fisher_values) < 2:
+		return pooled_mean, 0.0, 0.0, len(pair_means)
+
+	tau = _geyer_integrated_autocorrelation_time(fisher_values)
+	effective_se = float(fisher_values.std(ddof=1) / np.sqrt(len(fisher_values) / tau))
+	return pooled_mean, float(pair_means.std(ddof=1)), effective_se, len(pair_means)
+
+
 def _characterize_regimes(df: pd.DataFrame) -> dict:
 	"""
 	Calculate statistics per market regime (regime "fingerprint").
@@ -529,6 +624,8 @@ def _characterize_regimes(df: pd.DataFrame) -> dict:
 				"volume_std": float,
 				"ticker_correlation_mean": float,
 				"ticker_correlation_std": float,
+				"ticker_correlation_effective_se": float,
+				"ticker_correlation_windows": int,
 				"n_samples": int,
 				"unique_tickers": int,
 				"date_range": str,
@@ -562,19 +659,19 @@ def _characterize_regimes(df: pd.DataFrame) -> dict:
 		volume_values = regime_data['volume']
 
 		# Ticker correlation (per regime)
-		ticker_correlations = []
-		for _, date_group in regime_data.groupby('date'):
-			if len(date_group) > 2:
-				date_returns = date_group[['ticker', 'simple_return']].dropna()
-				if len(date_returns) > 2:
-					try:
-						corr_matrix = date_returns.set_index('ticker')['simple_return'].corr()
-						# Extract upper triangle correlations
-						if len(corr_matrix) > 1:
-							correlations = corr_matrix.values[np.triu_indices_from(corr_matrix.values, k=1)]
-							ticker_correlations.extend(correlations)
-					except Exception:
-						pass
+		(
+			correlation_mean,
+			correlation_std,
+			correlation_effective_se,
+			correlation_windows,
+		) = _compute_regime_correlation_stats(regime_data)
+		if correlation_windows == 0:
+			logger.warning(
+				"Regime %s: no %d-day windows with comparable tickers; "
+				"correlations reported as 0.0",
+				regime_names[regime_id],
+				REGIME_CORRELATION_WINDOW,
+			)
 
 		stats[regime_names[regime_id]] = {
 			# Volatility characteristics
@@ -595,8 +692,10 @@ def _characterize_regimes(df: pd.DataFrame) -> dict:
 			'volume_std': float(volume_values.std()),
 
 			# Correlation characteristics
-			'ticker_correlation_mean': float(np.mean(ticker_correlations)) if ticker_correlations else 0.0,
-			'ticker_correlation_std': float(np.std(ticker_correlations)) if ticker_correlations else 0.0,
+			'ticker_correlation_mean': correlation_mean,
+			'ticker_correlation_std': correlation_std,
+			'ticker_correlation_effective_se': correlation_effective_se,
+			'ticker_correlation_windows': correlation_windows,
 
 			# Sample count
 			'n_samples': len(regime_data),
