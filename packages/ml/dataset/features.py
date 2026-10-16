@@ -820,10 +820,15 @@ def _add_market_regime_feature(df: pd.DataFrame) -> pd.DataFrame:
 	- 1: 2008-2010 (financial crisis)
 	- 2: 2011-2019 (post-crisis recovery)
 	- 3: 2020-2021 (COVID)
-	- 4: 2022-2026 (post-COVID inflation)
+	- 4: 2022 (post-COVID inflation)
+	- 5: 2023-2025 (post-COVID recovery)
+	- 6: 2026 (terminal year)
+
+	A year past the last bucket raises instead of silently joining it, so data
+	from a later source period cannot be mislabelled.
 
 	Returns:
-		DataFrame with new 'market_regime' column (int8: 0-4)
+		DataFrame with new 'market_regime' column (int8: 0-6)
 	"""
 	def get_regime(date: pd.Timestamp) -> int:
 		year = date.year
@@ -835,8 +840,16 @@ def _add_market_regime_feature(df: pd.DataFrame) -> pd.DataFrame:
 			return 2
 		elif year <= 2021:
 			return 3
-		else:
+		elif year == 2022:
 			return 4
+		elif year <= 2025:
+			return 5
+		elif year == 2026:
+			return 6
+		raise ValueError(
+			f"No market regime bucket covers year {year}; extend the calendar "
+			"buckets before ingesting later data"
+		)
 
 	df['market_regime'] = df['date'].apply(get_regime).astype('int8')
 	return df
@@ -972,12 +985,14 @@ def _characterize_regimes(df: pd.DataFrame) -> dict:
 		1: "financial-crisis (2008-2010)",
 		2: "post-crisis (2011-2019)",
 		3: "covid (2020-2021)",
-		4: "post-covid (2022-2026)"
+		4: "post-covid (2022)",
+		5: "post-covid (2023-2025)",
+		6: "post-covid (2026)",
 	}
 
 	stats = {}
 
-	for regime_id in range(5):
+	for regime_id in range(7):
 		regime_data = df[df['market_regime'] == regime_id]
 
 		if len(regime_data) == 0:
