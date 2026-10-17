@@ -63,15 +63,17 @@ def _validate_training_prerequisites(y: np.ndarray, folds_metadata: dict) -> Non
 
 
 def _model_training_indices(fold_data: dict, y: np.ndarray) -> np.ndarray:
-	"""Training row indices for one fold, with degenerate zero-target rows removed.
+	"""Training row indices for one fold, with degenerate at-or-below-floor rows removed.
 
 	The exact-zero Yang-Zhang windows are flat-price artifacts: their log target is
 	undefined (floored for finiteness). A log-MSE model that fits their extreme
 	labels under-forecasts similar test rows by ~20 log-units, where QLIKE's
-	exponential term explodes. Test sets keep every row.
+	exponential term explodes. The filter uses the same floor as the target
+	transform, so a positive target at floor level cannot enter training as a
+	floored degenerate label. Test sets keep every row.
 	"""
 	train_indices = np.array(fold_data["train_indices"])
-	return train_indices[y[train_indices] > 0.0]
+	return train_indices[y[train_indices] > RV_FLOOR]
 
 
 def _train_fold_model(
@@ -232,6 +234,7 @@ def _save_training_results(
 		"benchmark": "HAR-RV (Corsi 2008): canonical 1/5/22 trailing variance components, OLS in variance levels",
 		"target": "log(realized_volatility_5d)",
 		"r2_convention": "log-target scale, fold-own-mean (sklearn r2_score)",
+		"qlike": "h/f - ln(h/f) - 1 with h=exp(actual), f=exp(forecast); target in native per-day sigma units",
 		"folds": {
 			fold_key: {
 				**result,
@@ -276,12 +279,12 @@ def phase_4_training() -> tuple[dict, dict, list]:
 	_validate_training_prerequisites(y, folds_metadata)
 
 	# Model the log of the target; the floor only touches the exact-zero Yang-Zhang
-	# windows (flat 5-day prices), which would otherwise make log(0) undefined. Those
-	# degenerate rows are excluded from the fold training sets (see
+	# windows (flat 5-day prices), which would otherwise make log(0) undefined. Rows at
+	# or below the floor are excluded from the fold training sets (see
 	# _model_training_indices) but stay in the test sets.
 	y_log = np.log(np.maximum(y, RV_FLOOR))
 	logger.info(
-		f"Log target: log(RV) with floor {RV_FLOOR:g}; exact-zero rows = {int(np.count_nonzero(y < RV_FLOOR)):,} "
+		f"Log target: log(RV) with floor {RV_FLOOR:g}; rows at or below the floor = {int(np.count_nonzero(y <= RV_FLOOR)):,} "
 		f"(excluded from training, kept in test sets)"
 	)
 
@@ -296,14 +299,14 @@ def phase_4_training() -> tuple[dict, dict, list]:
 		fold_key = f"fold_{fold_idx}"
 		fold_data = folds_metadata[fold_key]
 
-		# Extract fold-specific data; degenerate zero-target rows are dropped from the
-		# training side only (the HAR benchmark shares the same rows).
+		# Extract fold-specific data; degenerate at-or-below-floor rows are dropped
+		# from the training side only (the HAR benchmark shares the same rows).
 		train_indices = _model_training_indices(fold_data, y)
 		test_indices = np.array(fold_data["test_indices"])
 
 		logger.info(
 			f"  Fold {fold_idx}: excluded {int(fold_data['n_train']) - len(train_indices):,} "
-			f"degenerate zero-target rows from training"
+			f"degenerate at-or-below-floor rows from training"
 		)
 
 		X_train = X[train_indices]
