@@ -117,7 +117,7 @@ For the numbers, read `packages/ml/model/artifacts/results/fold_training_summary
 
 ## Contributing
 
-Read [AGENTS.md](AGENTS.md) before editing. It covers the two entry points and their order, the invariants that silently break saved artifacts, and known dead code. Run the phase covering your change — Phase 1 for `packages/ml/dataset`, Phases 2-5 otherwise — and confirm it completes.
+Read [AGENTS.md](AGENTS.md) before editing. It covers the two entry points and their order, the invariants that silently break saved artifacts, and known dead code. Run the phase covering your change — Phase 1 for `packages/ml/dataset`, Phases 2-5 otherwise — and confirm it completes. Repo-wide rationale lives in [docs/adr/](docs/adr/); check whether your change needs a new record before editing an accepted one.
 
 ## License
 

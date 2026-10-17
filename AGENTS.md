@@ -71,3 +71,4 @@ Cap long-running or chatty commands: `python packages/ml/model/main.py 2>&1 | ta
 - `packages/ml/model/cross_validation/cross_validator.py` — fold construction and the leakage guard.
 - `packages/ml/model/training/model_trainer.py` — XGBoost hyperparameters.
 - `packages/ml/model/utils.py` — `get_project_paths`, the central path helper (`project_root`, `model_dir`, `artifacts_dir`, `dataset_path`, `outputs_dir`).
+- [`docs/adr/`](docs/adr/) — architecture decision records own the rationale behind these rules; supersede, don't rewrite.
