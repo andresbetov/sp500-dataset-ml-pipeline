@@ -53,6 +53,18 @@ Both scripts accept no arguments and read no environment variables, and both wor
 
 Phase 2 fails immediately if Phase 1 has not been run first. Because generated data is gitignored, a fresh clone always starts with Phase 1.
 
+Phase 1 feature code lives in `packages/ml/dataset/features/` (one family per module, assembled by `assembly.py`):
+
+- `features/__init__.py` — re-exports `build_features_dataframe`
+- `features/_common.py` — shared z-score guard and adjusted-OHLC column names
+- `features/prices.py` — base returns, adjusted OHLC, return lags, price/SMA normalization, rolling means and extremes
+- `features/volume.py` — volume lags, transforms, and z-score
+- `features/trend.py` — EMA trend and RSI/MACD momentum
+- `features/volatility.py` — range-based and trailing volatility
+- `features/target.py` — Yang-Zhang 5-day realized-volatility target
+- `features/regimes.py` — hardcoded calendar `market_regime` label
+- `features/assembly.py` — validation, history enforcement, and `build_features_dataframe`
+
 ### Outputs
 
 | Path | Phase | Contents |
@@ -105,7 +117,7 @@ For the numbers, read `packages/ml/model/artifacts/results/fold_training_summary
 
 ## Contributing
 
-Read [AGENTS.md](AGENTS.md) before editing. It covers the two entry points and their order, the invariants that silently break saved artifacts, and known dead code. Run the phase covering your change — Phase 1 for `packages/ml/dataset`, Phases 2-5 otherwise — and confirm it completes.
+Read [AGENTS.md](AGENTS.md) before editing. It covers the two entry points and their order, the invariants that silently break saved artifacts, and known dead code. Run the phase covering your change — Phase 1 for `packages/ml/dataset`, Phases 2-5 otherwise — and confirm it completes. Repo-wide rationale lives in [docs/adr/](docs/adr/); check whether your change needs a new record before editing an accepted one.
 
 ## License
 

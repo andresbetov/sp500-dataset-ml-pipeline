@@ -1,3 +1,5 @@
+"""Stage 1 — ingestion: load the pinned Kaggle CSV and write its manifest."""
+
 from __future__ import annotations
 
 import hashlib
@@ -8,11 +10,10 @@ from pathlib import Path
 import kagglehub
 import pandas as pd
 
+from .utils import INGESTION_MANIFEST_PATH
+
 DATASET_HANDLE = "jacksaleeby/s-and-p500-historical-data/versions/1"
 DATASET_CSV_NAME = "SP500_Historical_Data.csv"
-INGESTION_MANIFEST_PATH = (
-    Path(__file__).resolve().parents[3] / "data" / "processed" / "ingestion_manifest.json"
-)
 
 logger = logging.getLogger(__name__)
 
