@@ -1,3 +1,5 @@
+"""Stage 2 — cleaning: validate, repair, and filter the raw panel."""
+
 from __future__ import annotations
 
 import logging
