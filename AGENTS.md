@@ -49,7 +49,7 @@ Both take no arguments and read no environment variables. They are cwd-independe
 ## Conventions
 
 - Use the `logging` module (`logger = logging.getLogger(__name__)`), not `print`. The handler format is identical in `dataset/utils.py` and `model/utils.py`.
-- Match each file's local indentation. These files are tab-indented: `dataset/features/*.py`, `dataset/regime_characterization.py`, `model/features/feature_engineering.py`, `model/training/model_trainer.py`, `model/training/training.py`. In `feature_engineering.py` only the `INDICATORS` list uses tabs — its function bodies use 4 spaces. Everything else uses 4 spaces.
+- Match each file's local indentation. These files are tab-indented: `model/features/feature_engineering.py`, `model/training/model_trainer.py`, `model/training/training.py`. In `feature_engineering.py` only the `INDICATORS` list uses tabs — its function bodies use 4 spaces. Everything else uses 4 spaces.
 - There are no classes; use module-level functions with type hints. `from __future__ import annotations` leads every module; of the seven `__init__.py` files only `model/visualization/__init__.py` carries it.
 - Errors fail fast: `raise ValueError` / `FileNotFoundError` with a message. Log-and-re-raise appears in `model/main.py` and in `training/_train_fold_model`; one block swallows instead — `training.py`'s metric computation, which writes NaN metrics.
 
