@@ -13,8 +13,9 @@ if __name__ == "__main__" and __package__ is None:
 
 from .artifacts import write_dataset_parquet, write_regime_characterization
 from .cleaning import prepare_dataframe
-from .features import build_features_dataframe, _characterize_regimes
+from .features import build_features_dataframe
 from .ingestion import load_dataframe
+from .regime_characterization import characterize_regimes
 from .utils import DATASET_PATH, REGIME_CHARACTERIZATION_PATH, setup_logging
 from .validation import check_contiguous_ticker_frames, check_panel_staleness
 
@@ -36,7 +37,7 @@ def generate_featured_dataset() -> None:
 
     # Characterize regimes before dropping NaN
     logger.info("Characterizing regimes...")
-    regime_stats = _characterize_regimes(featured_df)
+    regime_stats = characterize_regimes(featured_df)
 
     logger.info("Dropping NaN rows...")
     pre_dropna_rows = len(featured_df)
