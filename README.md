@@ -53,6 +53,18 @@ Both scripts accept no arguments and read no environment variables, and both wor
 
 Phase 2 fails immediately if Phase 1 has not been run first. Because generated data is gitignored, a fresh clone always starts with Phase 1.
 
+Phase 1 feature code lives in `packages/ml/dataset/features/` (one family per module, assembled by `assembly.py`):
+
+- `features/__init__.py` — re-exports `build_features_dataframe`
+- `features/_common.py` — shared z-score guard and adjusted-OHLC column names
+- `features/prices.py` — base returns, adjusted OHLC, return lags, price/SMA normalization, rolling means and extremes
+- `features/volume.py` — volume lags, transforms, and z-score
+- `features/trend.py` — EMA trend and RSI/MACD momentum
+- `features/volatility.py` — range-based and trailing volatility
+- `features/target.py` — Yang-Zhang 5-day realized-volatility target
+- `features/regimes.py` — hardcoded calendar `market_regime` label
+- `features/assembly.py` — validation, history enforcement, and `build_features_dataframe`
+
 ### Outputs
 
 | Path | Phase | Contents |
