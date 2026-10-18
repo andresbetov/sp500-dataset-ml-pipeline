@@ -45,12 +45,10 @@ POLICY_FLOORED_TRAIN_SIZE = 4
 # row in fold 0's test block so the retained side is exercised too.
 TEST_FLOOR_ROWS = (12, 25, 38, 42, 57)
 TEST_SMALLEST_POSITIVE_ROW = 13
-LIVE_FOLD_0_KEPT_ROWS = 366_518
-# The fold-0 floor-retained model-vs-HAR QLIKE edge recomputed from the stored
-# artifact and the live regressors. The stored coefficients predate the
-# same-estimator HAR rebuild, so the recomputed value is provisional: the next
-# full pipeline run refits them and re-measures this reference.
-LIVE_FOLD_0_FLOOR_RETAINED_EDGE = 0.08054
+LIVE_FOLD_0_KEPT_ROWS = 337_067
+# The fold-0 floor-retained model-vs-HAR QLIKE edge recomputed from the
+# regenerated stored predictions and HAR coefficients.
+LIVE_FOLD_0_FLOOR_RETAINED_EDGE = 0.068318
 
 
 def _synthetic_har_regressors(dates: np.ndarray, tickers: np.ndarray) -> tuple:
@@ -458,8 +456,21 @@ def test_live_floor_retained_edge_reference() -> None:
     metadata = joblib.load(metadata_path)
     prediction = joblib.load(predictions_path)["fold_0"]
     test_indices = np.asarray(folds_metadata["fold_0"]["test_indices"])
-    mask = np.asarray(y[test_indices]) > training.RV_FLOOR
-    assert mask.any() and not mask.all()
+    retained_mask = np.asarray(y[test_indices]) > training.RV_FLOOR
+    assert retained_mask.any() and not retained_mask.all()
+
+    # Predictions store the floor-retained arrays: the stored scored indices,
+    # targets, and forecasts all align with the retained side of the fold-0
+    # test block.
+    scored_indices = test_indices[retained_mask]
+    assert np.array_equal(prediction["test_indices_scored"], scored_indices)
+    assert len(prediction["test_true"]) == len(prediction["test_pred"]) == len(
+        scored_indices
+    )
+    assert np.array_equal(
+        prediction["test_true"],
+        np.log(np.maximum(y[scored_indices], training.RV_FLOOR)),
+    )
 
     coefficients = np.asarray(
         json.loads(har_report_path.read_text())["folds"]["fold_0"]["coefficients"]
@@ -473,9 +484,10 @@ def test_live_floor_retained_edge_reference() -> None:
     )
     har_forecast_log = 0.5 * np.log(forecast_variance)
 
-    retained_true = prediction["test_true"][mask]
-    model_qlike = training.qlike_loss(retained_true, prediction["test_pred"][mask])
-    har_qlike = training.qlike_loss(retained_true, har_forecast_log[mask])
+    model_qlike = training.qlike_loss(prediction["test_true"], prediction["test_pred"])
+    har_qlike = training.qlike_loss(
+        prediction["test_true"], har_forecast_log[retained_mask]
+    )
     edge = abs(model_qlike - har_qlike)
 
     assert edge == pytest.approx(

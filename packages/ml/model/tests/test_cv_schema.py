@@ -6,10 +6,9 @@ Phase 3 persists a schema-versioned superset: the schema version, the pinned
 feature names, the reserved final-500-date holdout window, the remainder date
 count, and the five fold records with typed gap keys. The synthetic checks
 build a temporary dataset and artifact tree, so they neither read nor write the
-live generated data; the non-regression check compares the extraction X/Y
-against the live branch-point artifacts behind the existing skip guard and
-tolerates the older unversioned fold snapshot, which is interim until the later
-integration re-run.
+live generated data; the non-regression check compares the extraction X/Y and
+the freshly computed fold payload against the regenerated stored artifacts
+behind the existing skip guard.
 
 Run with pytest from the repository root:
 
@@ -285,7 +284,7 @@ def test_indicator_contract_count_unchanged() -> None:
     assert len(feature_engineering.INDICATORS) == 37
 
 
-def test_live_extraction_and_fold_contract_match_branch_point_artifacts() -> None:
+def test_live_extraction_and_fold_contract_match_stored_artifacts() -> None:
     requires_live_artifacts(ARTIFACTS_DIR)
     if not DATASET_PATH.is_file():
         pytest.skip(
@@ -302,7 +301,7 @@ def test_live_extraction_and_fold_contract_match_branch_point_artifacts() -> Non
         assert array.shape == snapshot.shape
         assert array.dtype == snapshot.dtype
         assert _array_digest(array) == _array_digest(snapshot), (
-            f"{name} drifted from the branch-point snapshot"
+            f"{name} drifted from the stored input snapshot"
         )
 
     live_metadata = joblib.load(ARTIFACTS_DIR / "inputs" / "metadata.pkl")
@@ -357,16 +356,24 @@ def test_live_extraction_and_fold_contract_match_branch_point_artifacts() -> Non
             ]
             assert (fold_dates_seen < holdout_dates[0]).all(), fold_key
 
-    # The branch-point snapshot predates the versioned holdout schema and is
-    # interim until the later integration re-run: iterate only its fold_* keys,
-    # never every top-level key, so the schema metadata can never be mistaken
-    # for a fold.
-    stored_fold_keys = {key for key in live_folds if key.startswith("fold_")}
-    assert stored_fold_keys == fold_keys
+    # The regenerated stored payload matches the freshly computed one field for
+    # field, including both membership sides.
+    assert set(live_folds) == set(fresh_payload) == fold_keys | {
+        "schema_version",
+        "feature_names",
+        "holdout",
+        "n_dates",
+    }
+    for key in ("schema_version", "feature_names", "holdout", "n_dates"):
+        assert live_folds[key] == fresh_payload[key], key
     for fold_key in fold_keys:
-        assert {"train_indices", "test_indices", "n_train", "n_test"} <= set(
-            live_folds[fold_key]
-        ), fold_key
+        stored_record = live_folds[fold_key]
+        assert set(stored_record) == FOLD_RECORD_KEYS, fold_key
+        for field in FOLD_RECORD_KEYS:
+            assert stored_record[field] == fresh_payload[fold_key][field], (
+                fold_key,
+                field,
+            )
 
 
 if __name__ == "__main__":
