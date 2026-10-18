@@ -1,4 +1,4 @@
-"""Canonical HAR-RV benchmark (Corsi 2008) for the 5-day-ahead volatility target.
+"""Canonical HAR-RV benchmark (Corsi (2009)) for the 5-day-ahead volatility target.
 
 The benchmark uses canonical 1/5/22 trailing variance components built with the
 same Yang-Zhang estimator family as the target: every component is a trailing
@@ -99,8 +99,10 @@ HAR_WINDOWS = (1, 5, 22)
 HAR_WARMUP_DAYS = 21
 
 # Declared scales for the written report. The fit optimizes variance-level
-# squared error (Corsi's objective); the reported R² is on the log target and
-# QLIKE is in per-day sigma units, which is the headline comparison.
+# squared error as a variance-level variant of Corsi (2009) Eq. (8), which is
+# specified in realized-volatility levels (variance and log are the variants he
+# mentions); the reported R² is on the log target and QLIKE is in per-day sigma
+# units, which is the headline comparison.
 FIT_SCALE = "variance"
 REPORT_SCALE = "log-variance for R²; sigma for QLIKE"
 COMPARISON_NOTE = (
@@ -374,8 +376,10 @@ def fit_har_benchmark(
     warm-up rows keep their unchanged trailing-only components, so they are scored
     like every other test row; ``n_warmup_test_rows`` records how many were scored
     so the unchanged scoring set stays auditable. The fit optimizes variance-level
-    squared error — Corsi's objective — so the log-scale R² below is a comparability
-    metric, not the fit target; QLIKE is the headline model-vs-benchmark comparison.
+    squared error — a variance-level variant of Corsi (2009) Eq. (8), which is
+    specified in realized-volatility levels (variance and log are the variants he
+    mentions) — so the log-scale R² below is a comparability metric, not the fit
+    target; QLIKE is the headline model-vs-benchmark comparison.
     The result declares that split through ``fit_scale`` (``"variance"``),
     ``report_scale`` (``"log-variance for R²; sigma for QLIKE"``), and the comparator
     note. Coefficient standard errors are not part of the canonical fit: with
