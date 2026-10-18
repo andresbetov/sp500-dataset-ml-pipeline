@@ -5,6 +5,10 @@ import logging
 import numpy as np
 import xgboost as xgb
 from packages.ml.model.config import get_config
+from packages.ml.model.training.qlike_objective import (
+	qlike_eval_metric,
+	qlike_objective,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -27,14 +31,14 @@ def train_xgboost_model(
 	y_val: np.ndarray | None = None,
 ) -> tuple[xgb.XGBRegressor, dict]:
 	"""
-	Train XGBoost regression model for volatility prediction.
+	Train XGBoost regression model for daily log-sigma volatility prediction.
 
-	Target: realized_volatility_5d (continuous volatility values)
-	Objective: Minimize prediction error for future volatility
+	Target: log daily sigma (realized volatility floored before the log)
+	Objective: Minimize QLIKE on the log targets, matching the reported loss
 
 	Args:
 		X_train: Training features (n_samples, n_features)
-		y_train: Training target (n_samples,) with continuous volatility values
+		y_train: Training target (n_samples,) in log daily sigma units
 		X_val: Optional validation features for early stopping
 		y_val: Optional validation target for early stopping
 
@@ -43,7 +47,7 @@ def train_xgboost_model(
 		Empty dict (for API compatibility with classification)
 	"""
 	logger.info(f"Training XGBoost Regressor on {X_train.shape[0]:,} samples, {X_train.shape[1]} features")
-	logger.info(f"Target volatility range: [{y_train.min():.6f}, {y_train.max():.6f}], mean: {y_train.mean():.6f}")
+	logger.info(f"Target log-sigma range: [{y_train.min():.6f}, {y_train.max():.6f}], mean: {y_train.mean():.6f}")
 
 	# No label mapping needed for regression
 	y_train_reg = y_train.astype(np.float64)
@@ -51,12 +55,12 @@ def train_xgboost_model(
 
 	# XGBoost regression configuration
 	model = xgb.XGBRegressor(
-		objective="reg:squarederror",
+		objective=qlike_objective,
 		random_state=RANDOM_STATE,
 		verbosity=0,
 		n_jobs=N_JOBS,
 		tree_method="hist",
-		eval_metric="rmse",
+		eval_metric=qlike_eval_metric,
 		# Tree structure
 		max_depth=6,
 		min_child_weight=1.0,
@@ -73,7 +77,8 @@ def train_xgboost_model(
 		colsample_bylevel=0.8,
 	)
 
-	logger.info("Training with regression hyperparameters:")
+	logger.info("Training with the QLIKE objective and regression hyperparameters:")
+	logger.info("  - objective: custom QLIKE gradient/Hessian, eval_metric: qlike")
 	logger.info("  - max_depth: 6")
 	logger.info("  - min_child_weight: 1.0")
 	logger.info("  - gamma: 0.0")

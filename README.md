@@ -113,7 +113,7 @@ For the numbers, read `packages/ml/model/artifacts/results/fold_training_summary
 - **Price and volume only.** No macro data, fundamentals, sentiment, or cross-ticker features.
 - **No sector information.** The source data carries no sector labels, so sector dynamics cannot be learned.
 - **`market_regime` is a hardcoded calendar label**, not something derived from the data. Seven calendar buckets span 2000-2007 through 2026; a date past 2026 raises instead of joining the last bucket.
-- **Squared-error training predicts conditional means.** Predictions are compressed toward the centre of the historical range by construction; tail-risk use requires post-hoc calibration.
+- **QLIKE training targets conditional sigma.** The fold models minimize QLIKE on log daily sigma, the same loss reported in evaluation; the log-scale R²/MAE/RMSE remain diagnostic, and tail-risk use still requires out-of-sample evaluation.
 - **Model tests, no lint suite.** `packages/ml/model/tests/` runs under pytest; other changes are verified by running the affected phase and reading the logs.
 - **A fresh clone needs Phase 1 first.** Nothing downstream can run without the generated parquet file.
 
