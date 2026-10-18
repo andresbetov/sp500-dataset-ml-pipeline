@@ -1,7 +1,22 @@
+"""Phase 4 fold training: one QLIKE-trained XGBoost model per fold.
+
+Each fold writes its model to the run-scoped checkpoint
+``checkpoints/<run_id>/fold_<i>.pkl`` (the training artifact, loaded with
+``joblib``) and its full ``get_params()`` set to the sibling
+``fold_<i>_params.json`` sidecar (callables by qualified name, tool versions,
+best-effort git sha; strict JSON, written atomically). XGBoost's native
+``json``/``ubj`` model formats are prediction-only: a native round trip keeps
+the trees but loses every training parameter (configured knobs come back
+``None``/defaults and the QLIKE objective is not even declared), so the
+training recipe is recovered from the pickle or from this sidecar, never from
+a native reload.
+"""
+
 from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import time
 from pathlib import Path
@@ -26,7 +41,9 @@ from packages.ml.model.training.har_benchmark import (
 from packages.ml.model.training.model_trainer import train_xgboost_model
 from packages.ml.model.training.qlike_objective import qlike_mean
 from packages.ml.model.run_log import (
+	environment_versions,
 	finish_run,
+	git_sha,
 	new_run,
 	record_artifacts,
 	record_fold,
@@ -222,6 +239,79 @@ def fold_checkpoint_path(fold_idx: int, run_id: str) -> Path:
 	return ARTIFACTS_DIR / "checkpoints" / run_id / f"fold_{fold_idx}.pkl"
 
 
+def fold_params_path(fold_idx: int, run_id: str) -> Path:
+	"""Run-scoped parameter sidecar: ``checkpoints/<run_id>/fold_<i>_params.json``.
+
+	The sidecar sits beside the fold's checkpoint and holds its full
+	``get_params()`` set, the tool versions, and the best-effort git sha, so the
+	training recipe stays recoverable without loading the pickle.
+	"""
+	return ARTIFACTS_DIR / "checkpoints" / run_id / f"fold_{fold_idx}_params.json"
+
+
+# Version keys recorded in every fold's params sidecar: the interpreter plus
+# the model stack whose behavior the recorded hyperparameters describe.
+SIDECAR_VERSION_KEYS = ("python", "xgboost", "numpy", "pandas", "scikit-learn")
+
+
+def _sidecar_value(value: object) -> object:
+	"""Project one ``get_params()`` value onto strict-JSON data.
+
+	Callables (the QLIKE objective and eval metric) become their qualified
+	name; a non-finite float (xgboost's default ``missing=nan``) becomes
+	``null``, the only strict-JSON spelling available. Every other value the
+	estimator reports is already JSON-native.
+	"""
+	if callable(value):
+		return f"{value.__module__}.{value.__qualname__}"
+	if isinstance(value, float) and not math.isfinite(value):
+		return None
+	return value
+
+
+def _fold_params_payload(model: object) -> dict:
+	"""The sidecar document: full params, tool versions, best-effort git sha."""
+	versions = environment_versions()
+	return {
+		"params": {
+			key: _sidecar_value(value)
+			for key, value in model.get_params().items()
+		},
+		"environment": {key: versions.get(key) for key in SIDECAR_VERSION_KEYS},
+		"git_sha": git_sha(),
+	}
+
+
+def write_fold_params_atomically(model: object, params_path: Path) -> None:
+	"""Write the fold model's parameter sidecar via a sibling ``*.tmp`` + rename.
+
+	The document is the model's full ``get_params()`` (callables by qualified
+	name, non-finite floats as ``null``, so the file is strict JSON with
+	``allow_nan=False``), plus the tool versions and the git sha. Like the
+	checkpoint, the file appears only through the atomic rename: a failure
+	anywhere — including in the rename itself — removes the temporary file, so
+	no ``*.tmp`` residue is left behind and a previous sidecar stays intact.
+	The pkl remains the training artifact; this sidecar is the parameter
+	record, not a loadable model.
+	"""
+	params_path.parent.mkdir(parents=True, exist_ok=True)
+	tmp_path = params_path.with_name(params_path.name + ".tmp")
+	try:
+		with open(tmp_path, "w", encoding="utf-8") as handle:
+			json.dump(
+				_fold_params_payload(model),
+				handle,
+				indent=2,
+				sort_keys=True,
+				allow_nan=False,
+			)
+			handle.write("\n")
+		os.replace(tmp_path, params_path)
+	finally:
+		if tmp_path.exists():
+			tmp_path.unlink()
+
+
 def write_checkpoint_atomically(model: object, model_path: Path) -> None:
 	"""Write the fold model via a sibling ``*.tmp`` file + ``os.replace``.
 
@@ -316,6 +406,13 @@ def _train_fold_model(
 	if not model_path.exists():
 		raise RuntimeError(f"Failed to save fold {fold_idx} model to {model_path}")
 	logger.info(f"  Saved fold {fold_idx} model to {model_path}")
+
+	# Save the full parameter set beside the checkpoint: the pkl is the training
+	# artifact, while xgboost's native json/ubj formats are prediction-only and
+	# do not round-trip get_params().
+	params_path = fold_params_path(fold_idx, run_id)
+	write_fold_params_atomically(model, params_path)
+	logger.info(f"  Saved fold {fold_idx} parameters to {params_path}")
 
 	predictions_dict = {
 		"test_pred": y_pred,
@@ -715,6 +812,7 @@ def phase_4_training(
 	record_artifacts(
 		run,
 		[fold_checkpoint_path(fold_idx, run_id) for fold_idx in range(5)]
+		+ [fold_params_path(fold_idx, run_id) for fold_idx in range(5)]
 		+ [
 			ARTIFACTS_DIR / "results" / "validation_predictions.pkl",
 			ARTIFACTS_DIR / "results" / "fold_training_summary.json",

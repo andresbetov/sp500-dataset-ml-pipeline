@@ -108,6 +108,9 @@ def _write_dataset(
 class _ConstantModel:
     """Picklable stand-in fold model that predicts a constant log target."""
 
+    def get_params(self) -> dict:
+        return {"n_estimators": 1, "missing": float("nan")}
+
     def predict(self, X: np.ndarray) -> np.ndarray:
         return np.full(len(X), -2.5, dtype=np.float64)
 

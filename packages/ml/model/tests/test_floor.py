@@ -170,6 +170,9 @@ class _RecordingModel:
     def __init__(self, scored_rows: list) -> None:
         self._scored_rows = scored_rows
 
+    def get_params(self) -> dict:
+        return {"n_estimators": 1, "missing": float("nan")}
+
     def predict(self, X: np.ndarray) -> np.ndarray:
         self._scored_rows.append(np.asarray(X)[:, 0].astype(np.int64))
         return np.full(len(X), -2.5, dtype=np.float64)

@@ -1,15 +1,19 @@
-"""Tests for run-scoped, atomically written checkpoints and their readers.
+"""Tests for run-scoped checkpoints, params sidecars, atomic writes, and readers.
 
 Every exercised run drives the real ``phase_4_training`` against a temporary
 artifact root with a stub trainer and constant HAR regressors, so no live
 pipeline runs and no live ``artifacts/**`` or ``data/model_outputs/**`` file is
 touched. The checks pin the naming contract (``checkpoints/<run_id>/fold_<i>.pkl``
-recorded in the fold summary, the predictions, and the run manifest), the
-atomic tmp + rename write (an injected failure leaves no final file and no
-``*.tmp`` residue, and a previous checkpoint survives), the reader's resolution
-through the recorded artifact index (fold summary, then run manifest; a named
-error instead of a guessed filename when neither names the checkpoint), and the
-unchanged pickle payload surface.
+plus the ``fold_<i>_params.json`` sidecar, both recorded in the run manifest),
+the atomic tmp + rename write for both files (an injected failure leaves no
+final file and no ``*.tmp`` residue, and a previous file survives), the
+sidecar's strict-JSON round trip of the full ``get_params()`` (callables by
+qualified name, non-finite floats as ``null``, tool versions, git sha), the
+native ``json``/``ubj`` round trip that loses every training parameter (the
+reason the sidecar exists), the reader's resolution through the recorded
+artifact index (fold summary, then run manifest; a named error instead of a
+guessed filename when neither names the checkpoint), and the unchanged pickle
+payload surface.
 
 Run with pytest from the repository root:
 
@@ -25,7 +29,9 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import math
 import os
+import re
 import tempfile
 import traceback
 from pathlib import Path
@@ -39,6 +45,10 @@ from conftest import REPO_ROOT
 from packages.ml.model.cross_validation import cv_utils
 from packages.ml.model.features.feature_engineering import INDICATORS
 from packages.ml.model.training import training
+from packages.ml.model.training.qlike_objective import (
+    qlike_eval_metric,
+    qlike_objective,
+)
 from packages.ml.model.visualization import training_diagnostics
 
 N_ROWS = 60
@@ -47,9 +57,25 @@ N_INDICATORS = 3
 N_TICKER_FEATURES = 1
 TEST_RUN_ID = "20260101T000000Z-deadbeef"
 
+MODEL_ROOT = REPO_ROOT / "packages" / "ml" / "model"
+TESTS_DIR = MODEL_ROOT / "tests"
+
+# The version keys every params sidecar must carry: the interpreter plus the
+# model stack whose behavior the recorded hyperparameters describe.
+SIDECAR_VERSION_KEYS = ("python", "xgboost", "numpy", "pandas", "scikit-learn")
+NATIVE_MODEL_CALL_RE = re.compile(r"\.\s*(save_model|load_model)\s*\(")
+
 
 class _StubModel:
-    """Picklable stand-in fold model with the surface the importance plot reads."""
+    """Picklable stand-in fold model with the surface the training path reads."""
+
+    def get_params(self) -> dict:
+        return {
+            "objective": qlike_objective,
+            "eval_metric": qlike_eval_metric,
+            "n_estimators": 5,
+            "missing": float("nan"),
+        }
 
     def predict(self, X: np.ndarray) -> np.ndarray:
         return np.zeros(len(X), dtype=np.float64)
@@ -72,6 +98,24 @@ class _WarningRecorder(logging.Handler):
 
 def _stub_trainer(X_train, y_train, X_val=None, y_val=None):
     return _StubModel(), {}
+
+
+def _tiny_xgb_trainer(X_train, y_train, X_val=None, y_val=None):
+    """Trainer double: a real tiny XGBRegressor with the QLIKE objective/metric."""
+    from xgboost import XGBRegressor
+
+    model = XGBRegressor(
+        objective=qlike_objective,
+        eval_metric=qlike_eval_metric,
+        n_estimators=5,
+        max_depth=3,
+        learning_rate=0.1,
+        random_state=7,
+        verbosity=0,
+        tree_method="hist",
+    )
+    model.fit(X_train, y_train, verbose=False)
+    return model, {}
 
 
 def _stub_har_regressors(dates: np.ndarray, tickers: np.ndarray) -> tuple:
@@ -163,6 +207,26 @@ def _fold_inputs() -> tuple:
         "test_date_max": "2000-02-11",
     }
     return X_train, y_train, X_test, y_test, fold_data
+
+
+def _qualified_name(value: object) -> str:
+    return f"{value.__module__}.{value.__qualname__}"
+
+
+def _reject_constant(token: str):
+    raise AssertionError(f"non-strict JSON constant emitted: {token}")
+
+
+def _assert_params_roundtrip(stored: dict, live: dict) -> None:
+    """The sidecar's params equal the estimator's, under the sidecar's encoding."""
+    assert set(stored) == set(live), (sorted(stored), sorted(live))
+    for key, value in live.items():
+        if callable(value):
+            assert stored[key] == _qualified_name(value), key
+        elif isinstance(value, float) and not math.isfinite(value):
+            assert stored[key] is None, key
+        else:
+            assert stored[key] == value, key
 
 
 def test_fold_write_is_run_scoped_and_recorded_everywhere() -> None:
@@ -420,6 +484,12 @@ def test_checkpoint_payload_surface_unchanged() -> None:
         checkpoint = root / "checkpoints" / TEST_RUN_ID / "fold_0.pkl"
         loaded = joblib.load(checkpoint)
 
+        # The params sidecar sits beside the checkpoint and is strict JSON even
+        # for this real estimator's callables and NaN defaults.
+        sidecar = checkpoint.with_name("fold_0_params.json")
+        assert sidecar.is_file(), "the params sidecar must sit beside the checkpoint"
+        json.loads(sidecar.read_text(encoding="utf-8"), parse_constant=_reject_constant)
+
     assert isinstance(loaded, XGBRegressor)
     assert type(loaded) is type(model)
     loaded_params = loaded.get_params()
@@ -435,6 +505,180 @@ def test_checkpoint_payload_surface_unchanged() -> None:
     stored = predictions["fold_model_path"]
     assert not Path(stored).is_absolute(), stored
     assert stored.endswith(f"checkpoints/{TEST_RUN_ID}/fold_0.pkl")
+
+
+def test_params_sidecar_roundtrip() -> None:
+    rng = np.random.default_rng(31)
+    X_train = rng.normal(size=(200, N_INDICATORS))
+    y_train = rng.uniform(-3.0, -1.0, size=200)
+    X_test = rng.normal(size=(40, N_INDICATORS))
+    y_test = rng.uniform(-3.0, -1.0, size=40)
+    fold_data = _fold_inputs()[-1]
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(training, "ARTIFACTS_DIR", root))
+            stack.enter_context(
+                mock.patch.object(training, "train_xgboost_model", _tiny_xgb_trainer)
+            )
+            model, _predictions = training._train_fold_model(
+                fold_idx=0,
+                run_id=TEST_RUN_ID,
+                X_train=X_train,
+                y_train=y_train,
+                X_test=X_test,
+                y_test=y_test,
+                fold_data=fold_data,
+            )
+
+        sidecar = root / "checkpoints" / TEST_RUN_ID / "fold_0_params.json"
+        assert sidecar.is_file(), f"params sidecar missing: {sidecar}"
+        text = sidecar.read_text(encoding="utf-8")
+        document = json.loads(text, parse_constant=_reject_constant)
+
+        # The minimal sidecar schema: the full parameter set, the tool versions,
+        # and the best-effort git sha.
+        assert set(document) == {"params", "environment", "git_sha"}, sorted(document)
+        _assert_params_roundtrip(document["params"], model.get_params())
+        assert document["params"]["objective"] == (
+            "packages.ml.model.training.qlike_objective.qlike_objective"
+        )
+        assert document["params"]["eval_metric"] == (
+            "packages.ml.model.training.qlike_objective.qlike_eval_metric"
+        )
+
+        environment = document["environment"]
+        for key in SIDECAR_VERSION_KEYS:
+            assert isinstance(environment.get(key), str), (key, environment)
+            assert environment[key], (key, environment)
+        git_sha = document["git_sha"]
+        assert git_sha is None or re.fullmatch(r"[0-9a-f]{40}", git_sha), git_sha
+
+        # Strict JSON: no non-standard constants, no *.tmp residue.
+        assert "NaN" not in text and "Infinity" not in text, text
+        assert not list(root.rglob("*.tmp")), "the sidecar write left *.tmp residue"
+
+
+def test_native_json_ubj_roundtrip_loses_training_params() -> None:
+    from xgboost import XGBRegressor
+
+    rng = np.random.default_rng(17)
+    X = rng.normal(size=(200, N_INDICATORS))
+    y = rng.uniform(-3.0, -1.0, size=200)
+    model = XGBRegressor(
+        objective=qlike_objective,
+        eval_metric=qlike_eval_metric,
+        n_estimators=5,
+        max_depth=3,
+        learning_rate=0.1,
+        random_state=7,
+        verbosity=0,
+        tree_method="hist",
+    )
+    model.fit(X, y, verbose=False)
+    live_params = model.get_params()
+    predictions = model.predict(X)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        for fmt in ("json", "ubj"):
+            native_path = root / f"fold_0_model.{fmt}"
+            model.save_model(native_path)
+            reloaded = XGBRegressor()
+            reloaded.load_model(native_path)
+            stored_params = reloaded.get_params()
+
+            # The trees survive (predictions unchanged) but the training recipe
+            # does not: every configured knob reloads as None or a default, and
+            # the QLIKE objective is not even declared anymore. This is the
+            # documented reason the params sidecar exists.
+            np.testing.assert_array_equal(reloaded.predict(X), predictions)
+            for key in (
+                "max_depth",
+                "n_estimators",
+                "learning_rate",
+                "random_state",
+                "tree_method",
+                "verbosity",
+            ):
+                assert stored_params[key] is None, (fmt, key, stored_params[key])
+            assert stored_params["eval_metric"] is None, fmt
+            assert stored_params["objective"] != live_params["objective"], fmt
+            assert stored_params["objective"] == "reg:squarederror", fmt
+
+
+def test_params_sidecars_are_recorded_in_the_manifest() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = _prepared_root(tmpdir)
+        _exercise_run(root)
+        manifest = _read_manifest(root)
+        run_id = manifest["run_id"]
+
+        for fold_idx in range(5):
+            sidecar = root / "checkpoints" / run_id / f"fold_{fold_idx}_params.json"
+            assert sidecar.is_file(), f"params sidecar missing: {sidecar}"
+            assert any(
+                key.endswith(f"checkpoints/{run_id}/fold_{fold_idx}_params.json")
+                for key in manifest["artifacts"]
+            ), manifest["artifacts"]
+
+        # The run-level write applies the same strict-JSON encoding as the
+        # round-trip check: the stub's callable and NaN knobs are recorded by
+        # qualified name and as null.
+        document = json.loads(
+            (root / "checkpoints" / run_id / "fold_0_params.json").read_text(
+                encoding="utf-8"
+            ),
+            parse_constant=_reject_constant,
+        )
+        assert document["params"]["objective"] == _qualified_name(qlike_objective)
+        assert document["params"]["missing"] is None
+        assert document["git_sha"] is None or re.fullmatch(
+            r"[0-9a-f]{40}", document["git_sha"]
+        )
+
+
+def test_torn_params_dump_leaves_no_sidecar_and_no_tmp_residue() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        params_path = root / "checkpoints" / TEST_RUN_ID / "fold_0_params.json"
+
+        def failing_dump(obj, fp, *args, **kwargs):
+            fp.write('{"params": {"partial"')
+            raise RuntimeError("injected failure during params dump")
+
+        with mock.patch.object(training.json, "dump", failing_dump):
+            with pytest.raises(RuntimeError, match="injected failure"):
+                training.write_fold_params_atomically(_StubModel(), params_path)
+
+        assert not params_path.exists(), "a torn dump left a final sidecar"
+        assert not list(root.rglob("*.tmp")), "a torn dump left *.tmp residue"
+
+
+def test_torn_params_rename_keeps_the_previous_sidecar_intact() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        params_path = root / "checkpoints" / TEST_RUN_ID / "fold_0_params.json"
+        params_path.parent.mkdir(parents=True)
+        params_path.write_bytes(b"previous sidecar payload")
+
+        with mock.patch("os.replace", side_effect=OSError("injected rename failure")):
+            with pytest.raises(OSError, match="injected rename failure"):
+                training.write_fold_params_atomically(_StubModel(), params_path)
+
+        assert params_path.read_bytes() == b"previous sidecar payload"
+        assert not list(root.rglob("*.tmp")), "a torn rename left *.tmp residue"
+
+
+def test_no_native_model_formats_in_live_code() -> None:
+    hits = []
+    for path in sorted(MODEL_ROOT.rglob("*.py")):
+        if TESTS_DIR in path.parents:
+            continue
+        if NATIVE_MODEL_CALL_RE.search(path.read_text(encoding="utf-8")):
+            hits.append(str(path.relative_to(REPO_ROOT)))
+    assert not hits, "native xgboost save/load calls in live code: " + ", ".join(hits)
 
 
 if __name__ == "__main__":
