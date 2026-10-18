@@ -4,8 +4,10 @@ Phase 2 must write the calendar ``market_regime`` labels into the extracted
 metadata so the Phase 3 consumer can report per-fold regime distributions. The
 synthetic checks build a temporary dataset and artifact tree, so they neither
 read nor write the live generated data; the non-regression check compares the
-extraction and fold indices against the live branch-point artifacts behind the
-existing skip guard.
+extraction X/Y and the fold payload's key/type contract against the live
+branch-point artifacts behind the existing skip guard (the stored fold
+membership is interim until the later integration re-run, so it is not compared
+index-for-index).
 
 Run with pytest from the repository root:
 
@@ -124,7 +126,7 @@ def test_indicator_contract_count_unchanged() -> None:
     assert len(feature_engineering.INDICATORS) == 37
 
 
-def test_live_extraction_and_fold_indices_match_branch_point_artifacts() -> None:
+def test_live_extraction_and_fold_contract_match_branch_point_artifacts() -> None:
     requires_live_artifacts(ARTIFACTS_DIR)
     if not DATASET_PATH.is_file():
         pytest.skip(
@@ -161,9 +163,46 @@ def test_live_extraction_and_fold_indices_match_branch_point_artifacts() -> None
             folds = cross_validator.phase_3_cross_validation()
 
     assert set(folds) == set(live_folds)
+
+    # The stored test-side membership is interim: the test blocks predate the
+    # train-only purge and are regenerated at the later integration re-run, so
+    # only the fields the purge change leaves untouched are compared by value.
+    # The membership contract is asserted from in-memory recomputation in
+    # tests/test_purge.py.
+    canonical_keys = {
+        "train_indices",
+        "test_indices",
+        "train_date_min",
+        "train_date_max",
+        "test_date_min",
+        "test_date_max",
+        "gap_days",
+        "n_train",
+        "n_test",
+        "first_test_idx",
+        "last_train_idx",
+        "purge_train_count",
+    }
+    stable_keys = {
+        "train_indices",
+        "train_date_min",
+        "train_date_max",
+        "gap_days",
+        "n_train",
+        "last_train_idx",
+        "purge_train_count",
+    }
     for fold_key, expected in live_folds.items():
-        for field, value in expected.items():
-            assert folds[fold_key][field] == value, f"{fold_key} {field} drifted"
+        fresh = folds[fold_key]
+        assert canonical_keys <= set(fresh), fold_key
+        assert canonical_keys <= set(expected), fold_key
+        assert "purge_test_count" not in fresh, fold_key
+        for field in stable_keys:
+            assert fresh[field] == expected[field], f"{fold_key} {field} drifted"
+        for field in canonical_keys:
+            assert type(fresh[field]) is type(expected[field]), (
+                f"{fold_key} {field} type drifted"
+            )
 
 
 if __name__ == "__main__":
