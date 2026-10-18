@@ -64,6 +64,17 @@ against the model input (ticker, date) pairs, so the benchmark cannot silently
 drift from the training rows. The first ``HAR_WARMUP_DAYS`` dates of each
 ticker's series carry incomplete trailing windows; the returned warm-up mask
 flags those rows so the HAR fit excludes them.
+
+Fit and report scales
+---------------------
+The canonical fit stays variance-level OLS and the written report declares it:
+``fit_scale`` is ``"variance"`` and ``report_scale`` is
+``"log-variance for R²; sigma for QLIKE"``, so the log-scale R² is never
+mistaken for the fit objective. The comparator note states that QLIKE is the
+headline model-vs-benchmark comparison. Coefficient standard errors are not
+part of the canonical fit: Newey-West HAC standard errors (lag 4, the 5-day
+label overlap) are reported only when the persisted
+``coefficient_interpretation`` flag asks for them.
 """
 from __future__ import annotations
 
@@ -86,6 +97,28 @@ HAR_WINDOWS = (1, 5, 22)
 # HAR_WINDOWS[-1] - 1 dates of each ticker's series carry incomplete windows. Those
 # rows are flagged by the warm-up mask and excluded from the fit.
 HAR_WARMUP_DAYS = 21
+
+# Declared scales for the written report. The fit optimizes variance-level
+# squared error (Corsi's objective); the reported R² is on the log target and
+# QLIKE is in per-day sigma units, which is the headline comparison.
+FIT_SCALE = "variance"
+REPORT_SCALE = "log-variance for R²; sigma for QLIKE"
+COMPARISON_NOTE = (
+    "QLIKE is the headline model-vs-benchmark comparison; the log-target R² "
+    "is a comparability metric only."
+)
+
+# Newey-West HAC lag: the 5-day label overlap lets serial correlation reach four
+# daily steps, so the Bartlett-weighted sandwich absorbs lags 1 through 4.
+HAC_LAG = 4
+HAC_NOTE = (
+    "Newey-West HAC standard errors (lag 4, Bartlett weights) are reported; "
+    "coefficient interpretation is enabled by coefficient_interpretation=True."
+)
+NO_HAC_NOTE = (
+    "OLS standard errors are not reported and coefficient interpretation "
+    "requires coefficient_interpretation=True (Newey-West HAC, lag 4)."
+)
 
 
 def _yang_zhang_weight(window: int) -> float:
@@ -278,6 +311,47 @@ def load_har_regressors(
     return components, warmup_mask
 
 
+def _coefficient_standard_errors(
+    design: np.ndarray,
+    target_variance: np.ndarray,
+    coefficients: np.ndarray,
+    lag: int = HAC_LAG,
+) -> tuple[np.ndarray, np.ndarray]:
+    """OLS and Newey-West HAC standard errors for one fitted OLS vector.
+
+    The OLS covariance is ``s² (X'X)^{-1}`` with ``s²`` the residual variance.
+    The HAC covariance is the Bartlett-weighted sandwich
+    ``(X'X)^{-1} X' Ω X (X'X)^{-1}`` with ``X' Ω X`` built from the residual
+    second moments (lag 0) plus the Newey-West weighted residual
+    autocovariances up to ``lag``. The pseudo-inverse, the symmetrization, and
+    the nonnegative diagonal clip keep the sandwich stable in the
+    rank-deficient corners that ``lstsq`` still solves.
+    """
+    n_rows, n_columns = design.shape
+    if n_rows <= n_columns:
+        raise ValueError(
+            f"HAR coefficient standard errors require more fitted rows than "
+            f"coefficients: {n_rows} fitted rows for {n_columns} coefficients"
+        )
+    residual = target_variance - design @ coefficients
+    bread = np.linalg.pinv(design.T @ design)
+
+    ols_covariance = (float(residual @ residual) / (n_rows - n_columns)) * bread
+    ols_se = np.sqrt(np.clip(np.diag(ols_covariance), 0.0, None))
+
+    meat = design.T @ (design * (residual**2)[:, None])
+    for offset in range(1, lag + 1):
+        weight = 1.0 - offset / (lag + 1)
+        cross = (
+            design[offset:] * (residual[offset:] * residual[:-offset])[:, None]
+        ).T @ design[:-offset]
+        meat += weight * (cross + cross.T)
+    hac_covariance = bread @ meat @ bread
+    hac_covariance = 0.5 * (hac_covariance + hac_covariance.T)
+    hac_se = np.sqrt(np.clip(np.diag(hac_covariance), 0.0, None))
+    return ols_se, hac_se
+
+
 def fit_har_benchmark(
     train_indices: np.ndarray,
     test_indices: np.ndarray,
@@ -287,6 +361,7 @@ def fit_har_benchmark(
     forecast_floor: float,
     warmup_mask: np.ndarray,
     fold_key: str | None = None,
+    coefficient_interpretation: bool = False,
 ) -> dict:
     """Fit the canonical HAR-RV regression on one fold's training rows.
 
@@ -301,6 +376,17 @@ def fit_har_benchmark(
     so the unchanged scoring set stays auditable. The fit optimizes variance-level
     squared error — Corsi's objective — so the log-scale R² below is a comparability
     metric, not the fit target; QLIKE is the headline model-vs-benchmark comparison.
+    The result declares that split through ``fit_scale`` (``"variance"``),
+    ``report_scale`` (``"log-variance for R²; sigma for QLIKE"``), and the comparator
+    note. Coefficient standard errors are not part of the canonical fit: with
+    ``coefficient_interpretation=False`` (the pipeline default) ``hac_se`` is None
+    and the note states that OLS standard errors are not reported; with the flag
+    True the result carries ``ols_se`` and the Newey-West ``hac_se`` (lag 4,
+    Bartlett weights, the sandwich ``(X'X)^{-1} X' Ω X (X'X)^{-1}``), plus
+    ``hac_lag = 4``. ``hac_lag`` records the configured lag whether or not the
+    errors are computed; the flag and the note say whether ``hac_se`` is
+    interpretable. The fitted coefficients and forecasts never depend on the flag.
+
     Test-row forecasts are clipped at ``forecast_floor**2`` in variance space so the
     implied volatility stays positive for the loss; equivalently the returned log
     forecast obeys ``forecast_log >= ln(forecast_floor)`` — the one declared forecast
@@ -316,7 +402,10 @@ def fit_har_benchmark(
     Returns:
         dict with coefficients, har_r2, forecast_log (test rows), clip_count,
         clip_rate, n_train (the fitted rows), n_test, n_warmup_excluded,
-        n_warmup_test_rows, warmup_days.
+        n_warmup_test_rows, warmup_days, the declared fit/report scales and
+        comparator note, the persisted ``coefficient_interpretation`` flag,
+        ``hac_lag``, and the opt-in ``ols_se``/``hac_se`` (None when the flag
+        is off) with their note.
     """
     train_indices = np.asarray(train_indices)
     test_indices = np.asarray(test_indices)
@@ -344,6 +433,16 @@ def fit_har_benchmark(
     coefficients, *_ = np.linalg.lstsq(
         train_design, target_variance[retained_train], rcond=None
     )
+
+    # Coefficient standard errors are opt-in: the canonical fit (and every
+    # pipeline run) reports none, and the persisted flag is what makes the
+    # Newey-West errors interpretable.
+    if coefficient_interpretation:
+        ols_se, hac_se = _coefficient_standard_errors(
+            train_design, target_variance[retained_train], coefficients
+        )
+    else:
+        ols_se = hac_se = None
 
     # The one declared forecast constraint: clip the variance-space forecast at
     # floor**2, i.e. forecast_log >= ln(forecast_floor). The same mask that
@@ -381,4 +480,14 @@ def fit_har_benchmark(
         "n_warmup_excluded": n_warmup_excluded,
         "n_warmup_test_rows": warmup_test_rows,
         "warmup_days": HAR_WARMUP_DAYS,
+        "fit_scale": FIT_SCALE,
+        "report_scale": REPORT_SCALE,
+        "comparison_note": COMPARISON_NOTE,
+        "coefficient_interpretation": bool(coefficient_interpretation),
+        "hac_lag": HAC_LAG,
+        "hac_se": None if hac_se is None else [float(value) for value in hac_se],
+        "ols_se": None if ols_se is None else [float(value) for value in ols_se],
+        "coefficient_se_note": (
+            HAC_NOTE if coefficient_interpretation else NO_HAC_NOTE
+        ),
     }
