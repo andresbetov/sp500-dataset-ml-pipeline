@@ -62,6 +62,30 @@ def _live_metadata() -> tuple[np.ndarray, np.ndarray]:
     return _live_cache["dates"], _live_cache["tickers"]
 
 
+def _synthetic_ohlc(
+    tickers: np.ndarray, log_returns: np.ndarray
+) -> dict[str, np.ndarray]:
+    """Deterministic adjusted OHLC bars carrying the given close-to-close returns.
+
+    Each ticker's close path compounds its returns from a base level of 50, so
+    the shipped ``log_return`` is exactly the adjusted close-to-close difference
+    and the first row's implied predecessor level matches the returns that
+    follow it. Fixed open/high/low offsets keep the bar ordering.
+    """
+    log_returns = np.asarray(log_returns, dtype=np.float64)
+    level = pd.Series(np.log(50.0) + log_returns).groupby(
+        tickers, sort=False
+    ).cumsum()
+    close = np.exp(level.to_numpy())
+    adj_open = close * 1.005
+    return {
+        "_adj_open": adj_open,
+        "_adj_high": np.maximum(adj_open, close) * 1.02,
+        "_adj_low": np.minimum(adj_open, close) * 0.98,
+        "adj_close": close,
+    }
+
+
 def _write_dataset(
     directory: Path,
     tickers: np.ndarray,
@@ -75,6 +99,7 @@ def _write_dataset(
             "ticker": tickers,
             "date": pd.to_datetime(dates),
             "log_return": log_returns,
+            **_synthetic_ohlc(tickers, log_returns),
         }
     ).to_parquet(path)
     return path
@@ -344,14 +369,34 @@ def test_warmup_mask_covers_first_21_dates_per_ticker() -> None:
     assert int(warmup_mask.sum()) == 21 * 2
 
     # The mask leaves the components alone: every row keeps the trailing-only
-    # min_periods=1 means, warm-up rows included.
-    squared = returns**2
-    expected_components = np.empty_like(components)
-    for row in range(len(tickers)):
-        series = squared[: row + 1][tickers[: row + 1] == tickers[row]]
-        for column, window in enumerate(har_benchmark.HAR_WINDOWS):
-            expected_components[row, column] = series[-window:].mean()
-    np.testing.assert_allclose(components, expected_components)
+    # same-estimator math, warm-up rows included. The n = 1 column is the
+    # closed form overnight_t**2 + rs_t (the n -> 1 limit), which pins that the
+    # rebuilt components are live on warm-up rows too. Earlier rows use the
+    # shipped log_return for the missing predecessor close, exactly like the
+    # loader; every other bar uses its predecessor directly.
+    bars = _synthetic_ohlc(tickers, returns)
+    previous = (
+        pd.Series(bars["adj_close"])
+        .groupby(tickers, sort=False)
+        .shift(1)
+        .to_numpy()
+    )
+    overnight = np.log(bars["_adj_open"] / previous)
+    missing = np.isnan(previous)
+    overnight[missing] = (
+        np.log(bars["_adj_open"][missing] / bars["adj_close"][missing])
+        + returns[missing]
+    )
+    rogers_satchell = (
+        np.log(bars["_adj_high"] / bars["adj_close"])
+        * np.log(bars["_adj_high"] / bars["_adj_open"])
+        + np.log(bars["_adj_low"] / bars["adj_close"])
+        * np.log(bars["_adj_low"] / bars["_adj_open"])
+    )
+    assert np.isfinite(components).all()
+    np.testing.assert_allclose(
+        components[:, 0], overnight**2 + rogers_satchell
+    )
 
 
 def test_fold_path_excludes_warmup_rows_and_reconciles_counts() -> None:
@@ -435,7 +480,17 @@ def test_live_alignment_non_regression() -> None:
     assert np.isfinite(components).all()
     assert warmup_mask.dtype == bool
 
-    frame = pd.read_parquet(DATASET_PATH, columns=["ticker", "date", "log_return"])
+    frame = pd.read_parquet(
+        DATASET_PATH,
+        columns=[
+            "ticker",
+            "date",
+            "_adj_open",
+            "_adj_high",
+            "_adj_low",
+            "adj_close",
+        ],
+    )
     frame_tickers = frame["ticker"].to_numpy()
     n_tickers = len(pd.unique(frame_tickers))
     assert n_tickers == 469
@@ -459,18 +514,55 @@ def test_live_alignment_non_regression() -> None:
     assert int(per_ticker_rows.min()) >= har_benchmark.HAR_WARMUP_DAYS
     assert int(warmup_mask.sum()) == n_tickers * har_benchmark.HAR_WARMUP_DAYS
 
-    # The trailing-only definition is unchanged: each ticker's last row carries
-    # the trailing 1/5/22 means of its squared log returns.
-    squared = frame["log_return"].to_numpy(dtype=np.float64) ** 2
+    # The trailing-only definition is now the target's estimator family: each
+    # ticker's last row carries the trailing Yang-Zhang components of its own
+    # bars. The full 1/5/22 windows on the last row are recomputed here from
+    # the frame's adjusted OHLC and prior adjusted closes; the n = 1 column is
+    # the n -> 1 limit (overnight**2 + rs).
+    adj_open = frame["_adj_open"].to_numpy(dtype=np.float64)
+    adj_high = frame["_adj_high"].to_numpy(dtype=np.float64)
+    adj_low = frame["_adj_low"].to_numpy(dtype=np.float64)
+    adj_close = frame["adj_close"].to_numpy(dtype=np.float64)
     groups = pd.Series(np.arange(len(frame))).groupby(
         frame_tickers, sort=False
     ).groups
     last_rows = np.array([int(group[-1]) for group in groups.values()])
-    for column, window in enumerate(har_benchmark.HAR_WINDOWS):
-        expected = np.array(
-            [squared[group[-window:]].mean() for group in groups.values()]
+    open_to_close_weight_5 = 0.34 / (1.34 + 6 / 4)
+    open_to_close_weight_22 = 0.34 / (1.34 + 23 / 21)
+    weights = (None, open_to_close_weight_5, open_to_close_weight_22)
+    expected_components = np.empty_like(components[last_rows])
+    for row, group in enumerate(groups.values()):
+        bars = np.asarray(group)[-har_benchmark.HAR_WINDOWS[-1] :]
+        overnight = np.concatenate(
+            (
+                [
+                    np.log(
+                        adj_open[bars[0]]
+                        / adj_close[bars[0] - 1]
+                    )
+                ],
+                np.log(adj_open[bars[1:]] / adj_close[bars[:-1]]),
+            )
         )
-        np.testing.assert_allclose(components[last_rows, column], expected)
+        bar_open_to_close = np.log(adj_close[bars] / adj_open[bars])
+        rogers_satchell = (
+            np.log(adj_high[bars] / adj_close[bars])
+            * np.log(adj_high[bars] / adj_open[bars])
+            + np.log(adj_low[bars] / adj_close[bars])
+            * np.log(adj_low[bars] / adj_open[bars])
+        )
+        expected_components[row, 0] = (
+            overnight[-1] ** 2 + rogers_satchell[-1]
+        )
+        for column in (1, 2):
+            window = har_benchmark.HAR_WINDOWS[column]
+            weight = weights[column]
+            expected_components[row, column] = (
+                overnight[-window:].var(ddof=1)
+                + weight * bar_open_to_close[-window:].var(ddof=1)
+                + (1.0 - weight) * rogers_satchell[-window:].mean()
+            )
+    np.testing.assert_allclose(components[last_rows], expected_components)
 
 
 if __name__ == "__main__":

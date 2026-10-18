@@ -46,7 +46,11 @@ POLICY_FLOORED_TRAIN_SIZE = 4
 TEST_FLOOR_ROWS = (12, 25, 38, 42, 57)
 TEST_SMALLEST_POSITIVE_ROW = 13
 LIVE_FOLD_0_KEPT_ROWS = 366_518
-LIVE_FOLD_0_FLOOR_RETAINED_EDGE = 0.07849
+# The fold-0 floor-retained model-vs-HAR QLIKE edge recomputed from the stored
+# artifact and the live regressors. The stored coefficients predate the
+# same-estimator HAR rebuild, so the recomputed value is provisional: the next
+# full pipeline run refits them and re-measures this reference.
+LIVE_FOLD_0_FLOOR_RETAINED_EDGE = 0.08054
 
 
 def _synthetic_har_regressors(dates: np.ndarray, tickers: np.ndarray) -> tuple:

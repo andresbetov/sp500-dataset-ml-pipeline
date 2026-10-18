@@ -1,15 +1,50 @@
 """Canonical HAR-RV benchmark (Corsi 2008) for the 5-day-ahead volatility target.
 
-The benchmark uses the canonical 1/5/22 trailing realized-variance components of the
-daily log returns — daily (day t), weekly mean (t-4..t), monthly mean (t-21..t) — and is
-fitted by OLS in variance levels per fold on training rows only, then evaluated on the
-fold's test rows. Test rows never enter the fit.
+The benchmark uses canonical 1/5/22 trailing variance components built with the
+same Yang-Zhang estimator family as the target: every component is a trailing
+window variance of the adjusted OHLC bars plus the prior adjusted close, so the
+benchmark cannot mix a close-to-close proxy with a Yang-Zhang target. The
+components are fitted by OLS in variance levels per fold on training rows only,
+then evaluated on the fold's test rows. Test rows never enter the fit.
 
-The components are read from the dataset parquet and verified row-aligned against the
-model input (ticker, date) pairs, so the benchmark cannot silently drift from the
-training rows. The first ``HAR_WARMUP_DAYS`` dates of each ticker's series carry
-incomplete trailing windows; the returned warm-up mask flags those rows so the HAR fit
-excludes them.
+Per bar ``t`` (adjusted OHLC, per ticker, in frame order):
+
+- ``overnight_t = ln(adj_open_t / adj_close_{t-1})``
+- ``open_to_close_t = ln(adj_close_t / adj_open_t)``
+- Rogers-Satchell:
+  ``rs_t = ln(H_t/C_t)*ln(H_t/O_t) + ln(L_t/C_t)*ln(L_t/O_t)``
+
+For a nominal window ``n`` the component at row ``t`` is the trailing-window
+Yang-Zhang variance ending at ``t`` (inclusive; no look-ahead):
+
+    component_n(t) = var(overnight over window)
+                     + k_n * var(open_to_close over window)
+                     + (1 - k_n) * mean(rs over window)
+    k_n = 0.34 / (1.34 + (n + 1) / (n - 1)) for n >= 2
+
+Degenerate rules:
+
+- ``n = 1`` has no sample variance. The ``n -> 1`` limit of the same formula is
+  used, where the open-to-close weight tends to 0 and the single observation's
+  variance about zero captures the jump:
+  ``component_1(t) = overnight_t**2 + rs_t``.
+- A trailing window shorter than ``n`` (a ticker's series start) follows the
+  ``min_periods=1`` convention: the sample variances use the available
+  observations (``ddof=1``); when exactly one observation is available its
+  squared value about zero is used, matching the ``n = 1`` rule; the ``rs``
+  term is the available mean; the nominal ``k_n`` is applied. Warm-up rows keep
+  these values and are excluded from the fit by the returned mask only.
+- Each ticker's first shipped row has no predecessor close inside the frame
+  (the shipped series starts after the dataset's history cut). The shipped
+  ``log_return`` is the adjusted close-to-close difference, so that row's
+  overnight jump is recovered as
+  ``ln(adj_open_t / adj_close_t) + log_return_t``; every row stays finite.
+
+The components are read from the dataset parquet and verified row-aligned
+against the model input (ticker, date) pairs, so the benchmark cannot silently
+drift from the training rows. The first ``HAR_WARMUP_DAYS`` dates of each
+ticker's series carry incomplete trailing windows; the returned warm-up mask
+flags those rows so the HAR fit excludes them.
 """
 from __future__ import annotations
 
@@ -34,17 +69,94 @@ HAR_WINDOWS = (1, 5, 22)
 HAR_WARMUP_DAYS = 21
 
 
+def _yang_zhang_weight(window: int) -> float:
+    """Yang-Zhang open-to-close weight for a nominal window of ``window`` days."""
+    return 0.34 / (1.34 + (window + 1) / (window - 1))
+
+
+def _yang_zhang_bar_quantities(
+    frame: pd.DataFrame,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """The target's per-bar quantities on the adjusted OHLC series.
+
+    Returns ``(overnight, open_to_close, rogers_satchell)`` arrays in frame
+    order, grouped per ticker. A ticker's first row has no predecessor close in
+    the frame, so the shipped ``log_return`` (the adjusted close-to-close
+    difference) supplies it; every other row uses the predecessor close
+    directly.
+    """
+    adj_open = frame["_adj_open"].to_numpy(dtype=np.float64)
+    adj_high = frame["_adj_high"].to_numpy(dtype=np.float64)
+    adj_low = frame["_adj_low"].to_numpy(dtype=np.float64)
+    adj_close = frame["adj_close"].to_numpy(dtype=np.float64)
+    previous_close = frame.groupby("ticker", sort=False)["adj_close"].shift(1)
+    previous_close = previous_close.to_numpy(dtype=np.float64)
+
+    overnight = np.log(adj_open / previous_close)
+    missing_predecessor = np.isnan(previous_close)
+    overnight[missing_predecessor] = (
+        np.log(adj_open[missing_predecessor] / adj_close[missing_predecessor])
+        + frame["log_return"].to_numpy(dtype=np.float64)[missing_predecessor]
+    )
+    open_to_close = np.log(adj_close / adj_open)
+    rogers_satchell = (
+        np.log(adj_high / adj_close) * np.log(adj_high / adj_open)
+        + np.log(adj_low / adj_close) * np.log(adj_low / adj_open)
+    )
+    return overnight, open_to_close, rogers_satchell
+
+
+def _trailing_window_average(
+    values: np.ndarray, tickers: pd.Series, window: int
+) -> np.ndarray:
+    """Trailing mean over ``window`` observations, ``min_periods=1``."""
+    grouped = pd.Series(values).groupby(tickers, sort=False)
+    return grouped.transform(
+        lambda series: series.rolling(window, min_periods=1).mean()
+    ).to_numpy(dtype=np.float64)
+
+
+def _trailing_window_variance(
+    values: np.ndarray, tickers: pd.Series, window: int
+) -> np.ndarray:
+    """Trailing sample variance (``ddof=1``) over the available observations.
+
+    The ``min_periods=1`` convention applies: a shorter window at a ticker's
+    series start uses the observations it has, and a window holding exactly one
+    observation uses its squared value about zero (the ``n = 1`` rule).
+    """
+    grouped = pd.Series(values).groupby(tickers, sort=False)
+    variance = grouped.transform(
+        lambda series: series.rolling(window, min_periods=2).var()
+    ).to_numpy(dtype=np.float64, copy=True)
+    single_observation = (
+        pd.Series(np.arange(len(values)))
+        .groupby(tickers, sort=False)
+        .cumcount()
+        .to_numpy()
+        == 0
+    )
+    variance[single_observation] = values[single_observation] ** 2
+    return variance
+
+
 def load_har_regressors(
     dates: np.ndarray, tickers: np.ndarray
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Trailing mean squared log returns over the canonical 1/5/22 windows.
+    """Same-estimator Yang-Zhang variance over the canonical 1/5/22 windows.
 
-    Every component ends on the row's own date, the close at which the prediction is
-    decided. Rows near a ticker's series start carry shorter windows because the
-    pre-cut history is not shipped; later rows carry the full 1/5/22 windows. The
-    first ``HAR_WARMUP_DAYS`` dates of each ticker's series (in frame order) are
-    flagged by the returned mask and excluded from the fit; the component values keep
-    the trailing-only ``min_periods=1`` math on every row.
+    Every component is built from the bar-level quantities the volatility target
+    uses (adjusted OHLC plus the prior adjusted close) and ends on the row's own
+    date, the close at which the prediction is decided. One-day rows use the
+    ``n = 1`` limit (``overnight**2 + rs``); wider windows use the Yang-Zhang
+    combination of trailing sample variances and the Rogers-Satchell mean, with
+    shorter windows at a ticker's series start following the
+    ``min_periods=1`` convention. The degenerate rules are documented in the
+    module docstring.
+
+    The first ``HAR_WARMUP_DAYS`` dates of each ticker's series (in frame order)
+    are flagged by the returned mask and excluded from the fit; the component
+    values keep the trailing-only math on every row.
 
     The parquet frame is verified against the model metadata by (ticker, date) pair
     equality in row order, so a same-date ticker swap cannot silently attach another
@@ -60,7 +172,18 @@ def load_har_regressors(
         monthly] variance components and an (n,) bool mask that is True for the
         first ``HAR_WARMUP_DAYS`` dates of each ticker's series.
     """
-    frame = pd.read_parquet(DATASET_PATH, columns=["ticker", "date", "log_return"])
+    frame = pd.read_parquet(
+        DATASET_PATH,
+        columns=[
+            "ticker",
+            "date",
+            "_adj_open",
+            "_adj_high",
+            "_adj_low",
+            "adj_close",
+            "log_return",
+        ],
+    )
     frame_tickers = frame["ticker"].to_numpy()
     frame_dates = normalize_dates(frame["date"].to_numpy())
     tickers = np.asarray(tickers)
@@ -100,13 +223,23 @@ def load_har_regressors(
             f"(frame row {row}): {previous_dates.iloc[row]} >= {frame_dates[row]}"
         )
 
-    squared = frame["log_return"].to_numpy(dtype=np.float64) ** 2
-    grouped = pd.Series(squared).groupby(frame["ticker"], sort=False)
+    overnight, open_to_close, rogers_satchell = _yang_zhang_bar_quantities(frame)
+    tickers_series = frame["ticker"]
     components = np.empty((len(frame), len(HAR_WINDOWS)), dtype=np.float64)
     for column, window in enumerate(HAR_WINDOWS):
-        components[:, column] = grouped.transform(
-            lambda values, window=window: values.rolling(window, min_periods=1).mean()
-        ).to_numpy()
+        if window == 1:
+            # n -> 1 limit: the open-to-close weight tends to 0, so the single
+            # observation's variance about zero and the bar's rs remain.
+            components[:, column] = overnight**2 + rogers_satchell
+            continue
+        weight = _yang_zhang_weight(window)
+        components[:, column] = (
+            _trailing_window_variance(overnight, tickers_series, window)
+            + weight
+            * _trailing_window_variance(open_to_close, tickers_series, window)
+            + (1.0 - weight)
+            * _trailing_window_average(rogers_satchell, tickers_series, window)
+        )
 
     if not np.isfinite(components).all():
         raise ValueError("HAR regressors contain non-finite values")
