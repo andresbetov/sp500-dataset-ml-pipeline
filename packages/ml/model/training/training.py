@@ -11,6 +11,7 @@ from packages.ml.model.cross_validation.cv_utils import load_folds_metadata
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from packages.ml.model.training.har_benchmark import fit_har_benchmark, load_har_regressors
 from packages.ml.model.training.model_trainer import train_xgboost_model
+from packages.ml.model.training.qlike_objective import qlike_mean
 from packages.ml.model.utils import ARTIFACTS_DIR
 
 logger = logging.getLogger(__name__)
@@ -22,12 +23,13 @@ RV_FLOOR = float(get_config()["rv_floor"])
 
 
 def qlike_loss(actual_log: np.ndarray, forecast_log: np.ndarray) -> float:
-	"""QLIKE loss for log-RV forecasts (Patton 2011; Hansen-Lunde 2005).
+	"""QLIKE loss for log-sigma forecasts (Patton 2011; Hansen-Lunde 2005).
 
 	QLIKE(h, f) = h/f - ln(h/f) - 1 with h = exp(actual_log) and f = exp(forecast_log),
 	so in log space the loss is exp(delta) - delta - 1 for delta = actual - forecast.
 	This is the robust form for volatility-forecast comparison — the same ranking as
-	the Hansen-Lunde loss log(f) + h/f, up to the target-only term ln(h) + 1.
+	the Hansen-Lunde loss log(f) + h/f, up to the target-only term ln(h) + 1. The mean
+	comes from ``qlike_mean``, the functional the trainer also optimizes and evaluates.
 
 	Unlike the R²/MAE/RMSE block this metric never swallows errors: non-finite inputs
 	or outputs raise.
@@ -35,10 +37,7 @@ def qlike_loss(actual_log: np.ndarray, forecast_log: np.ndarray) -> float:
 	delta = np.asarray(actual_log, dtype=np.float64) - np.asarray(forecast_log, dtype=np.float64)
 	if not np.isfinite(delta).all():
 		raise ValueError("QLIKE received non-finite log targets or forecasts")
-	loss = np.exp(delta) - delta - 1.0
-	if not np.isfinite(loss).all():
-		raise ValueError("QLIKE produced non-finite values")
-	return float(loss.mean())
+	return qlike_mean(delta)
 
 
 def _validate_training_prerequisites(y: np.ndarray, folds_metadata: dict) -> None:
@@ -67,8 +66,8 @@ def _model_training_indices(fold_data: dict, y: np.ndarray) -> np.ndarray:
 	"""Training row indices for one fold, with degenerate at-or-below-floor rows removed.
 
 	The exact-zero Yang-Zhang windows are flat-price artifacts: their log target is
-	undefined (floored for finiteness). A log-MSE model that fits their extreme
-	labels under-forecasts similar test rows by ~20 log-units, where QLIKE's
+	undefined (floored for finiteness). A QLIKE-trained model that fits their
+	extreme labels under-forecasts similar test rows by ~20 log-units, where the
 	exponential term explodes. The filter uses the same floor as the target
 	transform, so a positive target at floor level cannot enter training as a
 	floored degenerate label. Test sets keep every row.
@@ -256,9 +255,9 @@ def phase_4_training() -> tuple[dict, dict, list]:
 	Orchestrate Phase 4: Train 5 fold-specific XGBoost models (1 per fold) with no temporal leakage.
 	Each fold_i_model trains exclusively on fold_i_train and is evaluated on fold_i_test.
 	The modeled target is log(RV) — the Yang-Zhang variance is closer to log-normal and
-	QLIKE is the robust loss for it — and every fold also fits the canonical HAR-RV
-	benchmark on its training rows only. Degenerate exact-zero target rows are excluded
-	from the training sets and kept in the test sets.
+	the fold models minimize QLIKE on that log target — and every fold also fits the
+	canonical HAR-RV benchmark on its training rows only. Degenerate exact-zero target
+	rows are excluded from the training sets and kept in the test sets.
 
 	Returns:
 		validation_predictions, fold_training_summary, fold_model_paths
