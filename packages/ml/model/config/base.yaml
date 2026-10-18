@@ -1,0 +1,19 @@
+rv_floor: 1.0e-12
+folds:
+  n_folds: 5
+  purge_horizon_days: 5
+  label_horizon_days: 5
+  separation_min: 6
+training:
+  seed: 42
+  n_jobs: -1
+paths:
+  dataset: data/processed/dataset.parquet
+  artifacts: packages/ml/model/artifacts
+  outputs: data/model_outputs
+run:
+  log_path: runs.jsonl
+tuning:
+  select_on: validation_qlike
+holdout:
+  n_dates: 500
