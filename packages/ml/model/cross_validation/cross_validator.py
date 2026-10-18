@@ -17,7 +17,8 @@ CV_EMBARGO_DAYS = get_config()["folds"]["purge_horizon_days"]
 # The target of row t aggregates the forward window [t+1, t+5], so a row's label window
 # reaches five trading days past its own date.
 LABEL_HORIZON_DAYS = get_config()["folds"]["label_horizon_days"]
-# Minimum separation in unique-trading-date index space; equals CV_EMBARGO_DAYS + 1.
+# Minimum separation in unique-trading-date index space, sourced from config;
+# a separation of S leaves S - 1 complete trading dates between the kept sets.
 SEPARATION_MIN = get_config()["folds"]["separation_min"]
 # Seven calendar buckets, mirroring the dataset's market_regime label.
 REGIME_NAMES = {
@@ -44,26 +45,24 @@ def _split_date_blocks(
     tpos: np.ndarray,
     block_start: int,
     block_end: int,
-) -> tuple[np.ndarray, np.ndarray, int, int]:
-    """Row indices for one fold with the two-sided purge of the 5-day label overlap.
+) -> tuple[np.ndarray, np.ndarray, int]:
+    """Row indices for one fold with the train-only purge of the 5-day label overlap.
 
-    tpos holds each row's index into the sorted unique trading dates. Train rows whose
-    label window reaches into the test block (tpos + 5 >= block_start) and test rows
-    whose label window overlaps the last training row's window
-    (tpos + 1 <= (block_start - 1) + 5) are both removed, which leaves at least five
-    complete trading dates between the kept train and test dates.
+    tpos holds each row's index into the sorted unique trading dates. Only train rows
+    whose label window reaches into the test block (tpos + 5 >= block_start) are
+    removed; every row of the test block is kept whole. The last kept train row sits
+    on block_start - 6, so exactly five complete trading dates (block_start - 5 ..
+    block_start - 1) are excluded between the kept train and test dates.
 
     Returns:
-        train_indices, test_indices, purge_train_count, purge_test_count
+        train_indices, test_indices, purge_train_count
     """
     train_mask = tpos < block_start
     test_mask = (tpos >= block_start) & (tpos < block_end)
-    last_raw_train_idx = block_start - 1
     purge_train_mask = train_mask & (tpos + LABEL_HORIZON_DAYS >= block_start)
-    purge_test_mask = test_mask & (tpos + 1 <= last_raw_train_idx + LABEL_HORIZON_DAYS)
     train_indices = np.flatnonzero(train_mask & ~purge_train_mask)
-    test_indices = np.flatnonzero(test_mask & ~purge_test_mask)
-    return train_indices, test_indices, int(purge_train_mask.sum()), int(purge_test_mask.sum())
+    test_indices = np.flatnonzero(test_mask)
+    return train_indices, test_indices, int(purge_train_mask.sum())
 
 
 def _verify_fold_separation(
@@ -71,9 +70,8 @@ def _verify_fold_separation(
     train_tpos: np.ndarray,
     test_tpos: np.ndarray,
     purge_train_count: int,
-    purge_test_count: int,
 ) -> int:
-    """Enforce the embargo predicate and the non-empty purges for one fold.
+    """Enforce the separation predicate and the non-empty train purge for one fold.
 
     The single embargo predicate lives in unique-trading-date index space:
     first_test_idx - last_train_idx >= SEPARATION_MIN (at least five complete
@@ -90,23 +88,25 @@ def _verify_fold_separation(
             f"Fold {fold_idx}: embargo violated — first test date index {first_test_idx} "
             f"minus last train date index {last_train_idx} = {separation} < {SEPARATION_MIN}"
         )
-    if purge_train_count <= 0 or purge_test_count <= 0:
+    if purge_train_count <= 0:
         raise ValueError(
-            f"Fold {fold_idx}: purge counts must be positive, got "
-            f"train={purge_train_count}, test={purge_test_count}"
+            f"Fold {fold_idx}: training-side purge count must be positive, got "
+            f"{purge_train_count}"
         )
     return separation
 
 
 def phase_3_cross_validation() -> dict:
     """
-    Date-group 5-fold cross-validation with embargo and purge.
+    Date-group 5-fold cross-validation with a train-only purge.
 
     The sorted unique trading dates are split into contiguous blocks; fold k trains on
-    blocks 0..k and tests on block k+1 (expanding windows). Each fold then drops the
-    two-sided label overlap of the 5-day forward target, so same-date overlap across
-    the train/test boundary is impossible. Row indices are positions in the Phase 2
-    inputs; first_test_idx / last_train_idx index the sorted unique-date array.
+    blocks 0..k and tests on block k+1 (expanding windows). Each fold drops only the
+    training rows whose 5-day forward target reaches into the test block, so five
+    complete trading dates (the block start minus 5 through minus 1) are excluded
+    between the last kept training date and the first kept test date; the test block
+    itself is kept whole. Row indices are positions in the Phase 2 inputs;
+    first_test_idx / last_train_idx index the sorted unique-date array.
 
     Returns:
         folds: Dict with 5 folds containing train/test indices and date bounds
@@ -151,14 +151,14 @@ def phase_3_cross_validation() -> dict:
         block_start = int(boundaries[fold_idx + 1])
         block_end = int(boundaries[fold_idx + 2])
 
-        train_indices, test_indices, purge_train_count, purge_test_count = _split_date_blocks(
+        train_indices, test_indices, purge_train_count = _split_date_blocks(
             tpos, block_start, block_end
         )
 
         train_tpos = tpos[train_indices]
         test_tpos = tpos[test_indices]
         separation = _verify_fold_separation(
-            fold_idx, train_tpos, test_tpos, purge_train_count, purge_test_count
+            fold_idx, train_tpos, test_tpos, purge_train_count
         )
 
         # Get date bounds
@@ -193,15 +193,14 @@ def phase_3_cross_validation() -> dict:
             "first_test_idx": int(test_tpos.min()),
             "last_train_idx": int(train_tpos.max()),
             "purge_train_count": purge_train_count,
-            "purge_test_count": purge_test_count,
             "regime_distribution_train": regime_dist_train,
             "regime_distribution_test": regime_dist_test,
         }
 
         logger.info(
             f"Fold {fold_idx}: Train {len(train_indices):,} | Test {len(test_indices):,} | "
-            f"{train_date_min} to {test_date_max} | purged train/test {purge_train_count:,}/{purge_test_count:,} | "
-            f"embargo {separation} dates"
+            f"{train_date_min} to {test_date_max} | train-only purge {purge_train_count:,} rows | "
+            f"{separation - 1} excluded dates between kept train and test | separation {separation} dates"
         )
 
     # Save fold metadata to joblib pickle
@@ -223,7 +222,6 @@ def phase_3_cross_validation() -> dict:
             "first_test_idx": fold_data["first_test_idx"],
             "last_train_idx": fold_data["last_train_idx"],
             "purge_train_count": fold_data["purge_train_count"],
-            "purge_test_count": fold_data["purge_test_count"],
         }
         for fold_key, fold_data in folds.items()
     }
@@ -231,6 +229,6 @@ def phase_3_cross_validation() -> dict:
     joblib.dump(folds_json, folds_metadata_path)
 
     logger.info(f"Saved fold metadata to {folds_metadata_path}")
-    logger.info("Phase 3 complete: date-group cross-validation with embargo and purge")
+    logger.info("Phase 3 complete: date-group cross-validation with a train-only purge")
 
     return folds
