@@ -22,6 +22,7 @@ import hashlib
 import re
 import traceback
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 import pandas as pd
@@ -33,6 +34,7 @@ from conftest import ARTIFACTS_DIR, DATASET_PATH, REPO_ROOT
 MODEL_ROOT = REPO_ROOT / "packages" / "ml" / "model"
 TESTS_DIR = MODEL_ROOT / "tests"
 FEATURE_ENGINEERING_PATH = MODEL_ROOT / "features" / "feature_engineering.py"
+TRAINING_PATH = MODEL_ROOT / "training" / "training.py"
 
 # The two dataset columns computed before the dataset's dropna step; they are
 # pinned in the metadata and exempt from model-side reconstruction checks.
@@ -49,6 +51,24 @@ PIN_KEYS = (
     "extra_columns",
     "indicators_hash",
     "non_reconstructible_columns",
+)
+
+# The exact key set of metadata["input_checks"].
+INPUT_CHECKS_KEYS = (
+    "n_rows",
+    "n_features",
+    "x_nan_count",
+    "x_inf_count",
+    "x_nan_rates",
+    "x_inf_rates",
+    "duplicate_pairs",
+    "zero_variance_columns",
+    "y_nan_count",
+    "y_inf_count",
+    "y_negative_count",
+    "rv_floor",
+    "degenerate_count",
+    "degenerate_rate",
 )
 
 _live_cache: dict[str, tuple] = {}
@@ -138,6 +158,15 @@ def _synthetic_frame(rows: int = 4, drop: str | None = None) -> pd.DataFrame:
         if name != drop:
             data[name] = np.zeros(rows, dtype=np.float64)
     return pd.DataFrame(data)
+
+
+def _varying_frame(rows: int = 4) -> pd.DataFrame:
+    """A synthetic frame whose indicators vary, so no column is constant."""
+    frame = _synthetic_frame(rows)
+    feature_engineering = _feature_engineering()
+    for index, name in enumerate(feature_engineering.INDICATORS):
+        frame[name] = np.arange(rows, dtype=np.float64) + index + 1.0
+    return frame
 
 
 def test_indicator_contract_count() -> None:
@@ -231,6 +260,185 @@ def test_missing_indicator_still_raises() -> None:
     with pytest.raises(ValueError) as excinfo:
         feature_engineering._extract_inputs(frame)
     assert "rsi_14" in str(excinfo.value)
+
+
+def test_x_nan_raises_named_error() -> None:
+    feature_engineering = _feature_engineering()
+    frame = _synthetic_frame()
+    frame.loc[1, "rsi_14"] = np.nan
+    with pytest.raises(ValueError) as excinfo:
+        feature_engineering._extract_inputs(frame)
+    message = str(excinfo.value)
+    assert "1 NaNs" in message
+    assert "0 infs" in message
+
+
+def test_x_inf_raises_named_error() -> None:
+    feature_engineering = _feature_engineering()
+    frame = _synthetic_frame()
+    frame.loc[1, "rsi_14"] = np.inf
+    with pytest.raises(ValueError) as excinfo:
+        feature_engineering._extract_inputs(frame)
+    message = str(excinfo.value)
+    assert "0 NaNs" in message
+    assert "1 infs" in message
+
+
+def test_y_nan_raises_named_error() -> None:
+    feature_engineering = _feature_engineering()
+    frame = _synthetic_frame()
+    frame.loc[1, "realized_volatility_5d"] = np.nan
+    with pytest.raises(ValueError) as excinfo:
+        feature_engineering._extract_inputs(frame)
+    message = str(excinfo.value)
+    assert "1 NaNs" in message
+    assert "0 infs" in message
+    assert "0 negative values" in message
+
+
+def test_y_inf_raises_named_error() -> None:
+    feature_engineering = _feature_engineering()
+    frame = _synthetic_frame()
+    frame.loc[1, "realized_volatility_5d"] = np.inf
+    with pytest.raises(ValueError) as excinfo:
+        feature_engineering._extract_inputs(frame)
+    message = str(excinfo.value)
+    assert "0 NaNs" in message
+    assert "1 infs" in message
+    assert "0 negative values" in message
+
+
+def test_y_negative_raises_named_error() -> None:
+    feature_engineering = _feature_engineering()
+    frame = _synthetic_frame()
+    frame.loc[1, "realized_volatility_5d"] = -0.01
+    with pytest.raises(ValueError) as excinfo:
+        feature_engineering._extract_inputs(frame)
+    message = str(excinfo.value)
+    assert "0 NaNs" in message
+    assert "0 infs" in message
+    assert "1 negative values" in message
+
+
+def test_degenerate_mass_warns_and_records() -> None:
+    feature_engineering = _feature_engineering()
+    from packages.ml.model.config import get_config
+
+    floor = float(get_config()["rv_floor"])
+    frame = _varying_frame()
+    frame.loc[0, "realized_volatility_5d"] = 0.0
+    frame.loc[1, "realized_volatility_5d"] = floor
+
+    with mock.patch.object(feature_engineering.logger, "warning") as warning:
+        _, _, metadata = feature_engineering._extract_inputs(frame)
+
+    record = metadata["input_checks"]
+    assert record["rv_floor"] == pytest.approx(floor)
+    assert record["degenerate_count"] == 2
+    assert record["degenerate_rate"] == pytest.approx(0.5)
+    warning.assert_called_once()
+    message = warning.call_args.args[0]
+    assert "2 rows" in message
+    assert f"{floor:g}" in message
+    assert "50.000000%" in message
+
+
+def test_validate_extracted_inputs_returns_clean_record() -> None:
+    feature_engineering = _feature_engineering()
+    from packages.ml.model.config import get_config
+
+    frame = _varying_frame()
+    X = frame[feature_engineering.INDICATORS].values
+    Y = frame["realized_volatility_5d"].values
+
+    with mock.patch.object(feature_engineering.logger, "warning") as warning:
+        record = feature_engineering.validate_extracted_inputs(
+            X, Y, frame["date"].values, frame["ticker"].values
+        )
+    warning.assert_not_called()
+
+    assert set(record) == set(INPUT_CHECKS_KEYS)
+    assert record["n_rows"] == X.shape[0]
+    assert record["n_features"] == len(feature_engineering.INDICATORS)
+    assert record["x_nan_count"] == record["x_inf_count"] == 0
+    assert list(record["x_nan_rates"]) == list(feature_engineering.INDICATORS)
+    assert list(record["x_inf_rates"]) == list(feature_engineering.INDICATORS)
+    assert all(rate == 0.0 for rate in record["x_nan_rates"].values())
+    assert all(rate == 0.0 for rate in record["x_inf_rates"].values())
+    assert record["duplicate_pairs"] == 0
+    assert record["zero_variance_columns"] == []
+    assert record["y_nan_count"] == record["y_inf_count"] == 0
+    assert record["y_negative_count"] == 0
+    assert record["degenerate_count"] == 0
+    assert record["degenerate_rate"] == 0.0
+    assert record["rv_floor"] == pytest.approx(float(get_config()["rv_floor"]))
+
+
+def test_input_checks_record_clean_live_shape() -> None:
+    frame, _, Y, metadata = _live_inputs()
+    feature_engineering = _feature_engineering()
+    from packages.ml.model.config import get_config
+
+    assert set(metadata) >= {
+        "date",
+        "ticker",
+        "n_indicators",
+        "n_ticker_features",
+        "dataset",
+        "input_checks",
+    }
+    assert set(_pin(metadata)) == set(PIN_KEYS)
+
+    record = metadata["input_checks"]
+    assert set(record) == set(INPUT_CHECKS_KEYS)
+    assert record["n_rows"] == frame.shape[0]
+    assert record["n_features"] == feature_engineering.EXPECTED_INDICATOR_COUNT
+    assert record["x_nan_count"] == 0
+    assert record["x_inf_count"] == 0
+
+    expected_names = list(feature_engineering.INDICATORS)
+    assert list(record["x_nan_rates"]) == expected_names
+    assert list(record["x_inf_rates"]) == expected_names
+    assert all(rate == 0.0 for rate in record["x_nan_rates"].values())
+    assert all(rate == 0.0 for rate in record["x_inf_rates"].values())
+
+    assert record["duplicate_pairs"] == 0
+    assert record["zero_variance_columns"] == []
+
+    floor = float(get_config()["rv_floor"])
+    assert record["rv_floor"] == pytest.approx(floor)
+    assert record["y_nan_count"] == 0
+    assert record["y_inf_count"] == 0
+    assert record["y_negative_count"] == 0
+    assert record["degenerate_count"] == int(np.count_nonzero(Y <= floor))
+    assert record["degenerate_rate"] == pytest.approx(
+        record["degenerate_count"] / Y.size
+    )
+
+
+def test_input_checks_record_constant_column_and_duplicated_pair() -> None:
+    feature_engineering = _feature_engineering()
+    frame = _varying_frame()
+    frame["rsi_14"] = 7.0
+    duplicated = pd.concat([frame, frame.iloc[[0]]], ignore_index=True)
+
+    _, _, metadata = feature_engineering._extract_inputs(duplicated)
+
+    record = metadata["input_checks"]
+    assert record["n_rows"] == duplicated.shape[0] == 5
+    assert record["zero_variance_columns"] == ["rsi_14"]
+    assert record["duplicate_pairs"] == 1
+    assert record["x_nan_count"] == 0
+    assert record["x_inf_count"] == 0
+    assert record["degenerate_count"] == 0
+
+
+def test_phase_4_finiteness_backstop_kept() -> None:
+    text = TRAINING_PATH.read_text(encoding="utf-8")
+    assert "if not np.isfinite(y).all():" in text
+    assert "finite = np.isfinite(X)" in text
+    assert "Invalid feature values" in text
+    assert "Invalid target values" in text
 
 
 def test_phase_2_builds_metadata_from_extraction_helper() -> None:

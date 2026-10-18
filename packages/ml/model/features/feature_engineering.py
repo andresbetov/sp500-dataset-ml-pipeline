@@ -7,6 +7,7 @@ from pathlib import Path
 import joblib
 import numpy as np
 import pandas as pd
+from packages.ml.model.config import get_config
 from packages.ml.model.utils import ARTIFACTS_DIR, get_project_paths
 
 logger = logging.getLogger(__name__)
@@ -107,12 +108,113 @@ def _dataset_pin(df: pd.DataFrame) -> dict:
     }
 
 
+def validate_extracted_inputs(
+    X: np.ndarray,
+    Y: np.ndarray,
+    dates: np.ndarray,
+    tickers: np.ndarray,
+) -> dict:
+    """Validate the extracted model inputs and return the checks record.
+
+    The record is attached to the Phase-2 metadata as ``input_checks`` and has
+    exactly these keys: ``n_rows``, ``n_features``, ``x_nan_count``,
+    ``x_inf_count``, ``x_nan_rates``, ``x_inf_rates``, ``duplicate_pairs``,
+    ``zero_variance_columns``, ``y_nan_count``, ``y_inf_count``,
+    ``y_negative_count``, ``rv_floor``, ``degenerate_count``,
+    ``degenerate_rate``. Per-column rates are fractions keyed by indicator
+    name.
+
+    Non-finite X and non-finite or negative Y are contract violations and
+    raise a named ``ValueError`` before any fit path sees the arrays. Duplicate
+    ``(ticker, date)`` pairs and constant columns are recorded, not raised.
+    Target mass at or below the configured volatility floor is a dataset
+    property: it is recorded and warned about, never raised.
+    """
+    X = np.asarray(X)
+    Y = np.asarray(Y)
+    n_rows = int(X.shape[0])
+    n_features = int(X.shape[1])
+    rv_floor = float(get_config()["rv_floor"])
+
+    finite_x = np.isfinite(X)
+    if not finite_x.all():
+        nonfinite = X[~finite_x]
+        x_nan_count = int(np.isnan(nonfinite).sum())
+        x_inf_count = int(np.isinf(nonfinite).sum())
+        raise ValueError(
+            f"Invalid feature values. Found {x_nan_count} NaNs and {x_inf_count} infs"
+        )
+    del finite_x
+
+    feature_names = list(INDICATORS[:n_features])
+    if len(feature_names) != n_features:
+        feature_names = [f"feature_{index}" for index in range(n_features)]
+
+    def _rate(count: int) -> float:
+        return float(count) / n_rows if n_rows else 0.0
+
+    x_nan_counts = np.isnan(X).sum(axis=0)
+    x_inf_counts = np.isinf(X).sum(axis=0)
+    x_nan_rates = {
+        name: _rate(int(count)) for name, count in zip(feature_names, x_nan_counts)
+    }
+    x_inf_rates = {
+        name: _rate(int(count)) for name, count in zip(feature_names, x_inf_counts)
+    }
+
+    duplicate_pairs = int(
+        pd.MultiIndex.from_arrays([np.asarray(tickers), np.asarray(dates)])
+        .duplicated()
+        .sum()
+    )
+
+    column_spreads = X.max(axis=0) - X.min(axis=0)
+    zero_variance_columns = [
+        name for name, spread in zip(feature_names, column_spreads) if spread == 0
+    ]
+
+    y_nan_count = int(np.isnan(Y).sum())
+    y_inf_count = int(np.isinf(Y).sum())
+    y_negative_count = int(np.count_nonzero(Y < 0))
+    if y_nan_count or y_inf_count or y_negative_count:
+        raise ValueError(
+            f"Invalid target values. Found {y_nan_count} NaNs, {y_inf_count} infs, "
+            f"and {y_negative_count} negative values"
+        )
+
+    degenerate_count = int(np.count_nonzero(Y <= rv_floor))
+    degenerate_rate = _rate(degenerate_count)
+    if degenerate_count:
+        logger.warning(
+            f"Degenerate target mass: {degenerate_count} rows at or below rv_floor "
+            f"{rv_floor:g} ({degenerate_rate:.6%} of {n_rows} rows)"
+        )
+
+    return {
+        "n_rows": n_rows,
+        "n_features": n_features,
+        "x_nan_count": int(x_nan_counts.sum()),
+        "x_inf_count": int(x_inf_counts.sum()),
+        "x_nan_rates": x_nan_rates,
+        "x_inf_rates": x_inf_rates,
+        "duplicate_pairs": duplicate_pairs,
+        "zero_variance_columns": zero_variance_columns,
+        "y_nan_count": y_nan_count,
+        "y_inf_count": y_inf_count,
+        "y_negative_count": y_negative_count,
+        "rv_floor": rv_floor,
+        "degenerate_count": degenerate_count,
+        "degenerate_rate": degenerate_rate,
+    }
+
+
 def _extract_inputs(df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray, dict]:
     """Extract the pinned model inputs from a loaded dataset frame.
 
     Returns X (the 37 pinned indicators in contract order), Y (the realized
     volatility target), and the metadata later phases consume: the date and
-    ticker columns, the feature counts, and the pinned dataset record.
+    ticker columns, the feature counts, the pinned dataset record, and the
+    extraction input checks.
     """
     # Extract metadata (original ticker and date columns for reference)
     date_column = df["date"].values
@@ -129,6 +231,10 @@ def _extract_inputs(df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray, dict]:
     # Extract target: realized_volatility_5d (continuous volatility values)
     Y = df["realized_volatility_5d"].values
 
+    # Fail loud on corrupt inputs and record the extraction diagnostics before
+    # any metadata or array is written.
+    input_checks = validate_extracted_inputs(X, Y, date_column, ticker_column)
+
     # Create metadata dict for cross-validation
     metadata = {
         "date": date_column,
@@ -136,6 +242,7 @@ def _extract_inputs(df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray, dict]:
         "n_indicators": len(INDICATORS),
         "n_ticker_features": 0,
         "dataset": _dataset_pin(df),
+        "input_checks": input_checks,
     }
     return X, Y, metadata
 
@@ -147,8 +254,8 @@ def phase_2_feature_selection() -> tuple[np.ndarray, np.ndarray, dict, None]:
     Returns:
         X: Feature matrix (n_samples, n_features) = the 37 pinned indicators only
         Y: Target vector (n_samples,) with continuous volatility values
-        metadata: Dict with 'date' and 'ticker' columns, n_indicators, n_ticker_features
-            and the pinned dataset record
+        metadata: Dict with 'date' and 'ticker' columns, n_indicators, n_ticker_features,
+            the pinned dataset record, and the extraction input checks
         encoder: None (no ticker encoding applied)
     """
     logger.info("Phase 2: Feature Selection (No Ticker Encoding)")
