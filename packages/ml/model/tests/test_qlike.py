@@ -245,6 +245,70 @@ def test_gradient_sign() -> None:
     assert np.all(hess > 0.0)
 
 
+_DASH_VARIANTS = "\u2212\u2010\u2011\u2012\u2013\u2014\u2015\uFE58\uFE63\uFF0D"
+
+
+def _normalized_docstring(function) -> str:
+    """Lowercase, collapse whitespace, and unify unicode dashes to ASCII hyphens."""
+    text = (function.__doc__ or "").lower()
+    for dash in _DASH_VARIANTS:
+        text = text.replace(dash, "-")
+    return " ".join(text.split())
+
+
+def _has_signed_identity(text: str) -> bool:
+    """Accept either orientation of the signed QLIKE/Hansen-Lunde identity."""
+    sigma = r"(?:h|sigma|σ)"
+    ln_sigma = rf"l(?:n|og)\s*\(?\s*{sigma}\s*\)?"
+    qlike_first = rf"qlike\s*=\s*hl\s*-\s*{ln_sigma}\s*-\s*1"
+    hl_first = rf"hl\s*=\s*qlike\s*\+\s*{ln_sigma}\s*\+\s*1"
+    return bool(re.search(qlike_first, text) or re.search(hl_first, text))
+
+
+def _has_scale_note(text: str) -> bool:
+    """Require sigma-scale, per-day, variance-comparison, and 4-6x ratio tokens."""
+    sigma_scale = "sigma" in text
+    per_day = bool(re.search(r"per[- ]?day|daily", text))
+    variance_scale = "variance" in text
+    ratio = bool(
+        re.search(r"4\s*(?:-|to)\s*6\s*(?:x|×|times)", text)
+        or re.search(r"4\s*(?:x|×|times)\s*(?:-|to)\s*6", text)
+    )
+    return sigma_scale and per_day and variance_scale and ratio
+
+
+def test_docsign_identity_and_scale_note() -> None:
+    """The qlike_loss docstring states the signed identity and the sigma scale.
+
+    Signal: this test fails if the documented sign is flipped (for example
+    ``QLIKE = HL + ln(h) - 1``) or if the scale note is missing. At the branch
+    point the docstring carries neither the signed identity nor the scale tokens,
+    so both content checks below are red; the trailing block pins the numeric
+    anchors, proving the change is docstring-only.
+    """
+    text = _normalized_docstring(training.qlike_loss)
+
+    # Negative controls: the matchers reject a flipped sign either way and an
+    # empty document, so merely mentioning "QLIKE" cannot satisfy them.
+    for flipped in ("qlike = hl + ln(h) - 1", "hl = qlike - ln(h) + 1"):
+        assert not _has_signed_identity(flipped)
+    assert not _has_scale_note("")
+
+    assert _has_signed_identity(text), (
+        "qlike_loss docstring lacks the signed identity QLIKE = HL - ln(h) - 1 "
+        "(or its HL = QLIKE + ln(h) + 1 equivalent)"
+    )
+    assert _has_scale_note(text), (
+        "qlike_loss docstring lacks the sigma scale declaration "
+        "(sigma, per-day, variance, and 4-6x tokens)"
+    )
+
+    low = training.qlike_loss(np.array([-23.025851]), np.array([0.0]))
+    assert low == pytest.approx(22.025851, rel=1e-9)
+    high = training.qlike_loss(np.array([23.025851]), np.array([0.0]))
+    assert high == pytest.approx(1e10, rel=1e-6)
+
+
 if __name__ == "__main__":
     failures = 0
     for _name, _fn in list(globals().items()):
