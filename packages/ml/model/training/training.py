@@ -10,7 +10,11 @@ import pandas as pd
 from packages.ml.model.config import get_config
 from packages.ml.model.cross_validation.cv_utils import load_folds_metadata
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
-from packages.ml.model.training.har_benchmark import fit_har_benchmark, load_har_regressors
+from packages.ml.model.training.har_benchmark import (
+	HAR_WARMUP_DAYS,
+	fit_har_benchmark,
+	load_har_regressors,
+)
 from packages.ml.model.training.model_trainer import train_xgboost_model
 from packages.ml.model.training.qlike_objective import qlike_mean
 from packages.ml.model.utils import ARTIFACTS_DIR
@@ -308,6 +312,7 @@ def _aggregate_fold_results(fold_predictions_list: list) -> tuple[dict, dict]:
 			"n_test_floor_excluded": int(pred_dict["n_test_floor_excluded"]),
 			"n_test_scored": int(pred_dict["n_test_scored"]),
 			"n_train_floor_excluded": int(pred_dict["n_train_floor_excluded"]),
+			"n_warmup_excluded": int(pred_dict["n_warmup_excluded"]),
 			"headline_row_set": pred_dict["headline_row_set"],
 			"n_features": int(pred_dict["n_features"]),
 			"model_path": pred_dict["fold_model_path"],
@@ -355,6 +360,11 @@ def _save_training_results(
 		"target": "log(realized_volatility_5d)",
 		"r2_convention": "log-target scale, fold-own-mean (sklearn r2_score)",
 		"qlike": "h/f - ln(h/f) - 1 with h=exp(actual), f=exp(forecast); target in native per-day sigma units",
+		"warmup_days": HAR_WARMUP_DAYS,
+		"warmup_definition": (
+			f"HAR fit excludes the first {HAR_WARMUP_DAYS} dates of each ticker's "
+			"series (trailing windows incomplete); scoring rows are unchanged"
+		),
 		"headline_row_set": HEADLINE_ROW_SET,
 		"folds": {
 			fold_key: {
@@ -377,9 +387,11 @@ def phase_4_training() -> tuple[dict, dict, list]:
 	Each fold_i_model trains exclusively on fold_i_train and is evaluated on fold_i_test.
 	The modeled target is log(RV) — the Yang-Zhang variance is closer to log-normal and
 	the fold models minimize QLIKE on that log target — and every fold also fits the
-	canonical HAR-RV benchmark on its training rows only. Degenerate at-or-below-floor
-	target rows are flat-window artifacts and are excluded from fitting and scoring
-	under the single floor policy; the retained row set is declared and counted.
+	canonical HAR-RV benchmark on its training rows only, minus the per-ticker warm-up
+	(the first HAR_WARMUP_DAYS dates of each ticker's series, whose trailing windows
+	are incomplete). Degenerate at-or-below-floor target rows are flat-window artifacts
+	and are excluded from fitting and scoring under the single floor policy; the
+	retained row set is declared and counted.
 
 	Returns:
 		validation_predictions, fold_training_summary, fold_model_paths
@@ -411,7 +423,9 @@ def phase_4_training() -> tuple[dict, dict, list]:
 		f"(excluded from fitting and scoring; headline row set: {HEADLINE_ROW_SET})"
 	)
 
-	har_regressors = load_har_regressors(metadata["date"])
+	# Pair-verified components; the mask flags each ticker's first
+	# HAR_WARMUP_DAYS dates (incomplete trailing windows) for fit exclusion only.
+	har_regressors, har_warmup_mask = load_har_regressors(metadata["date"], metadata["ticker"])
 
 	# Train 5 models (1 per fold) with strict temporal separation
 	fold_predictions_list = []
@@ -485,8 +499,10 @@ def phase_4_training() -> tuple[dict, dict, list]:
 			row_policy=row_policy,
 		)
 
-		# Canonical HAR-RV benchmark on the same floor-retained rows, fitted on
-		# train only and scored on the retained test rows.
+		# Canonical HAR-RV benchmark on the same floor-retained rows, fitted on the
+		# train rows beyond the per-ticker warm-up only and scored on the retained
+		# test rows (scored unchanged even when a ticker's series starts inside the
+		# block).
 		har_result = fit_har_benchmark(
 			train_indices=train_indices,
 			test_indices=test_indices_scored,
@@ -494,7 +510,20 @@ def phase_4_training() -> tuple[dict, dict, list]:
 			target_log_test=y_test,
 			regressors=har_regressors,
 			forecast_floor=RV_FLOOR,
+			warmup_mask=har_warmup_mask,
 		)
+
+		# The warm-up filter applies to the fit only: a late index entrant's first
+		# dates can fall inside a test block, and those scoring rows are scored
+		# unchanged (their components keep the trailing-only math). The count
+		# cross-check keeps the scoring set identical to the fold model's.
+		if har_result["n_test"] != n_test_scored:
+			raise ValueError(
+				f"Fold {fold_idx} ({fold_key}): the HAR benchmark scored "
+				f"{har_result['n_test']} rows but the fold model scored "
+				f"{n_test_scored}; the warm-up mask must not filter scoring rows"
+			)
+
 		har_result.update(
 			{
 				"n_test_total": n_test_total,
@@ -507,10 +536,16 @@ def phase_4_training() -> tuple[dict, dict, list]:
 		har_result["har_qlike"] = qlike_loss(y_test, har_result.pop("forecast_log"))
 		predictions_dict["har_r2"] = har_result["har_r2"]
 		predictions_dict["har_qlike"] = har_result["har_qlike"]
+		predictions_dict["n_warmup_excluded"] = har_result["n_warmup_excluded"]
 		har_benchmark_results[fold_key] = har_result
 
 		logger.info(
-			f"    └─ HAR benchmark: R²={har_result['har_r2']:.4f}, QLIKE={har_result['har_qlike']:.6f}"
+			f"    └─ HAR benchmark: R²={har_result['har_r2']:.4f}, "
+			f"QLIKE={har_result['har_qlike']:.6f} "
+			f"(fit {har_result['n_train']:,} rows; "
+			f"{har_result['n_warmup_excluded']:,} warm-up rows of "
+			f"{HAR_WARMUP_DAYS} dates/ticker excluded; "
+			f"{har_result['n_warmup_test_rows']:,} warm-up rows scored unchanged)"
 		)
 
 		fold_predictions_list.append(predictions_dict)
