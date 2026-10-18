@@ -15,13 +15,14 @@ uv sync                             # create or update .venv
 
 python packages/ml/dataset/main.py  # Phase 1 — needs network + Kaggle creds
 python packages/ml/model/main.py    # Phases 2-5 — local only
+python -m packages.ml.model.main    # Phases 2-5 — same run, module form
 ```
 
-Both take no arguments and read no environment variables. They are cwd-independent (paths resolve from `__file__`), but running from the repo root is the documented path. `visualization/visualize.py` is not a documented entry point: run by path it cannot resolve its `visualization.*` and `utils` imports. It only works with `packages/ml/model` on `sys.path` — which is what `model/main.py` provides, or `python -m visualization.visualize` from that directory.
+Run both phases from the repository root. The dataset entry takes no arguments; the model entry takes only `--dry-run`, which logs the planned phases and exits. Both are cwd-independent (paths resolve from `__file__`), but running from the repo root is the documented path. `visualization/visualize.py` is not a documented entry point: run by path it cannot resolve its `packages.ml.model.*` imports. Run it as `python -m packages.ml.model.visualization.visualize` from the repo root instead.
 
 ## Hard rules
 
-1. **Run these as scripts.** `dataset/main.py` normalizes its package identity (PEP 366) so package-relative imports work from any cwd, and `import packages.ml.dataset` succeeds when run from the repo root; `model/main.py` keeps flat sibling imports and imports only from inside its directory. Entry calls stay behind `if __name__ == "__main__"`.
+1. **Run these as scripts.** Both entries normalize their package identity (PEP 366) when run by path and work from any cwd; the model entry uses package-absolute imports and the dataset entry uses package-relative imports, and `import packages.ml.dataset` / `import packages.ml.model.main` both succeed from the repo root. Entry calls stay behind `if __name__ == "__main__"`.
 2. **Phase 1 before Phases 2-5.** Phase 2 reads `data/processed/dataset.parquet` and fails immediately if it is missing. All generated data is gitignored, so a fresh clone has none.
 3. **Never commit generated output.** `packages/ml/model/artifacts/`, `data/model_outputs/`, `data/processed/dataset.parquet`, and `data/processed/ingestion_manifest.json` are gitignored (as are `*.pkl` and `*.joblib` anywhere in the tree, `data/` included); no other `data/` path is ignored, so check before adding anything there. Markdown is no longer ignored — the old blanket `*.md` rule was removed, so `AGENTS.md` and any new `.md` commit normally.
 4. **No absolute or machine-specific paths.** Everything resolves from `__file__`; `model/utils.py:get_project_paths` is the model path registry and `dataset/utils.py` holds the Phase 1 path constants. Keep it that way.
@@ -51,7 +52,7 @@ Both take no arguments and read no environment variables. They are cwd-independe
 
 - Use the `logging` module (`logger = logging.getLogger(__name__)`), not `print`. The handler format is identical in `dataset/utils.py` and `model/utils.py`.
 - Match each file's local indentation. These files are tab-indented: `model/features/feature_engineering.py`, `model/training/model_trainer.py`, `model/training/training.py`. In `feature_engineering.py` only the `INDICATORS` list uses tabs — its function bodies use 4 spaces. Everything else uses 4 spaces.
-- There are no classes; use module-level functions with type hints. `from __future__ import annotations` leads every module; of the seven `__init__.py` files only `model/visualization/__init__.py` carries it.
+- There are no classes; use module-level functions with type hints. `from __future__ import annotations` leads every module; all six `model/` package `__init__.py` files carry it, the two `dataset/` ones do not.
 - Errors fail fast: `raise ValueError` / `FileNotFoundError` with a message. Log-and-re-raise appears in `model/main.py` and in `training/_train_fold_model`; one block swallows instead — `training.py`'s metric computation, which writes NaN metrics.
 
 ## Verification workflow
@@ -59,7 +60,7 @@ Both take no arguments and read no environment variables. They are cwd-independe
 There are no tests. To check a change, run the phase you touched — both if the change spans `packages/ml/dataset` and `packages/ml/model`:
 
 1. `python packages/ml/dataset/main.py` — confirm it completes and logs the row and ticker counts it wrote, plus the "Dropped ... NaN rows" line and the parquet-then-JSON save order.
-2. `python packages/ml/model/main.py` — confirm 5 folds train and `artifacts/results/fold_training_summary.json` (per-fold R²/QLIKE) plus the HAR benchmark report are written.
+2. `python packages/ml/model/main.py` (or `python -m packages.ml.model.main`) — confirm 5 folds train and `artifacts/results/fold_training_summary.json` (per-fold R²/QLIKE) plus the HAR benchmark report are written. Add `--dry-run` to either form for a fast entry-point check: it logs the planned phases and exits before any phase runs.
 3. If commands or file layout changed, update `README.md` in the same change.
 
 Cap long-running or chatty commands: `python packages/ml/model/main.py 2>&1 | tail -c 4000`.

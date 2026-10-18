@@ -4,7 +4,7 @@ import logging
 
 import numpy as np
 import xgboost as xgb
-from config import get_config
+from packages.ml.model.config import get_config
 
 logger = logging.getLogger(__name__)
 

@@ -5,11 +5,11 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from visualization.data_loader import load_fold_training_summary
-from visualization.metrics_visualizer import generate_metrics_visualizations
-from visualization.temporal_analysis import generate_temporal_visualizations
-from visualization.performance_comparison import generate_performance_comparisons
-from visualization.training_diagnostics import generate_training_diagnostics, load_validation_predictions
+from packages.ml.model.visualization.data_loader import load_fold_training_summary
+from packages.ml.model.visualization.metrics_visualizer import generate_metrics_visualizations
+from packages.ml.model.visualization.temporal_analysis import generate_temporal_visualizations
+from packages.ml.model.visualization.performance_comparison import generate_performance_comparisons
+from packages.ml.model.visualization.training_diagnostics import generate_training_diagnostics, load_validation_predictions
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +34,7 @@ def generate_all_visualizations(
     predictions_dict = load_validation_predictions(predictions_path)
 
     if output_dir is None:
-        from utils import get_project_paths
+        from packages.ml.model.utils import get_project_paths
         output_dir = get_project_paths()["outputs_dir"]
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -59,7 +59,7 @@ def generate_all_visualizations(
 
 def main() -> None:
     """Run visualization generation as standalone script."""
-    from utils import setup_logging
+    from packages.ml.model.utils import setup_logging
     setup_logging()
 
     logger.info("Model Visualization — Generating all plots")

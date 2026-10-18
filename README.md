@@ -46,10 +46,12 @@ python packages/ml/dataset/main.py
 
 # Phases 2-5 — feature selection, temporal validation, training, evaluation
 python packages/ml/model/main.py
+# ... or the module form:
+python -m packages.ml.model.main
 # writes model artifacts and charts (see Outputs)
 ```
 
-Both scripts accept no arguments and read no environment variables, and both work from the repository root or from inside their own package directory.
+Both phases work from the repository root or from inside their own package directory, and the model phase runs the same through either form above. The model entry accepts one optional flag, `--dry-run`, which logs the planned phases and exits without running them.
 
 Phase 2 fails immediately if Phase 1 has not been run first. Because generated data is gitignored, a fresh clone always starts with Phase 1.
 

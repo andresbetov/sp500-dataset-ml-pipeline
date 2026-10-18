@@ -23,7 +23,7 @@ def load_fold_training_summary(summary_path: Path | None = None) -> pd.DataFrame
     """
     if summary_path is None:
         # Use default location from model/artifacts/results/
-        from utils import get_project_paths
+        from packages.ml.model.utils import get_project_paths
         paths = get_project_paths()
         summary_path = paths["artifacts_dir"] / "results" / "fold_training_summary.json"
 

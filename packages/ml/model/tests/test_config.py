@@ -1,14 +1,16 @@
 """Tests for the model package's config single source and its consumers.
 
-pytest is not installed yet, so this file also runs standalone:
+pytest is not installed yet, so this file also runs standalone from the
+repository root:
 
-    PYTHONPATH=packages/ml/model .venv/bin/python -B packages/ml/model/tests/test_config.py
+    .venv/bin/python -B packages/ml/model/tests/test_config.py
 """
 
 from __future__ import annotations
 
 import importlib
 import os
+import sys
 import tempfile
 import traceback
 from pathlib import Path
@@ -17,10 +19,14 @@ import joblib
 import numpy as np
 import yaml
 
-import config
-from cross_validation import cross_validator
-from training import model_trainer, training
-from utils import get_project_paths
+_REPO_ROOT = Path(__file__).resolve().parents[4]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from packages.ml.model import config
+from packages.ml.model.cross_validation import cross_validator
+from packages.ml.model.training import model_trainer, training
+from packages.ml.model.utils import get_project_paths
 
 REPO_ROOT = get_project_paths()["project_root"]
 ARTIFACTS_DIR = get_project_paths()["artifacts_dir"]

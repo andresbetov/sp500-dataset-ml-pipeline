@@ -12,9 +12,9 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
-from features.feature_engineering import INDICATORS
-from utils import ARTIFACTS_DIR
-from visualization.data_loader import load_fold_training_summary
+from packages.ml.model.features.feature_engineering import INDICATORS
+from packages.ml.model.utils import ARTIFACTS_DIR
+from packages.ml.model.visualization.data_loader import load_fold_training_summary
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +56,7 @@ def plot_actual_vs_predicted(predictions_dict: dict, output_path: Path | None = 
         Path to saved figure.
     """
     if output_path is None:
-        from utils import get_project_paths
+        from packages.ml.model.utils import get_project_paths
         output_path = get_project_paths()["outputs_dir"] / "actual_vs_predicted.png"
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -141,7 +141,7 @@ def plot_residuals(predictions_dict: dict, output_path: Path | None = None) -> P
         Path to saved figure.
     """
     if output_path is None:
-        from utils import get_project_paths
+        from packages.ml.model.utils import get_project_paths
         output_path = get_project_paths()["outputs_dir"] / "residuals_distribution.png"
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -215,7 +215,7 @@ def plot_feature_importance(predictions_dict: dict, summary_df: pd.DataFrame, ou
         Path to saved figure.
     """
     if output_path is None:
-        from utils import get_project_paths
+        from packages.ml.model.utils import get_project_paths
         output_path = get_project_paths()["outputs_dir"] / "feature_importance.png"
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -293,7 +293,7 @@ def plot_error_by_volatility_bin(predictions_dict: dict, output_path: Path | Non
         Path to saved figure.
     """
     if output_path is None:
-        from utils import get_project_paths
+        from packages.ml.model.utils import get_project_paths
         output_path = get_project_paths()["outputs_dir"] / "error_by_volatility_bin.png"
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -366,7 +366,7 @@ def generate_training_diagnostics(predictions_dict: dict | None = None, summary_
         summary_df = load_fold_training_summary()
 
     if output_dir is None:
-        from utils import get_project_paths
+        from packages.ml.model.utils import get_project_paths
         output_dir = get_project_paths()["outputs_dir"]
 
     output_dir.mkdir(parents=True, exist_ok=True)

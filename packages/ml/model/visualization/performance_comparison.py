@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from visualization.data_loader import load_fold_training_summary
+from packages.ml.model.visualization.data_loader import load_fold_training_summary
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +26,7 @@ def plot_metrics_comparison(summary_df: pd.DataFrame, output_path: Path | None =
         Path to saved figure
     """
     if output_path is None:
-        from utils import get_project_paths
+        from packages.ml.model.utils import get_project_paths
         output_path = get_project_paths()["outputs_dir"] / "metrics_comparison.png"
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -97,7 +97,7 @@ def plot_timing_breakdown(summary_df: pd.DataFrame, output_path: Path | None = N
         Path to saved figure
     """
     if output_path is None:
-        from utils import get_project_paths
+        from packages.ml.model.utils import get_project_paths
         output_path = get_project_paths()["outputs_dir"] / "timing_breakdown.png"
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -147,7 +147,7 @@ def plot_sample_distribution(summary_df: pd.DataFrame, output_path: Path | None 
         Path to saved figure
     """
     if output_path is None:
-        from utils import get_project_paths
+        from packages.ml.model.utils import get_project_paths
         output_path = get_project_paths()["outputs_dir"] / "sample_distribution.png"
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -202,7 +202,7 @@ def plot_feature_count_summary(summary_df: pd.DataFrame, output_path: Path | Non
         Path to saved figure
     """
     if output_path is None:
-        from utils import get_project_paths
+        from packages.ml.model.utils import get_project_paths
         output_path = get_project_paths()["outputs_dir"] / "feature_count_summary.png"
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -260,7 +260,7 @@ def generate_performance_comparisons(summary_df: pd.DataFrame | None = None, out
         summary_df = load_fold_training_summary()
 
     if output_dir is None:
-        from utils import get_project_paths
+        from packages.ml.model.utils import get_project_paths
         output_dir = get_project_paths()["outputs_dir"]
 
     output_dir.mkdir(parents=True, exist_ok=True)
