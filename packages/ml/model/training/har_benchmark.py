@@ -16,7 +16,7 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import r2_score
 
-from packages.ml.model.utils import get_project_paths
+from packages.ml.model.utils import get_project_paths, normalize_dates
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +40,9 @@ def load_har_regressors(dates: np.ndarray) -> np.ndarray:
         (n, 3) float64 array of [daily, weekly, monthly] variance components.
     """
     frame = pd.read_parquet(DATASET_PATH, columns=["ticker", "date", "log_return"])
-    if len(frame) != len(dates) or not np.array_equal(frame["date"].to_numpy(), dates):
+    frame_dates = normalize_dates(frame["date"].to_numpy())
+    dates = normalize_dates(dates)
+    if len(frame) != len(dates) or not np.array_equal(frame_dates, dates):
         raise ValueError(
             "HAR regressors are misaligned with the model input rows: the dataset parquet "
             "and the Phase 2 metadata disagree on the row order"

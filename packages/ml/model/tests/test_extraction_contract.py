@@ -433,6 +433,45 @@ def test_input_checks_record_constant_column_and_duplicated_pair() -> None:
     assert record["degenerate_count"] == 0
 
 
+def test_date_contract() -> None:
+    _, _, _, metadata = _live_inputs()
+    dates = metadata["date"]
+    assert isinstance(dates, np.ndarray)
+    assert dates.dtype == np.dtype("datetime64[ns]")
+
+    from packages.ml.model.utils import normalize_dates
+
+    # A unit-converted copy carries the same instants; normalizing returns the
+    # canonical array with the order and length preserved.
+    unit_converted = dates.astype("datetime64[s]")
+    normalized = normalize_dates(unit_converted)
+    assert isinstance(normalized, np.ndarray)
+    assert normalized.dtype == np.dtype("datetime64[ns]")
+    assert len(normalized) == len(dates)
+    assert np.array_equal(normalized, dates)
+
+    # String input goes through pandas; naive strings are UTC and an offset is
+    # converted to UTC before the timezone is dropped.
+    parsed = normalize_dates(np.array(["2020-01-01", "2020-01-03"]))
+    assert parsed.dtype == np.dtype("datetime64[ns]")
+    assert np.array_equal(
+        parsed, np.array(["2020-01-01", "2020-01-03"], dtype="datetime64[ns]")
+    )
+    offset = normalize_dates(np.array(["2020-01-02T00:00:00+02:00"]))
+    assert offset[0] == np.datetime64("2020-01-01T22:00:00")
+
+    # Missing dates raise the named error and count the NaN dates, rather than
+    # letting a silent mismatch reach the row alignment.
+    missing = np.array(
+        ["2020-01-01", "NaT", "2020-01-03", "NaT"], dtype="datetime64[ns]"
+    )
+    with pytest.raises(ValueError) as excinfo:
+        normalize_dates(missing)
+    message = str(excinfo.value)
+    assert "2 missing date" in message
+    assert "NaT" in message
+
+
 def test_phase_4_finiteness_backstop_kept() -> None:
     text = TRAINING_PATH.read_text(encoding="utf-8")
     assert "if not np.isfinite(y).all():" in text

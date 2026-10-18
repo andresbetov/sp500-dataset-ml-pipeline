@@ -8,7 +8,7 @@ import joblib
 import numpy as np
 import pandas as pd
 from packages.ml.model.config import get_config
-from packages.ml.model.utils import ARTIFACTS_DIR, get_project_paths
+from packages.ml.model.utils import ARTIFACTS_DIR, get_project_paths, normalize_dates
 
 logger = logging.getLogger(__name__)
 
@@ -216,8 +216,10 @@ def _extract_inputs(df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray, dict]:
     ticker columns, the feature counts, the pinned dataset record, and the
     extraction input checks.
     """
-    # Extract metadata (original ticker and date columns for reference)
-    date_column = df["date"].values
+    # Extract metadata (original ticker and date columns for reference); the
+    # date column is canonicalized so representation-only differences do not
+    # reach the row-alignment comparisons downstream.
+    date_column = normalize_dates(df["date"].values)
     ticker_column = df["ticker"].values
 
     missing_indicators = [name for name in INDICATORS if name not in df.columns]
