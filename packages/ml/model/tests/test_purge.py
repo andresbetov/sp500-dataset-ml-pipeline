@@ -39,9 +39,12 @@ from packages.ml.model import config as model_config
 from packages.ml.model.cross_validation import cross_validator
 from packages.ml.model.training import training
 
-# Exactly divisible by the N_FOLDS + 1 = 6 date blocks, so every block boundary
+# Total synthetic calendar: the 500-date holdout plus a 36-date fold remainder,
+# exactly divisible by the N_FOLDS + 1 = 6 date blocks, so every block boundary
 # is an exact date index.
-N_DATES = 60
+N_DATES = 536
+HOLDOUT_N_DATES = 500
+FOLD_N_DATES = N_DATES - HOLDOUT_N_DATES
 TICKERS = ("AAA", "BBB", "CCC")
 EXCLUDED_DATES = 5
 FOLD_PAYLOAD_KEYS = frozenset(
@@ -52,13 +55,20 @@ FOLD_PAYLOAD_KEYS = frozenset(
         "train_date_max",
         "test_date_min",
         "test_date_max",
-        "gap_days",
         "n_train",
         "n_test",
         "first_test_idx",
         "last_train_idx",
         "purge_train_count",
+        "regime_distribution_train",
+        "regime_distribution_test",
+        "n_dates",
+        "purge_horizon_days",
+        "separation_units",
     }
+)
+PAYLOAD_METADATA_KEYS = frozenset(
+    {"schema_version", "feature_names", "holdout", "n_dates"}
 )
 
 MODEL_ROOT = REPO_ROOT / "packages" / "ml" / "model"
@@ -69,14 +79,15 @@ INLINE_FOLD_MINIMA = re.compile(
     r"len\(\s*\w*(?:train|test)_indices\s*\)\s*(?:==|<=|<)\s*0"
 )
 
-# The live calendar at the branch point: 6504 unique trading dates with edges
-# exactly divisible by the six blocks.
+# The live calendar at the branch point: 6504 unique trading dates, the final
+# 500 reserved, leaving 6004 fold dates whose six block edges are exact.
 LIVE_N_DATES = 6504
-LIVE_EDGES = [0, 1084, 2168, 3252, 4336, 5420, 6504]
+LIVE_HOLDOUT_N_DATES = 500
+LIVE_FOLD_EDGES = [0, 1000, 2001, 3002, 4002, 5003, 6004]
 
-# (N_FOLDS + 1) * (PURGE_HORIZON_D + 1) with the current config; the constants
-# test re-derives it from the module symbols.
-MINIMUM_N_DATES = 36
+# HOLDOUT_N_DATES + (N_FOLDS + 1) * (PURGE_HORIZON_D + 1) with the current
+# config; the test re-derives it from the module symbols.
+MINIMUM_N_DATES = 536
 
 
 def _function(tree: ast.Module, name: str) -> ast.FunctionDef:
@@ -98,8 +109,16 @@ def _synthetic_calendar(n_dates: int) -> tuple[np.ndarray, np.ndarray, np.ndarra
 
 
 def _synthetic_inputs() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Rows over a synthetic trading calendar and their unique-date positions."""
-    return _synthetic_calendar(N_DATES)
+    """Rows over the synthetic calendar and their positions in the fold dates.
+
+    The final HOLDOUT_N_DATES calendar dates are reserved before fold
+    construction, so the positions are relative to the remainder and the
+    reserved rows carry the out-of-range position len(fold_dates).
+    """
+    dates, unique_dates, _ = _synthetic_calendar(N_DATES)
+    fold_dates = unique_dates[:FOLD_N_DATES]
+    tpos = np.searchsorted(fold_dates, dates)
+    return dates, fold_dates, tpos
 
 
 def _write_phase_2_inputs(root: Path, n_dates: int) -> None:
@@ -209,8 +228,10 @@ def test_separation_predicate_uses_the_configured_minimum_and_train_purge() -> N
 
 
 def test_fold_structure_and_persisted_payload_without_the_test_purge_key() -> None:
-    """Blocks partition the remainder, windows expand, and the payload loses one key."""
+    """Blocks partition the remainder, windows expand, and typed keys replace gap_days."""
     dates, unique_dates, tpos = _synthetic_inputs()
+    full_unique_dates = np.sort(np.unique(dates))
+    holdout_start = full_unique_dates[FOLD_N_DATES]
     n_rows = len(dates)
     metadata = {
         "date": dates,
@@ -238,9 +259,12 @@ def test_fold_structure_and_persisted_payload_without_the_test_purge_key() -> No
         persisted = joblib.load(persisted_path)
 
     assert set(folds) == {f"fold_{idx}" for idx in range(cross_validator.N_FOLDS)}
-    assert set(persisted) == set(folds)
+    assert set(persisted) == set(folds) | PAYLOAD_METADATA_KEYS
+    assert persisted["schema_version"] == 2
+    assert persisted["n_dates"] == FOLD_N_DATES
+    assert persisted["holdout"]["n_dates"] == HOLDOUT_N_DATES
 
-    boundaries = cross_validator._fold_boundaries(len(unique_dates))
+    boundaries = cross_validator._fold_boundaries(FOLD_N_DATES)
     test_blocks = []
     previous_kept_dates = None
     previous_train_n = None
@@ -250,14 +274,26 @@ def test_fold_structure_and_persisted_payload_without_the_test_purge_key() -> No
         block_start = int(boundaries[fold_idx + 1])
         block_end = int(boundaries[fold_idx + 2])
 
-        # The persisted payload keeps every key except the removed test purge.
+        # Typed gap keys replace gap_days; the test purge key stays gone.
         assert set(stored) == FOLD_PAYLOAD_KEYS, fold_idx
         assert FOLD_PAYLOAD_KEYS <= set(fold), fold_idx
         assert "purge_test_count" not in fold, fold_idx
+        assert "gap_days" not in fold, fold_idx
+        assert "gap_days" not in stored, fold_idx
         assert "purge_test_count" not in stored, fold_idx
-        assert stored["gap_days"] == cross_validator.PURGE_HORIZON_D, fold_idx
+        assert stored["purge_horizon_days"] == cross_validator.PURGE_HORIZON_D, fold_idx
+        assert stored["separation_units"] == cross_validator.SEPARATION_MIN, fold_idx
+        assert stored["n_dates"] == FOLD_N_DATES, fold_idx
         assert stored["n_train"] == len(stored["train_indices"]), fold_idx
         assert stored["n_test"] == len(stored["test_indices"]), fold_idx
+
+        # No fold row reaches into the reserved holdout window.
+        assert (
+            metadata["date"][np.asarray(stored["train_indices"])] < holdout_start
+        ).all(), fold_idx
+        assert (
+            metadata["date"][np.asarray(stored["test_indices"])] < holdout_start
+        ).all(), fold_idx
 
         stored_train_tpos = tpos[np.asarray(stored["train_indices"])]
         stored_test_tpos = tpos[np.asarray(stored["test_indices"])]
@@ -321,7 +357,7 @@ def test_index_gap_equals_trading_day_distance_on_the_synthetic_calendar() -> No
 def test_train_side_purge_count_is_unchanged() -> None:
     """The one-sided change leaves the training-side purge width untouched."""
     _, _, tpos = _synthetic_inputs()
-    boundaries = cross_validator._fold_boundaries(N_DATES)
+    boundaries = cross_validator._fold_boundaries(FOLD_N_DATES)
 
     counts = []
     for fold_idx in range(cross_validator.N_FOLDS):
@@ -338,10 +374,12 @@ def test_train_side_purge_count_is_unchanged() -> None:
 def test_model_training_indices_floor_semantics_unchanged() -> None:
     """The training-row floor filter still drops at-or-below-floor rows only."""
     _, _, tpos = _synthetic_inputs()
-    boundaries = cross_validator._fold_boundaries(N_DATES)
+    boundaries = cross_validator._fold_boundaries(FOLD_N_DATES)
+    # Fold 1 keeps enough training rows to exercise the floor split.
     train_indices, _, _ = cross_validator._split_date_blocks(
-        tpos, int(boundaries[1]), int(boundaries[2])
+        tpos, int(boundaries[2]), int(boundaries[3])
     )
+    assert len(train_indices) >= 6
 
     y = np.full(tpos.shape[0], 0.25)
     y[train_indices[:3]] = 0.0
@@ -477,10 +515,12 @@ def test_purge_span_constants_come_from_config() -> None:
     assert cross_validator.PURGE_HORIZON_D == loaded["folds"]["purge_horizon_days"] == 5
     assert cross_validator.SEPARATION_MIN == loaded["folds"]["separation_min"] == 6
     assert cross_validator.LABEL_HORIZON_DAYS == loaded["folds"]["label_horizon_days"]
+    assert cross_validator.HOLDOUT_N_DATES == loaded["holdout"]["n_dates"] == 500
     assert (
-        (cross_validator.N_FOLDS + 1) * (cross_validator.PURGE_HORIZON_D + 1)
+        cross_validator.HOLDOUT_N_DATES
+        + (cross_validator.N_FOLDS + 1) * (cross_validator.PURGE_HORIZON_D + 1)
         == MINIMUM_N_DATES
-        == 36
+        == 536
     )
     # The legacy embargo-named alias stays in step with the real purge-span name.
     assert cross_validator.CV_EMBARGO_DAYS == cross_validator.PURGE_HORIZON_D
@@ -533,7 +573,7 @@ def test_fold_loop_consumes_the_single_minima_helper() -> None:
 
 
 def test_live_edges_are_unchanged_behind_the_skip_guard() -> None:
-    """The live calendar still reproduces the branch-point block edges."""
+    """The live calendar still reproduces the holdout-aware block edges."""
     requires_live_artifacts(ARTIFACTS_DIR)
 
     live_metadata = joblib.load(ARTIFACTS_DIR / "inputs" / "metadata.pkl")
@@ -541,16 +581,18 @@ def test_live_edges_are_unchanged_behind_the_skip_guard() -> None:
 
     n_dates = int(np.unique(live_metadata["date"]).size)
     assert n_dates == LIVE_N_DATES
-    assert cross_validator._fold_boundaries(n_dates).tolist() == LIVE_EDGES
+    assert cross_validator.HOLDOUT_N_DATES == LIVE_HOLDOUT_N_DATES
+    assert (
+        cross_validator._fold_boundaries(n_dates - LIVE_HOLDOUT_N_DATES).tolist()
+        == LIVE_FOLD_EDGES
+    )
 
-    # The stored artifact predates the train-only purge, so its block starts are
-    # recovered from the stable last_train_idx = block_start - SEPARATION_MIN.
-    stored_starts = [
-        int(live_folds[f"fold_{idx}"]["last_train_idx"])
-        + cross_validator.SEPARATION_MIN
-        for idx in range(cross_validator.N_FOLDS)
-    ]
-    assert stored_starts == LIVE_EDGES[1:-1]
+    # The stored artifact predates the holdout reservation and the versioned
+    # schema; tolerate it by iterating only its fold_* keys.
+    stored_fold_keys = {key for key in live_folds if key.startswith("fold_")}
+    assert stored_fold_keys == {
+        f"fold_{idx}" for idx in range(cross_validator.N_FOLDS)
+    }
 
 
 if __name__ == "__main__":

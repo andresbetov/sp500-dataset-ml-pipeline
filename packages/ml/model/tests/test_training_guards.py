@@ -339,6 +339,30 @@ def test_fold_count_guard_still_fires() -> None:
     assert "Expected 5 folds, got 4" in str(excinfo.value)
 
 
+def test_fold_count_guard_counts_fold_keys_not_schema_metadata() -> None:
+    X, y, metadata, folds_metadata = _valid_fixture()
+    payload = {
+        "schema_version": 2,
+        "feature_names": [f"indicator_{idx}" for idx in range(3)],
+        "holdout": {
+            "bounds": {"start": "2024-01-02", "end": "2025-12-31"},
+            "n_dates": 500,
+        },
+        "n_dates": 50,
+        **folds_metadata,
+    }
+
+    # Metadata keys alone must not make the guard count more than five folds.
+    training._validate_training_prerequisites(X, y, metadata, payload)
+
+    # Removing a fold still fails even though the metadata keys remain.
+    del payload["fold_3"]
+    with pytest.raises(ValueError) as excinfo:
+        training._validate_training_prerequisites(X, y, metadata, payload)
+
+    assert "Expected 5 folds, got 4" in str(excinfo.value)
+
+
 def test_model_training_indices_keeps_only_rows_above_floor() -> None:
     floor = training.RV_FLOOR
     y = np.array([0.0, floor, floor + 1e-15, floor * 2.0, 1e-9])

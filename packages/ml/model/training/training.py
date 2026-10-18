@@ -88,9 +88,12 @@ def _validate_training_prerequisites(
 		inf_count = np.isinf(y).sum()
 		raise ValueError(f"Invalid target values. Found {nan_count} NaNs and {inf_count} infs")
 
-	# Validate folds count (Phase 3 executed correctly)
-	if len(folds_metadata) != 5:
-		raise ValueError(f"Expected 5 folds, got {len(folds_metadata)}")
+	# Validate folds count (Phase 3 executed correctly). The persisted payload
+	# is a schema-versioned superset, so count fold_* keys only: metadata keys
+	# (schema_version, feature_names, holdout, n_dates) are not folds.
+	fold_keys = [key for key in folds_metadata if key.startswith("fold_")]
+	if len(fold_keys) != 5:
+		raise ValueError(f"Expected 5 folds, got {len(fold_keys)}")
 
 	# Validate features; a single vectorized scan is fine, X may be a memory map.
 	finite = np.isfinite(X)

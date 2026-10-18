@@ -1,13 +1,15 @@
-"""Tests for the regime metadata contract between extraction and cross-validation.
+"""Tests for the regime metadata and versioned fold-payload contract.
 
 Phase 2 must write the calendar ``market_regime`` labels into the extracted
-metadata so the Phase 3 consumer can report per-fold regime distributions. The
-synthetic checks build a temporary dataset and artifact tree, so they neither
-read nor write the live generated data; the non-regression check compares the
-extraction X/Y and the fold payload's key/type contract against the live
-branch-point artifacts behind the existing skip guard (the stored fold
-membership is interim until the later integration re-run, so it is not compared
-index-for-index).
+metadata so the Phase 3 consumer can report per-fold regime distributions.
+Phase 3 persists a schema-versioned superset: the schema version, the pinned
+feature names, the reserved final-500-date holdout window, the remainder date
+count, and the five fold records with typed gap keys. The synthetic checks
+build a temporary dataset and artifact tree, so they neither read nor write the
+live generated data; the non-regression check compares the extraction X/Y
+against the live branch-point artifacts behind the existing skip guard and
+tolerates the older unversioned fold snapshot, which is interim until the later
+integration re-run.
 
 Run with pytest from the repository root:
 
@@ -38,8 +40,32 @@ from packages.ml.model.features import feature_engineering
 from packages.ml.model.training import training
 
 N_REGIME_BUCKETS = 7
-N_DATES = 70
+# 500 reserved holdout dates plus a 100-date fold remainder that is exactly
+# divisible by the six blocks (edges 0, 16, 33, 50, 66, 83, 100).
+N_DATES = 600
+HOLDOUT_N_DATES = 500
 TICKERS = ("AAA", "BBB", "CCC")
+
+FOLD_RECORD_KEYS = frozenset(
+    {
+        "train_indices",
+        "test_indices",
+        "train_date_min",
+        "train_date_max",
+        "test_date_min",
+        "test_date_max",
+        "n_train",
+        "n_test",
+        "first_test_idx",
+        "last_train_idx",
+        "purge_train_count",
+        "regime_distribution_train",
+        "regime_distribution_test",
+        "n_dates",
+        "purge_horizon_days",
+        "separation_units",
+    }
+)
 
 
 def _synthetic_frame() -> pd.DataFrame:
@@ -69,6 +95,41 @@ def _array_digest(array: np.ndarray) -> str:
     digest = hashlib.sha256()
     digest.update(memoryview(np.ascontiguousarray(array)).cast("B"))
     return digest.hexdigest()
+
+
+def _write_synthetic_inputs(root: Path) -> tuple[np.ndarray, np.ndarray, dict]:
+    """Write a minimal Phase 2 input set to a temporary artifact root."""
+    dates = np.repeat(
+        pd.bdate_range("2000-01-03", periods=N_DATES).values, len(TICKERS)
+    )
+    n_rows = len(dates)
+    X = np.zeros((n_rows, 4), dtype=np.float64)
+    Y = np.full(n_rows, 0.25, dtype=np.float64)
+    metadata = {
+        "date": dates,
+        "ticker": np.tile(np.array(TICKERS), N_DATES),
+        "regime": np.repeat(
+            np.arange(N_DATES) % N_REGIME_BUCKETS, len(TICKERS)
+        ).astype(np.int8),
+        "n_indicators": 4,
+        "n_ticker_features": 0,
+    }
+    inputs = root / "inputs"
+    inputs.mkdir(parents=True)
+    np.save(inputs / "X.npy", X)
+    np.save(inputs / "Y.npy", Y)
+    joblib.dump(metadata, inputs / "metadata.pkl")
+    return X, Y, metadata
+
+
+def _run_cv(root: Path) -> dict:
+    """Run Phase 3 against a temporary artifact root."""
+    with mock.patch.object(cross_validator, "ARTIFACTS_DIR", root):
+        return cross_validator.phase_3_cross_validation()
+
+
+def _date_string(value: np.datetime64) -> str:
+    return pd.Timestamp(value).strftime("%Y-%m-%d")
 
 
 def test_extraction_metadata_carries_row_aligned_regime() -> None:
@@ -122,6 +183,104 @@ def test_cv_reports_per_fold_regime_distributions_from_extracted_metadata() -> N
         training._validate_training_prerequisites(X, Y, metadata, folds)
 
 
+def test_persisted_payload_reserves_the_final_holdout_and_carries_fold_schema() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        X, Y, metadata = _write_synthetic_inputs(root)
+        folds = _run_cv(root)
+
+        persisted = joblib.load(root / "folds" / "folds_metadata.pkl")
+        unique_dates = np.sort(np.unique(metadata["date"]))
+        assert cross_validator.HOLDOUT_N_DATES == HOLDOUT_N_DATES == 500
+        fold_dates = unique_dates[:-HOLDOUT_N_DATES]
+        holdout_dates = unique_dates[-HOLDOUT_N_DATES:]
+        fold_n_dates = len(fold_dates)
+
+        fold_keys = {f"fold_{idx}" for idx in range(cross_validator.N_FOLDS)}
+        assert set(folds) == fold_keys
+        assert set(persisted) == fold_keys | {
+            "schema_version",
+            "feature_names",
+            "holdout",
+            "n_dates",
+        }
+        assert len(holdout_dates) == HOLDOUT_N_DATES == 500
+        assert persisted["schema_version"] == 2
+        assert persisted["feature_names"] == list(feature_engineering.INDICATORS)
+        assert persisted["holdout"] == {
+            "bounds": {
+                "start": _date_string(holdout_dates[0]),
+                "end": _date_string(holdout_dates[-1]),
+            },
+            "n_dates": HOLDOUT_N_DATES,
+        }
+        assert persisted["n_dates"] == fold_n_dates == len(unique_dates) - HOLDOUT_N_DATES
+        assert fold_n_dates > 0
+
+        # Recompute the exact split from the persisted remainder and compare
+        # index-for-index; the fold construction is reproducible from the schema.
+        tpos = np.searchsorted(fold_dates, metadata["date"])
+        boundaries = cross_validator._fold_boundaries(persisted["n_dates"])
+
+        for fold_idx in range(cross_validator.N_FOLDS):
+            fold_key = f"fold_{fold_idx}"
+            record = persisted[fold_key]
+            assert set(record) == FOLD_RECORD_KEYS, fold_key
+            assert "gap_days" not in record, fold_key
+            assert "purge_test_count" not in record, fold_key
+            assert record["n_dates"] == fold_n_dates, fold_key
+            assert record["purge_horizon_days"] == 5, fold_key
+            assert record["separation_units"] == 6, fold_key
+            assert record["n_train"] == len(record["train_indices"]) > 0, fold_key
+            assert record["n_test"] == len(record["test_indices"]) > 0, fold_key
+            assert (
+                sum(record["regime_distribution_train"].values())
+                == record["n_train"]
+            ), fold_key
+            assert (
+                sum(record["regime_distribution_test"].values()) == record["n_test"]
+            ), fold_key
+            assert record["first_test_idx"] - record["last_train_idx"] == 6, fold_key
+
+            # No fold row may fall inside the reserved window.
+            train_dates = metadata["date"][np.asarray(record["train_indices"])]
+            test_dates = metadata["date"][np.asarray(record["test_indices"])]
+            assert (train_dates < holdout_dates[0]).all(), fold_key
+            assert (test_dates < holdout_dates[0]).all(), fold_key
+
+            expected_train, expected_test, expected_purge = (
+                cross_validator._split_date_blocks(
+                    tpos,
+                    int(boundaries[fold_idx + 1]),
+                    int(boundaries[fold_idx + 2]),
+                )
+            )
+            assert record["train_indices"] == expected_train.tolist(), fold_key
+            assert record["test_indices"] == expected_test.tolist(), fold_key
+            assert record["purge_train_count"] == expected_purge, fold_key
+
+        # Fold construction reads the inputs but never rewrites X/Y.
+        assert np.array_equal(np.load(root / "inputs" / "X.npy"), X)
+        assert np.array_equal(np.load(root / "inputs" / "Y.npy"), Y)
+
+
+def test_training_guard_counts_fold_keys_and_accepts_schema_metadata() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        X, Y, metadata = _write_synthetic_inputs(root)
+        _run_cv(root)
+        persisted = joblib.load(root / "folds" / "folds_metadata.pkl")
+
+    # Metadata keys must not be mistaken for folds.
+    training._validate_training_prerequisites(X, Y, metadata, persisted)
+
+    # A wrong fold count still fails loudly.
+    reduced = dict(persisted)
+    del reduced["fold_4"]
+    with pytest.raises(ValueError, match="Expected 5 folds, got 4"):
+        training._validate_training_prerequisites(X, Y, metadata, reduced)
+
+
 def test_indicator_contract_count_unchanged() -> None:
     assert len(feature_engineering.INDICATORS) == 37
 
@@ -162,47 +321,52 @@ def test_live_extraction_and_fold_contract_match_branch_point_artifacts() -> Non
         with mock.patch.object(cross_validator, "ARTIFACTS_DIR", root):
             folds = cross_validator.phase_3_cross_validation()
 
-    assert set(folds) == set(live_folds)
+        fresh_payload = joblib.load(root / "folds" / "folds_metadata.pkl")
 
-    # The stored test-side membership is interim: the test blocks predate the
-    # train-only purge and are regenerated at the later integration re-run, so
-    # only the fields the purge change leaves untouched are compared by value.
-    # The membership contract is asserted from in-memory recomputation in
-    # tests/test_purge.py.
-    canonical_keys = {
-        "train_indices",
-        "test_indices",
-        "train_date_min",
-        "train_date_max",
-        "test_date_min",
-        "test_date_max",
-        "gap_days",
-        "n_train",
-        "n_test",
-        "first_test_idx",
-        "last_train_idx",
-        "purge_train_count",
+    fold_keys = {f"fold_{idx}" for idx in range(cross_validator.N_FOLDS)}
+    assert set(folds) == fold_keys
+    assert set(fresh_payload) == fold_keys | {
+        "schema_version",
+        "feature_names",
+        "holdout",
+        "n_dates",
     }
-    stable_keys = {
-        "train_indices",
-        "train_date_min",
-        "train_date_max",
-        "gap_days",
-        "n_train",
-        "last_train_idx",
-        "purge_train_count",
+
+    unique_dates = np.sort(np.unique(live_metadata["date"]))
+    holdout_dates = unique_dates[-cross_validator.HOLDOUT_N_DATES :]
+    fold_n_dates = len(unique_dates) - cross_validator.HOLDOUT_N_DATES
+    assert fresh_payload["schema_version"] == 2
+    assert fresh_payload["feature_names"] == list(feature_engineering.INDICATORS)
+    assert fresh_payload["n_dates"] == fold_n_dates
+    assert fresh_payload["holdout"]["n_dates"] == cross_validator.HOLDOUT_N_DATES
+    assert fresh_payload["holdout"]["bounds"] == {
+        "start": _date_string(holdout_dates[0]),
+        "end": _date_string(holdout_dates[-1]),
     }
-    for fold_key, expected in live_folds.items():
-        fresh = folds[fold_key]
-        assert canonical_keys <= set(fresh), fold_key
-        assert canonical_keys <= set(expected), fold_key
-        assert "purge_test_count" not in fresh, fold_key
-        for field in stable_keys:
-            assert fresh[field] == expected[field], f"{fold_key} {field} drifted"
-        for field in canonical_keys:
-            assert type(fresh[field]) is type(expected[field]), (
-                f"{fold_key} {field} type drifted"
-            )
+
+    # Every freshly built fold is held out from the reserved window.
+    for fold_key in fold_keys:
+        record = fresh_payload[fold_key]
+        assert set(record) == FOLD_RECORD_KEYS, fold_key
+        assert record["n_dates"] == fold_n_dates, fold_key
+        assert "gap_days" not in record, fold_key
+        assert "purge_test_count" not in record, fold_key
+        for index_field in ("train_indices", "test_indices"):
+            fold_dates_seen = live_metadata["date"][
+                np.asarray(record[index_field])
+            ]
+            assert (fold_dates_seen < holdout_dates[0]).all(), fold_key
+
+    # The branch-point snapshot predates the versioned holdout schema and is
+    # interim until the later integration re-run: iterate only its fold_* keys,
+    # never every top-level key, so the schema metadata can never be mistaken
+    # for a fold.
+    stored_fold_keys = {key for key in live_folds if key.startswith("fold_")}
+    assert stored_fold_keys == fold_keys
+    for fold_key in fold_keys:
+        assert {"train_indices", "test_indices", "n_train", "n_test"} <= set(
+            live_folds[fold_key]
+        ), fold_key
 
 
 if __name__ == "__main__":

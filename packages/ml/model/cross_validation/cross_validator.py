@@ -6,10 +6,18 @@ import joblib
 import numpy as np
 import pandas as pd
 from packages.ml.model.config import get_config
+from packages.ml.model.features.feature_engineering import INDICATORS
 from packages.ml.model.utils import ARTIFACTS_DIR
 
 logger = logging.getLogger(__name__)
 N_FOLDS = get_config()["folds"]["n_folds"]
+# The persisted fold-payload schema version: version 2 adds the pinned feature
+# names, the reserved holdout window, the remainder date count, and the typed
+# gap keys (purge_horizon_days, separation_units) that replace gap_days.
+SCHEMA_VERSION = 2
+# The final N unique trading dates are reserved as holdout before fold
+# construction; folds are derived only on the unique dates before that window.
+HOLDOUT_N_DATES = get_config()["holdout"]["n_dates"]
 # The purge span in unique-trading-date index space: complete trading days excluded
 # between the last kept training date and the first kept test date; enforced as
 # first_test_idx - last_train_idx >= SEPARATION_MIN.
@@ -120,17 +128,26 @@ def _verify_fold_separation(
 
 def phase_3_cross_validation() -> dict:
     """
-    Date-group 5-fold cross-validation with a train-only purge.
+    Date-group 5-fold cross-validation with a train-only purge and a holdout reserve.
 
-    The sorted unique trading dates are split into contiguous blocks; fold k trains on
-    blocks 0..k and tests on block k+1 (expanding windows). Each fold drops only the
-    training rows whose 5-day forward target reaches into the test block, so five
-    complete trading dates (the block start minus 5 through minus 1) are excluded
-    between the last kept training date and the first kept test date; the test block
-    itself is kept whole. Row indices are positions in the Phase 2 inputs;
-    first_test_idx / last_train_idx index the sorted unique-date array, and both kept
-    sets are positions in that same array, so under the shared trading-calendar
-    assumption an index-space gap equals the trading-day distance.
+    The final HOLDOUT_N_DATES unique trading dates are reserved as the holdout
+    window before any fold construction, so no fold train or test row can fall
+    inside it. The remaining sorted unique trading dates are split into
+    contiguous blocks; fold k trains on blocks 0..k and tests on block k+1
+    (expanding windows). Each fold drops only the training rows whose 5-day
+    forward target reaches into the test block, so five complete trading dates
+    (the block start minus 5 through minus 1) are excluded between the last kept
+    training date and the first kept test date; the test block itself is kept
+    whole. Row indices are positions in the Phase 2 inputs; first_test_idx /
+    last_train_idx index the fold remainder's sorted unique-date array, and both
+    kept sets are positions in that same array, so under the shared
+    trading-calendar assumption an index-space gap equals the trading-day
+    distance.
+
+    The persisted payload is the schema-versioned superset: the schema version,
+    the pinned feature names, the recorded holdout window, the remainder date
+    count, and the five fold records (which carry typed gap keys). The return
+    value stays the five-fold dict the orchestrator consumes.
 
     Returns:
         folds: Dict with 5 folds containing train/test indices and date bounds
@@ -157,24 +174,42 @@ def phase_3_cross_validation() -> dict:
     # Rows are organized by ticker, so splits are built on the sorted unique trading
     # dates and every row carries its own date's position in that array.
     unique_dates = np.sort(np.unique(dates))
-    tpos = np.searchsorted(unique_dates, dates)
     logger.info(f"Unique trading dates: {len(unique_dates):,}")
 
-    # Every one of the N_FOLDS + 1 blocks needs PURGE_HORIZON_D + 1 trading dates so
-    # the earliest fold still keeps a training date after the train-side purge; 36
-    # with the current config. The minimum is derived from the split arithmetic.
-    min_unique_dates = (N_FOLDS + 1) * (PURGE_HORIZON_D + 1)
+    # Reserve the final holdout window before any fold construction: folds are
+    # derived only on the unique dates before it, so no fold train or test row
+    # can reach into the reserved dates by construction.
+    if HOLDOUT_N_DATES:
+        holdout_dates = unique_dates[-HOLDOUT_N_DATES:]
+        fold_dates = unique_dates[:-HOLDOUT_N_DATES]
+    else:
+        holdout_dates = unique_dates[:0]
+        fold_dates = unique_dates
+
+    # Every one of the N_FOLDS + 1 fold blocks needs PURGE_HORIZON_D + 1 trading
+    # dates so the earliest fold still keeps a training date after the train-side
+    # purge; 36 with the current config. The minimum is derived from the split
+    # arithmetic, on top of the reserved holdout window.
+    min_fold_dates = (N_FOLDS + 1) * (PURGE_HORIZON_D + 1)
+    min_unique_dates = HOLDOUT_N_DATES + min_fold_dates
     if len(unique_dates) < min_unique_dates:
         raise ValueError(
             f"Need at least {min_unique_dates} unique trading dates "
-            f"((N_FOLDS + 1) * (PURGE_HORIZON_D + 1)), got {len(unique_dates)}"
+            f"(holdout {HOLDOUT_N_DATES} + {min_fold_dates} for folds: "
+            f"(N_FOLDS + 1) * (PURGE_HORIZON_D + 1)), got {len(unique_dates)}"
         )
 
-    boundaries = _fold_boundaries(len(unique_dates))
+    boundaries = _fold_boundaries(len(fold_dates))
     logger.info(
         f"Date-group folds: {N_FOLDS} expanding folds over {N_FOLDS + 1} contiguous blocks "
-        f"of the unique dates, purge span {PURGE_HORIZON_D} trading days"
+        f"of the {len(fold_dates):,} unique dates before the {len(holdout_dates):,}-date "
+        f"holdout, purge span {PURGE_HORIZON_D} trading days"
     )
+
+    # Reserved-window rows sort past the last fold date, so their out-of-range
+    # position can never match a fold's train or test mask.
+    tpos = np.searchsorted(fold_dates, dates)
+    fold_n_dates = int(len(fold_dates))
 
     folds = {}
 
@@ -223,7 +258,6 @@ def phase_3_cross_validation() -> dict:
             "train_date_max": train_date_max,
             "test_date_min": test_date_min,
             "test_date_max": test_date_max,
-            "gap_days": PURGE_HORIZON_D,
             "n_train": len(train_indices),
             "n_test": len(test_indices),
             "first_test_idx": int(test_tpos.min()),
@@ -231,6 +265,9 @@ def phase_3_cross_validation() -> dict:
             "purge_train_count": purge_train_count,
             "regime_distribution_train": regime_dist_train,
             "regime_distribution_test": regime_dist_test,
+            "n_dates": fold_n_dates,
+            "purge_horizon_days": PURGE_HORIZON_D,
+            "separation_units": SEPARATION_MIN,
         }
 
         logger.info(
@@ -239,32 +276,39 @@ def phase_3_cross_validation() -> dict:
             f"{separation - 1} excluded dates between kept train and test | separation {separation} dates"
         )
 
-    # Save fold metadata to joblib pickle
+    # Save the schema-versioned fold payload to joblib pickle
     (ARTIFACTS_DIR / "folds").mkdir(parents=True, exist_ok=True)
     folds_metadata_path = ARTIFACTS_DIR / "folds" / "folds_metadata.pkl"
 
-    # Convert to joblib-serializable format
-    folds_json = {
-        fold_key: {
-            "train_indices": fold_data["train_indices"],
-            "test_indices": fold_data["test_indices"],
-            "train_date_min": fold_data["train_date_min"],
-            "train_date_max": fold_data["train_date_max"],
-            "test_date_min": fold_data["test_date_min"],
-            "test_date_max": fold_data["test_date_max"],
-            "gap_days": fold_data["gap_days"],
-            "n_train": fold_data["n_train"],
-            "n_test": fold_data["n_test"],
-            "first_test_idx": fold_data["first_test_idx"],
-            "last_train_idx": fold_data["last_train_idx"],
-            "purge_train_count": fold_data["purge_train_count"],
-        }
-        for fold_key, fold_data in folds.items()
+    holdout_bounds = {
+        "start": (
+            pd.Timestamp(holdout_dates[0]).strftime("%Y-%m-%d")
+            if holdout_dates.size
+            else None
+        ),
+        "end": (
+            pd.Timestamp(holdout_dates[-1]).strftime("%Y-%m-%d")
+            if holdout_dates.size
+            else None
+        ),
     }
-
-    joblib.dump(folds_json, folds_metadata_path)
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "feature_names": list(INDICATORS),
+        "holdout": {
+            "bounds": holdout_bounds,
+            "n_dates": int(holdout_dates.size),
+        },
+        "n_dates": fold_n_dates,
+        **folds,
+    }
+    joblib.dump(payload, folds_metadata_path)
 
     logger.info(f"Saved fold metadata to {folds_metadata_path}")
+    logger.info(
+        f"Reserved holdout window: {holdout_bounds['start']} to {holdout_bounds['end']} "
+        f"({int(holdout_dates.size):,} dates); folds derived on {fold_n_dates:,} dates"
+    )
     logger.info("Phase 3 complete: date-group cross-validation with a train-only purge")
 
     return folds
