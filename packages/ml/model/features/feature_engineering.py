@@ -7,12 +7,11 @@ from pathlib import Path
 import joblib
 import numpy as np
 import pandas as pd
-from packages.ml.model.utils import ARTIFACTS_DIR
+from packages.ml.model.utils import ARTIFACTS_DIR, get_project_paths
 
 logger = logging.getLogger(__name__)
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-DATASET_PATH = SCRIPT_DIR.parent.parent.parent.parent / "data" / "processed" / "dataset.parquet"
+DATASET_PATH = get_project_paths()["dataset_path"]
 
 INDICATORS = [
 	"atr20",
