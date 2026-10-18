@@ -35,8 +35,8 @@ EXPECTED_PINS = {
 }
 EXPECTED_USES_COUNT = 8
 
-# Workflow structure at the branch point: jobs and their run commands must not
-# change while the action refs are pinned.
+# Workflow structure: jobs and their run commands are pinned so action-ref
+# updates cannot smuggle in unrelated workflow logic changes.
 EXPECTED_JOBS = {
     "checks.yml": ("static", "dataset-smoke"),
     "model-smoke.yml": ("model",),
@@ -57,10 +57,17 @@ EXPECTED_RUNS = {
     "model-smoke.yml": (
         "uv sync --frozen",
         "uv run --frozen python packages/ml/dataset/main.py 2>&1 | tail -c 2000",
-        "uv run --frozen python packages/ml/model/main.py 2>&1 | tail -c 4000",
+        "set -o pipefail\n"
+        "uv run --frozen python packages/ml/model/main.py 2>&1 | tail -c 4000\n",
         "test -f packages/ml/model/artifacts/results/fold_training_summary.json\n"
         "echo \"model phase OK: fold_training_summary.json written\" "
-        "| tee -a \"$GITHUB_STEP_SUMMARY\"\n",
+        "| tee -a \"$GITHUB_STEP_SUMMARY\"\n"
+        "shopt -s nullglob\n"
+        "pngs=(data/model_outputs/*.png)\n"
+        "png_count=${#pngs[@]}\n"
+        "echo \"Phase-5 outputs: ${png_count} PNG charts written\" "
+        "| tee -a \"$GITHUB_STEP_SUMMARY\"\n"
+        "test \"$png_count\" -ge 14\n",
     ),
 }
 
