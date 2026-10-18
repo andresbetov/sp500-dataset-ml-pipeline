@@ -1,7 +1,10 @@
 """Tests for the model package's package-absolute imports and entry points.
 
-pytest is not installed yet, so this file also runs standalone from the
-repository root:
+Run with pytest from the repository root:
+
+    uv run --frozen python -m pytest packages/ml/model/tests -q
+
+This file also runs standalone:
 
     .venv/bin/python -B packages/ml/model/tests/test_imports.py
 """
@@ -13,33 +16,26 @@ import sys
 import traceback
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[4]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
-
-ARTIFACTS_DIR = REPO_ROOT / "packages" / "ml" / "model" / "artifacts"
-OUTPUTS_DIR = REPO_ROOT / "data" / "model_outputs"
-INIT_FILES = [
-    REPO_ROOT / "packages" / "ml" / "model" / "__init__.py",
-    REPO_ROOT / "packages" / "ml" / "model" / "cross_validation" / "__init__.py",
-    REPO_ROOT / "packages" / "ml" / "model" / "features" / "__init__.py",
-    REPO_ROOT / "packages" / "ml" / "model" / "training" / "__init__.py",
-]
 ENTRY_TIMEOUT_SECONDS = 30
 
 Snapshot = dict[str, tuple[int, int]]
 
 
-def _snapshot() -> Snapshot:
-    """Size and mtime of every generated artifact and output file."""
+def _snapshot(
+    repo_root: Path, artifacts_dir: Path, outputs_dir: Path
+) -> Snapshot:
+    """Size and mtime of every generated artifact and output file.
+
+    Absent trees are treated as empty so a fresh clone still runs the checks.
+    """
     state: Snapshot = {}
-    for root in (ARTIFACTS_DIR, OUTPUTS_DIR):
+    for root in (artifacts_dir, outputs_dir):
         if not root.is_dir():
             continue
         for path in root.rglob("*"):
             if path.is_file():
                 stat = path.stat()
-                state[str(path.relative_to(REPO_ROOT))] = (
+                state[str(path.relative_to(repo_root))] = (
                     stat.st_size,
                     stat.st_mtime_ns,
                 )
@@ -52,17 +48,22 @@ def _snapshot_changes(before: Snapshot, after: Snapshot) -> list[str]:
     )
 
 
-def _run(argv: list[str]) -> tuple[subprocess.CompletedProcess[str], Snapshot, Snapshot]:
+def _run(
+    repo_root: Path,
+    artifacts_dir: Path,
+    outputs_dir: Path,
+    argv: list[str],
+) -> tuple[subprocess.CompletedProcess[str], Snapshot, Snapshot]:
     """Run an entry-point command from the repo root and report artifact changes."""
-    before = _snapshot()
+    before = _snapshot(repo_root, artifacts_dir, outputs_dir)
     result = subprocess.run(
         argv,
-        cwd=REPO_ROOT,
+        cwd=repo_root,
         capture_output=True,
         text=True,
         timeout=ENTRY_TIMEOUT_SECONDS,
     )
-    return result, before, _snapshot()
+    return result, before, _snapshot(repo_root, artifacts_dir, outputs_dir)
 
 
 def test_absolute_import() -> None:
@@ -71,64 +72,109 @@ def test_absolute_import() -> None:
     assert callable(main_module.main)
 
 
-def test_module_entry_dry_run() -> None:
+def test_module_entry_dry_run(
+    repo_root: Path, artifacts_dir: Path, outputs_dir: Path
+) -> None:
     result, before, after = _run(
-        [sys.executable, "-B", "-m", "packages.ml.model.main", "--dry-run"]
+        repo_root,
+        artifacts_dir,
+        outputs_dir,
+        [sys.executable, "-B", "-m", "packages.ml.model.main", "--dry-run"],
     )
     assert result.returncode == 0, result.stderr
     assert "dry run" in result.stdout.lower(), result.stdout
     assert after == before, _snapshot_changes(before, after)
 
 
-def test_path_entry_dry_run() -> None:
+def test_path_entry_dry_run(
+    repo_root: Path, artifacts_dir: Path, outputs_dir: Path
+) -> None:
     result, before, after = _run(
-        [sys.executable, "-B", "packages/ml/model/main.py", "--dry-run"]
+        repo_root,
+        artifacts_dir,
+        outputs_dir,
+        [sys.executable, "-B", "packages/ml/model/main.py", "--dry-run"],
     )
     assert result.returncode == 0, result.stderr
     assert "dry run" in result.stdout.lower(), result.stdout
     assert after == before, _snapshot_changes(before, after)
 
 
-def test_unknown_argument_rejected() -> None:
+def test_unknown_argument_rejected(
+    repo_root: Path, artifacts_dir: Path, outputs_dir: Path
+) -> None:
     result, before, after = _run(
-        [sys.executable, "-B", "-m", "packages.ml.model.main", "--nope"]
+        repo_root,
+        artifacts_dir,
+        outputs_dir,
+        [sys.executable, "-B", "-m", "packages.ml.model.main", "--nope"],
     )
     assert result.returncode != 0, result.stdout
     assert "usage" in result.stderr.lower(), result.stderr
     assert after == before, _snapshot_changes(before, after)
 
 
-def test_import_has_no_side_effects() -> None:
-    before = _snapshot()
+def test_import_has_no_side_effects(
+    repo_root: Path, artifacts_dir: Path, outputs_dir: Path
+) -> None:
+    before = _snapshot(repo_root, artifacts_dir, outputs_dir)
     result = subprocess.run(
         [sys.executable, "-B", "-c", "import packages.ml.model.main"],
-        cwd=REPO_ROOT,
+        cwd=repo_root,
         capture_output=True,
         text=True,
         timeout=ENTRY_TIMEOUT_SECONDS,
     )
-    after = _snapshot()
+    after = _snapshot(repo_root, artifacts_dir, outputs_dir)
     assert result.returncode == 0, result.stderr
     assert after == before, _snapshot_changes(before, after)
 
 
-def test_init_parity() -> None:
-    for path in INIT_FILES:
+def test_init_parity(repo_root: Path) -> None:
+    init_files = [
+        repo_root / "packages" / "ml" / "model" / "__init__.py",
+        repo_root / "packages" / "ml" / "model" / "cross_validation" / "__init__.py",
+        repo_root / "packages" / "ml" / "model" / "features" / "__init__.py",
+        repo_root / "packages" / "ml" / "model" / "training" / "__init__.py",
+    ]
+    for path in init_files:
         text = path.read_text(encoding="utf-8")
         assert text.startswith("from __future__ import annotations\n"), path
 
 
 if __name__ == "__main__":
+    import inspect
+
+    import pytest
+
+    from conftest import ARTIFACTS_DIR, DATASET_PATH, OUTPUTS_DIR, REPO_ROOT
+
+    fixtures = {
+        "repo_root": REPO_ROOT,
+        "artifacts_dir": ARTIFACTS_DIR,
+        "outputs_dir": OUTPUTS_DIR,
+        "dataset_path": DATASET_PATH,
+    }
+
     failures = 0
+    skipped = 0
     for _name, _fn in list(globals().items()):
         if _name.startswith("test_") and callable(_fn):
+            kwargs = {
+                parameter: fixtures[parameter]
+                for parameter in inspect.signature(_fn).parameters
+            }
             try:
-                _fn()
+                _fn(**kwargs)
                 print(f"PASS {_name}")
+            except pytest.skip.Exception as exc:
+                skipped += 1
+                print(f"SKIP {_name}: {exc}")
             except Exception:
                 failures += 1
                 print(f"FAIL {_name}")
                 traceback.print_exc()
     if failures:
         raise SystemExit(f"{failures} test(s) failed")
-    print("All tests passed")
+    suffix = f" ({skipped} skipped)" if skipped else ""
+    print(f"All tests passed{suffix}")

@@ -6,7 +6,7 @@ Working guide for AI coding agents in this repository. Read it before editing co
 
 - Python >= 3.12, dependencies managed exclusively with `uv` (`.venv/` is uv-managed, gitignored).
 - Kaggle credentials (`~/.kaggle/kaggle.json`) are required for Phase 1 only. Never print, copy, or commit their contents.
-- There is no build system, no console entry points, and no test/lint/typecheck configuration. Do not reach for `pytest`, `ruff`, `mypy`, or `make` — none exist, and inventing a fake command wastes the session.
+- There is no build system and no console entry points. `uv` manages dependencies and the pytest dev group; the model package has a pytest suite (see Verification workflow). There is no lint/typecheck configuration — do not reach for `ruff`, `mypy`, or `make`.
 
 ## Commands
 
@@ -26,7 +26,7 @@ Run both phases from the repository root. The dataset entry takes no arguments; 
 2. **Phase 1 before Phases 2-5.** Phase 2 reads `data/processed/dataset.parquet` and fails immediately if it is missing. All generated data is gitignored, so a fresh clone has none.
 3. **Never commit generated output.** `packages/ml/model/artifacts/`, `data/model_outputs/`, `data/processed/dataset.parquet`, and `data/processed/ingestion_manifest.json` are gitignored (as are `*.pkl` and `*.joblib` anywhere in the tree, `data/` included); no other `data/` path is ignored, so check before adding anything there. Markdown is no longer ignored — the old blanket `*.md` rule was removed, so `AGENTS.md` and any new `.md` commit normally.
 4. **No absolute or machine-specific paths.** Everything resolves from `__file__`; `model/utils.py:get_project_paths` is the model path registry and `dataset/utils.py` holds the Phase 1 path constants. Keep it that way.
-5. **No evidence, no "done".** With no test suite, verification means running the phase you touched and quoting the log output you saw.
+5. **No evidence, no "done".** Verification means running the model pytest suite for model-package changes and running the phase you touched; quote the output you saw.
 
 ## Invariants — breaking these corrupts artifacts or silently mislabels results
 
@@ -57,7 +57,13 @@ Run both phases from the repository root. The dataset entry takes no arguments; 
 
 ## Verification workflow
 
-There are no tests. To check a change, run the phase you touched — both if the change spans `packages/ml/dataset` and `packages/ml/model`:
+Run the model pytest suite for any change under `packages/ml/model`:
+
+```bash
+uv run --frozen python -m pytest packages/ml/model/tests -q
+```
+
+The suite drives the entry points with `--dry-run` and skips checks that need generated artifacts, the dataset parquet, or evaluation outputs when a checkout has none (a fresh clone or CI). The `static` job in `.github/workflows/checks.yml` runs the same command after the byte-compile step. To check behavior, also run the phase you touched — both if the change spans `packages/ml/dataset` and `packages/ml/model`:
 
 1. `python packages/ml/dataset/main.py` — confirm it completes and logs the row and ticker counts it wrote, plus the "Dropped ... NaN rows" line and the parquet-then-JSON save order.
 2. `python packages/ml/model/main.py` (or `python -m packages.ml.model.main`) — confirm 5 folds train and `artifacts/results/fold_training_summary.json` (per-fold R²/QLIKE) plus the HAR benchmark report are written. Add `--dry-run` to either form for a fast entry-point check: it logs the planned phases and exits before any phase runs.
