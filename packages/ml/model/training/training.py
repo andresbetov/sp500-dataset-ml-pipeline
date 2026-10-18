@@ -11,7 +11,13 @@ from packages.ml.model.config import get_config
 from packages.ml.model.cross_validation.cv_utils import load_folds_metadata
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from packages.ml.model.training.har_benchmark import (
+	COMPARISON_NOTE,
+	FIT_SCALE,
+	HAC_LAG,
+	HAC_NOTE,
 	HAR_WARMUP_DAYS,
+	NO_HAC_NOTE,
+	REPORT_SCALE,
 	fit_har_benchmark,
 	load_har_regressors,
 )
@@ -336,8 +342,17 @@ def _save_training_results(
 	validation_predictions: dict,
 	fold_training_summary: dict,
 	har_benchmark_results: dict,
+	coefficient_interpretation: bool = False,
 ) -> None:
-	"""Save training results and the HAR benchmark report to disk."""
+	"""Save training results and the HAR benchmark report to disk.
+
+	The persisted ``coefficient_interpretation`` flag must match every fold's
+	HAR fit result: the report records it at the top level and next to each
+	fold's HAC fields so a reader can tell whether the standard errors are
+	interpretable. The fit/report scale declarations and the comparator note
+	come from the HAR benchmark module and are written next to the existing
+	benchmark label.
+	"""
 	val_pred_path = ARTIFACTS_DIR / "results" / "validation_predictions.pkl"
 	summary_path = ARTIFACTS_DIR / "results" / "fold_training_summary.json"
 	har_report_path = ARTIFACTS_DIR / "results" / "har_benchmark.json"
@@ -376,11 +391,34 @@ def _save_training_results(
 			f"(global clip_rate={clip_rate:.6f})"
 		)
 
+	# The persisted flag must describe the actual fits: a fold fitted with a
+	# different setting would make the report's coefficient errors mislabeled.
+	mismatched_folds = [
+		fold_key
+		for fold_key, result in har_benchmark_results.items()
+		if bool(result.get("coefficient_interpretation", coefficient_interpretation))
+		!= bool(coefficient_interpretation)
+	]
+	if mismatched_folds:
+		raise ValueError(
+			"HAR report flag mismatch: coefficient_interpretation="
+			f"{coefficient_interpretation} but folds {', '.join(mismatched_folds)} "
+			"were fitted with a different setting"
+		)
+
 	har_report = {
 		"benchmark": "HAR-RV (Corsi 2008): canonical 1/5/22 trailing variance components, OLS in variance levels",
 		"target": "log(realized_volatility_5d)",
 		"r2_convention": "log-target scale, fold-own-mean (sklearn r2_score)",
 		"qlike": "h/f - ln(h/f) - 1 with h=exp(actual), f=exp(forecast); target in native per-day sigma units",
+		"fit_scale": FIT_SCALE,
+		"report_scale": REPORT_SCALE,
+		"comparison_note": COMPARISON_NOTE,
+		"coefficient_interpretation": bool(coefficient_interpretation),
+		"hac_lag": HAC_LAG,
+		"coefficient_se_note": (
+			HAC_NOTE if coefficient_interpretation else NO_HAC_NOTE
+		),
 		"forecast_clip": (
 			"variance-space clip at forecast_floor**2, equivalently "
 			"forecast_log >= ln(forecast_floor), counted where applied"
@@ -409,7 +447,7 @@ def _save_training_results(
 	logger.info(f"Training outputs saved (HAR benchmark report: {har_report_path})")
 
 
-def phase_4_training() -> tuple[dict, dict, list]:
+def phase_4_training(coefficient_interpretation: bool = False) -> tuple[dict, dict, list]:
 	"""
 	Orchestrate Phase 4: Train 5 fold-specific XGBoost models (1 per fold) with no temporal leakage.
 	Each fold_i_model trains exclusively on fold_i_train and is evaluated on fold_i_test.
@@ -420,6 +458,12 @@ def phase_4_training() -> tuple[dict, dict, list]:
 	are incomplete). Degenerate at-or-below-floor target rows are flat-window artifacts
 	and are excluded from fitting and scoring under the single floor policy; the
 	retained row set is declared and counted.
+
+	``coefficient_interpretation`` defaults to False, the pipeline setting: the
+	canonical variance-level OLS fit reports no coefficient standard errors, and the
+	written report says so. When True, every fold also reports ordinary and
+	Newey-West HAC (lag 4, the 5-day label overlap) standard errors, persisted with
+	the flag so the errors stay interpretable.
 
 	Returns:
 		validation_predictions, fold_training_summary, fold_model_paths
@@ -540,6 +584,7 @@ def phase_4_training() -> tuple[dict, dict, list]:
 			forecast_floor=RV_FLOOR,
 			warmup_mask=har_warmup_mask,
 			fold_key=fold_key,
+			coefficient_interpretation=coefficient_interpretation,
 		)
 
 		# The warm-up filter applies to the fit only: a late index entrant's first
@@ -594,7 +639,12 @@ def phase_4_training() -> tuple[dict, dict, list]:
 		fold_training_summary[fold_key]["n_features_ticker"] = int(metadata["n_ticker_features"])
 
 	# Save outputs
-	_save_training_results(validation_predictions, fold_training_summary, har_benchmark_results)
+	_save_training_results(
+		validation_predictions,
+		fold_training_summary,
+		har_benchmark_results,
+		coefficient_interpretation=coefficient_interpretation,
+	)
 
 	# Final summary with metrics
 	total_time = time.time() - overall_start_time
