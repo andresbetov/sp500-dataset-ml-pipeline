@@ -322,6 +322,8 @@ def _aggregate_fold_results(fold_predictions_list: list) -> tuple[dict, dict]:
 			"test_qlike": pred_dict["test_qlike"],
 			"har_r2": pred_dict["har_r2"],
 			"har_qlike": pred_dict["har_qlike"],
+			"clip_count": int(pred_dict["clip_count"]),
+			"clip_rate": float(pred_dict["clip_rate"]),
 			"train_time_seconds": pred_dict["train_time_seconds"],
 			"inference_time_seconds": pred_dict["inference_time_seconds"],
 			"fold_time_seconds": pred_dict["fold_time_seconds"],
@@ -354,12 +356,38 @@ def _save_training_results(
 		json.dump(summary_json, f, indent=2, default=str)
 
 	# HAR benchmark report: per-fold coefficients and metrics next to the fold model's,
-	# so the mandatory benchmark is auditable without reloading the predictions.
+	# so the mandatory benchmark is auditable without reloading the predictions. The
+	# forecast constraint is the variance-floor clip (forecast_floor**2, equivalently
+	# forecast_log >= ln(forecast_floor)); the counters are summed over the same
+	# scored rows the per-fold fits reported.
+	scored_rows = sum(int(result["n_test"]) for result in har_benchmark_results.values())
+	clip_count = sum(int(result["clip_count"]) for result in har_benchmark_results.values())
+	clip_rate = clip_count / scored_rows if scored_rows else 0.0
+	clipped_folds = [
+		fold_key
+		for fold_key, result in har_benchmark_results.items()
+		if result["clip_count"] > 0
+	]
+	if clipped_folds:
+		logger.warning(
+			f"HAR forecast constraint bound in {len(clipped_folds)} of "
+			f"{len(har_benchmark_results)} folds ({', '.join(clipped_folds)}): "
+			f"{clip_count:,} of {scored_rows:,} scored rows clipped "
+			f"(global clip_rate={clip_rate:.6f})"
+		)
+
 	har_report = {
 		"benchmark": "HAR-RV (Corsi 2008): canonical 1/5/22 trailing variance components, OLS in variance levels",
 		"target": "log(realized_volatility_5d)",
 		"r2_convention": "log-target scale, fold-own-mean (sklearn r2_score)",
 		"qlike": "h/f - ln(h/f) - 1 with h=exp(actual), f=exp(forecast); target in native per-day sigma units",
+		"forecast_clip": (
+			"variance-space clip at forecast_floor**2, equivalently "
+			"forecast_log >= ln(forecast_floor), counted where applied"
+		),
+		"clip_count": clip_count,
+		"clip_rate": clip_rate,
+		"folds_with_clips": clipped_folds,
 		"warmup_days": HAR_WARMUP_DAYS,
 		"warmup_definition": (
 			f"HAR fit excludes the first {HAR_WARMUP_DAYS} dates of each ticker's "
@@ -511,6 +539,7 @@ def phase_4_training() -> tuple[dict, dict, list]:
 			regressors=har_regressors,
 			forecast_floor=RV_FLOOR,
 			warmup_mask=har_warmup_mask,
+			fold_key=fold_key,
 		)
 
 		# The warm-up filter applies to the fit only: a late index entrant's first
@@ -537,6 +566,8 @@ def phase_4_training() -> tuple[dict, dict, list]:
 		predictions_dict["har_r2"] = har_result["har_r2"]
 		predictions_dict["har_qlike"] = har_result["har_qlike"]
 		predictions_dict["n_warmup_excluded"] = har_result["n_warmup_excluded"]
+		predictions_dict["clip_count"] = har_result["clip_count"]
+		predictions_dict["clip_rate"] = har_result["clip_rate"]
 		har_benchmark_results[fold_key] = har_result
 
 		logger.info(
@@ -545,7 +576,10 @@ def phase_4_training() -> tuple[dict, dict, list]:
 			f"(fit {har_result['n_train']:,} rows; "
 			f"{har_result['n_warmup_excluded']:,} warm-up rows of "
 			f"{HAR_WARMUP_DAYS} dates/ticker excluded; "
-			f"{har_result['n_warmup_test_rows']:,} warm-up rows scored unchanged)"
+			f"{har_result['n_warmup_test_rows']:,} warm-up rows scored unchanged; "
+			f"clip_count={har_result['clip_count']:,} of "
+			f"{har_result['n_test']:,} scored rows, "
+			f"clip_rate={har_result['clip_rate']:.6f})"
 		)
 
 		fold_predictions_list.append(predictions_dict)

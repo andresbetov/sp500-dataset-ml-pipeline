@@ -40,6 +40,25 @@ Degenerate rules:
   overnight jump is recovered as
   ``ln(adj_open_t / adj_close_t) + log_return_t``; every row stays finite.
 
+Forecast constraint
+-------------------
+The benchmark applies one declared forecast constraint: every scored test-row
+forecast variance is clipped at ``forecast_floor**2``. The floor value comes
+from the shared config (``rv_floor``, consumed by the model as
+``training.RV_FLOOR``) and must equal the floor used for the model target.
+Because the reported forecast is ``forecast_log = 0.5 * ln(variance)``, the
+clip is equivalently a lower bound in log space,
+
+    forecast_log >= ln(forecast_floor)
+
+which for the configured floor ``1e-12`` is the numeric bound ``-27.631021``.
+The conversions stay exact and unchanged: ``floor**2 == exp(2 * ln(floor))``
+up to floating-point round-trip, and the unconstrained OLS fit remains
+canonical (no constrained solver is substituted). Only the reported forecast
+is clipped, and each clip is counted where it is applied — ``clip_count`` and
+``clip_rate`` per fold in the returned result — so the counter cannot drift
+from the applied clip.
+
 The components are read from the dataset parquet and verified row-aligned
 against the model input (ticker, date) pairs, so the benchmark cannot silently
 drift from the training rows. The first ``HAR_WARMUP_DAYS`` dates of each
@@ -267,6 +286,7 @@ def fit_har_benchmark(
     regressors: np.ndarray,
     forecast_floor: float,
     warmup_mask: np.ndarray,
+    fold_key: str | None = None,
 ) -> dict:
     """Fit the canonical HAR-RV regression on one fold's training rows.
 
@@ -281,13 +301,22 @@ def fit_har_benchmark(
     so the unchanged scoring set stays auditable. The fit optimizes variance-level
     squared error — Corsi's objective — so the log-scale R² below is a comparability
     metric, not the fit target; QLIKE is the headline model-vs-benchmark comparison.
-    Test-row forecasts are clipped at ``forecast_floor`` so the implied volatility
-    stays positive for the loss, and R² is reported on the log target against the
-    fold's own test mean — the same convention the fold models use.
+    Test-row forecasts are clipped at ``forecast_floor**2`` in variance space so the
+    implied volatility stays positive for the loss; equivalently the returned log
+    forecast obeys ``forecast_log >= ln(forecast_floor)`` — the one declared forecast
+    constraint, documented in the module docstring, where the floor comes from the
+    shared config and must equal the model's floor. R² is reported on the log target
+    against the fold's own test mean — the same convention the fold models use.
+
+    The clip is counted where it is applied: ``clip_count`` of the ``n_test`` scored
+    rows fall below ``forecast_floor**2`` and ``clip_rate = clip_count / n_test``. A
+    non-zero count logs a warning naming ``fold_key`` and the rate; ``fold_key`` is
+    optional and defaults to None for direct callers.
 
     Returns:
-        dict with coefficients, har_r2, forecast_log (test rows), n_train (the fitted
-        rows), n_test, n_warmup_excluded, n_warmup_test_rows, warmup_days.
+        dict with coefficients, har_r2, forecast_log (test rows), clip_count,
+        clip_rate, n_train (the fitted rows), n_test, n_warmup_excluded,
+        n_warmup_test_rows, warmup_days.
     """
     train_indices = np.asarray(train_indices)
     test_indices = np.asarray(test_indices)
@@ -316,14 +345,37 @@ def fit_har_benchmark(
         train_design, target_variance[retained_train], rcond=None
     )
 
-    forecast_variance = np.maximum(test_design @ coefficients, forecast_floor**2)
+    # The one declared forecast constraint: clip the variance-space forecast at
+    # floor**2, i.e. forecast_log >= ln(forecast_floor). The same mask that
+    # selects the clipped rows counts them, so clip_count/clip_rate cannot
+    # drift from the applied clip.
+    floor_squared = forecast_floor**2
+    forecast_variance = test_design @ coefficients
+    below_floor = forecast_variance < floor_squared
+    clip_count = int(np.count_nonzero(below_floor))
+    forecast_variance[below_floor] = floor_squared
     forecast_log = 0.5 * np.log(forecast_variance)
     har_r2 = float(r2_score(target_log_test, forecast_log))
+    clip_rate = clip_count / len(test_indices) if len(test_indices) else 0.0
+    if clip_count:
+        logger.warning(
+            "HAR %s: forecast variance fell below the floor on %d of %d scored "
+            "rows (clip_rate=%.6f); applied the variance-floor clip "
+            "forecast_floor**2 = %g, i.e. forecast_log >= %.6f",
+            fold_key if fold_key is not None else "unlabelled fold",
+            clip_count,
+            len(test_indices),
+            clip_rate,
+            floor_squared,
+            np.log(forecast_floor),
+        )
 
     return {
         "coefficients": [float(value) for value in coefficients],
         "har_r2": har_r2,
         "forecast_log": forecast_log,
+        "clip_count": clip_count,
+        "clip_rate": float(clip_rate),
         "n_train": int(len(fit_indices)),
         "n_test": int(len(test_indices)),
         "n_warmup_excluded": n_warmup_excluded,
