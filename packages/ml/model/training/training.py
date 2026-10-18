@@ -51,17 +51,21 @@ def floor_retained_mask(values: np.ndarray) -> np.ndarray:
 
 
 def qlike_loss(actual_log: np.ndarray, forecast_log: np.ndarray) -> float:
-	"""QLIKE loss for log-sigma forecasts (Patton 2011; Hansen-Lunde 2005).
+	"""QLIKE loss for log-sigma forecasts (Patton 2011; Hansen & Lunde (2005),
+	Journal of Applied Econometrics 20(7), 873-889, doi:10.1002/jae.800; the 2005
+	JAE paper is the QLIKE-origin comparison, distinct from the Hansen-Lunde (2006)
+	papers).
 
 	QLIKE(h, f) = h/f - ln(h/f) - 1 with h = exp(actual_log) and f = exp(forecast_log),
 	so in log space the loss is exp(delta) - delta - 1 for delta = actual - forecast.
 	This is the robust form for volatility-forecast comparison — the same ranking as
-	the Hansen-Lunde loss log(f) + h/f, up to the target-only term ln(h) + 1. The mean
-	comes from ``qlike_mean``, the functional the trainer also optimizes and evaluates.
+	the Hansen & Lunde (2005) loss log(f) + h/f, up to the target-only term ln(h) + 1.
+	The mean comes from ``qlike_mean``, the functional the trainer also optimizes and
+	evaluates.
 
 	Signed identity: QLIKE = HL - ln(h) - 1, equivalently HL = QLIKE + ln(h) + 1 for
-	the Hansen-Lunde loss HL = ln(f) + h/f. The ranking is identical; the absolute
-	level differs only by the target-only constant ln(h) + 1.
+	the Hansen & Lunde (2005) loss HL = ln(f) + h/f. The ranking is identical; the
+	absolute level differs only by the target-only constant ln(h) + 1.
 
 	Scale: the loss is in sigma (per-day volatility) units, h = exp(actual_log), not in
 	variance units. The same fit scored in variance units would report roughly 4-6x
@@ -407,7 +411,7 @@ def _save_training_results(
 		)
 
 	har_report = {
-		"benchmark": "HAR-RV (Corsi 2008): canonical 1/5/22 trailing variance components, OLS in variance levels",
+		"benchmark": "HAR-RV (Corsi (2009)): canonical 1/5/22 trailing variance components, OLS in variance levels",
 		"target": "log(realized_volatility_5d)",
 		"r2_convention": "log-target scale, fold-own-mean (sklearn r2_score)",
 		"qlike": "h/f - ln(h/f) - 1 with h=exp(actual), f=exp(forecast); target in native per-day sigma units",

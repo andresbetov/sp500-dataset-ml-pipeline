@@ -53,11 +53,13 @@ FLOOR = float(training.RV_FLOOR)
 HAC_LAG = 4
 
 # The fit-scale disclosure currently carried by the fit docstring. It is matched
-# whitespace-normalized because the source wraps it across three lines.
+# whitespace-normalized because the source wraps it across lines.
 FIT_SCALE_DISCLOSURE = (
-    "The fit optimizes variance-level squared error — Corsi's objective — so "
-    "the log-scale R² below is a comparability metric, not the fit target; "
-    "QLIKE is the headline model-vs-benchmark comparison."
+    "The fit optimizes variance-level squared error — a variance-level variant "
+    "of Corsi (2009) Eq. (8), which is specified in realized-volatility levels "
+    "(variance and log are the variants he mentions) — so the log-scale R² "
+    "below is a comparability metric, not the fit target; QLIKE is the headline "
+    "model-vs-benchmark comparison."
 )
 
 FIT_SCALE = "variance"
