@@ -267,7 +267,10 @@ def test_persisted_paths_are_repo_relative_and_resolvable() -> None:
         from packages.ml.model import run_log
 
         resolved = run_log.resolve_stored_path(stored)
-        assert resolved == root / "checkpoints" / "fold_0_model.pkl"
+        run_id = json.loads(
+            (root / "run_manifest.json").read_text(encoding="utf-8")
+        )["run_id"]
+        assert resolved == root / "checkpoints" / run_id / "fold_0.pkl"
         assert resolved.is_file()
 
         from packages.ml.model.visualization.data_loader import (
@@ -322,7 +325,8 @@ def test_phase_4_records_folds_and_artifacts_into_the_caller_run() -> None:
         assert record["phases"] == [], "phase timing belongs to the orchestrator"
         assert len(record["artifacts"]) == 8, record["artifacts"]
         assert any(
-            key.endswith("checkpoints/fold_0_model.pkl") for key in record["artifacts"]
+            key.endswith(f"checkpoints/{run['run_id']}/fold_0.pkl")
+            for key in record["artifacts"]
         )
         assert any(
             key.endswith("results/fold_training_summary.json")

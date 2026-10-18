@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
+from pathlib import Path
 
 import joblib
 import numpy as np
@@ -209,8 +211,39 @@ def _model_training_indices(fold_data: dict, y: np.ndarray) -> np.ndarray:
 	return train_indices[floor_retained_mask(y[train_indices])]
 
 
+def fold_checkpoint_path(fold_idx: int, run_id: str) -> Path:
+	"""Run-scoped checkpoint location: ``checkpoints/<run_id>/fold_<i>.pkl``.
+
+	The run id scopes every run's models into their own directory, so a new run
+	never overwrites (or is mistaken for) an older run's checkpoints. The path
+	is recorded repo-relative in the fold summary, the predictions, and the run
+	manifest; readers resolve it from those records instead of guessing a name.
+	"""
+	return ARTIFACTS_DIR / "checkpoints" / run_id / f"fold_{fold_idx}.pkl"
+
+
+def write_checkpoint_atomically(model: object, model_path: Path) -> None:
+	"""Write the fold model via a sibling ``*.tmp`` file + ``os.replace``.
+
+	A reader can never observe a partially written checkpoint: the final path
+	appears only through the atomic rename. Any failure — including a failure
+	in the rename itself — removes the temporary file, so no ``*.tmp`` residue
+	is left behind and a previous checkpoint at the target path stays intact.
+	The payload is unchanged: ``joblib.dump`` of the trained ``XGBRegressor``.
+	"""
+	model_path.parent.mkdir(parents=True, exist_ok=True)
+	tmp_path = model_path.with_name(model_path.name + ".tmp")
+	try:
+		joblib.dump(model, tmp_path)
+		os.replace(tmp_path, model_path)
+	finally:
+		if tmp_path.exists():
+			tmp_path.unlink()
+
+
 def _train_fold_model(
 	fold_idx: int,
+	run_id: str,
 	X_train: np.ndarray,
 	y_train: np.ndarray,
 	X_test: np.ndarray,
@@ -225,6 +258,7 @@ def _train_fold_model(
 
 	Args:
 		fold_idx: Fold index (0-4)
+		run_id: Run id of the owning run; scopes the checkpoint directory
 		X_train: Training features from fold_i_train
 		y_train: Training log-target from fold_i_train
 		X_test: Floor-retained test features from fold_i_test
@@ -274,10 +308,11 @@ def _train_fold_model(
 	logger.info(f"  Fold {fold_idx}: R²={test_r2:.4f}, MAE={test_mae:.6f}, RMSE={test_rmse:.6f}, QLIKE={test_qlike:.6f}")
 	logger.info(f"    └─ Timing: {train_time:.1f}s train + {inference_time:.1f}s inference = {fold_elapsed:.1f}s total")
 
-	# Save model
-	checkpoints_dir = ARTIFACTS_DIR / "checkpoints"
-	model_path = checkpoints_dir / f"fold_{fold_idx}_model.pkl"
-	joblib.dump(model, model_path)
+	# Save the model under the run-scoped checkpoint directory, atomically:
+	# the recorded path is repo-relative in the fold summary/predictions and in
+	# the run manifest's artifact list.
+	model_path = fold_checkpoint_path(fold_idx, run_id)
+	write_checkpoint_atomically(model, model_path)
 	if not model_path.exists():
 		raise RuntimeError(f"Failed to save fold {fold_idx} model to {model_path}")
 	logger.info(f"  Saved fold {fold_idx} model to {model_path}")
@@ -496,6 +531,7 @@ def phase_4_training(
 	standalone = run is None
 	if standalone:
 		run = new_run("phase_4_training", ARTIFACTS_DIR)
+	run_id = run["run_id"]
 	phase_started = time.monotonic()
 	logger.info("Phase 4: Fold-Specific Model Training (1 Model per Fold)")
 	overall_start_time = time.time()
@@ -592,6 +628,7 @@ def phase_4_training(
 		# Train fold model (1 model per fold, only on fold_i_train data, no leakage)
 		model, predictions_dict = _train_fold_model(
 			fold_idx=fold_idx,
+			run_id=run_id,
 			X_train=X_train,
 			y_train=y_train,
 			X_test=X_test,
@@ -677,10 +714,7 @@ def phase_4_training(
 	)
 	record_artifacts(
 		run,
-		[
-			ARTIFACTS_DIR / "checkpoints" / f"fold_{fold_idx}_model.pkl"
-			for fold_idx in range(5)
-		]
+		[fold_checkpoint_path(fold_idx, run_id) for fold_idx in range(5)]
 		+ [
 			ARTIFACTS_DIR / "results" / "validation_predictions.pkl",
 			ARTIFACTS_DIR / "results" / "fold_training_summary.json",

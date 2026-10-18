@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 
@@ -13,6 +14,7 @@ import pandas as pd
 from scipy import stats
 
 from packages.ml.model.features.feature_engineering import INDICATORS
+from packages.ml.model.run_log import resolve_stored_path
 from packages.ml.model.utils import ARTIFACTS_DIR
 from packages.ml.model.visualization.data_loader import load_fold_training_summary
 
@@ -203,8 +205,109 @@ def plot_residuals(predictions_dict: dict, output_path: Path | None = None) -> P
     return output_path
 
 
+class CheckpointResolutionError(FileNotFoundError):
+    """No run record names the fold's checkpoint; refusing to guess a filename."""
+
+
+def _checkpoint_from_fold_summary(summary_path: Path, fold_idx: int) -> Path | None:
+    """The checkpoint path recorded in the fold summary, or None."""
+    if not summary_path.is_file():
+        return None
+    with open(summary_path, "r", encoding="utf-8") as handle:
+        summary = json.load(handle)
+    entry = summary.get(f"fold_{fold_idx}")
+    stored = entry.get("model_path") if isinstance(entry, dict) else None
+    return resolve_stored_path(stored) if stored else None
+
+
+def _checkpoint_from_run_manifest(manifest_path: Path, fold_idx: int) -> Path | None:
+    """The checkpoint path recorded in the run manifest's artifact list, or None.
+
+    Run-scoped entries (``checkpoints/<run_id>/fold_<i>.pkl``) win over the
+    legacy bare ``checkpoints/fold_<i>_model.pkl`` form, so a manifest that
+    carries both still resolves the run-scoped checkpoint.
+    """
+    if not manifest_path.is_file():
+        return None
+    with open(manifest_path, "r", encoding="utf-8") as handle:
+        manifest = json.load(handle)
+    run_scoped: list[str] = []
+    legacy: list[str] = []
+    for stored in manifest.get("artifacts", {}):
+        path = Path(stored)
+        if (
+            path.name == f"fold_{fold_idx}.pkl"
+            and path.parent.parent.name == "checkpoints"
+        ):
+            run_scoped.append(stored)
+        elif (
+            path.name == f"fold_{fold_idx}_model.pkl"
+            and path.parent.name == "checkpoints"
+        ):
+            legacy.append(stored)
+    for stored in run_scoped or legacy:
+        return resolve_stored_path(stored)
+    return None
+
+
+def resolve_fold_checkpoint(
+    fold_idx: int,
+    summary_path: Path | None = None,
+    manifest_path: Path | None = None,
+) -> Path:
+    """Resolve fold ``fold_idx``'s checkpoint through the run's recorded paths.
+
+    Resolution order: the fold summary's ``model_path`` for the fold, then the
+    run manifest's artifact list. The summary is the run's own record and is
+    written by the training phase, while the manifest is finalized only after
+    Phase 5 — so during a run the summary is the freshest record of the
+    run-scoped checkpoint, and the manifest covers readers that only have the
+    finalized artifact index. When neither record names the checkpoint the
+    resolver raises ``CheckpointResolutionError`` instead of guessing a
+    filename (the old ``fold_<i>_model.pkl`` convention is gone).
+
+    Args:
+        fold_idx: Fold index (0-4).
+        summary_path: Path to fold_training_summary.json. If None, uses the
+            artifacts results directory.
+        manifest_path: Path to run_manifest.json. If None, uses the artifacts
+            root.
+
+    Returns:
+        The recorded absolute checkpoint path. Existence is not required here:
+        the feature-importance plot treats a recorded-but-absent file as the
+        intentional partial-checkout case (warning + zeros for that fold).
+    """
+    if summary_path is None:
+        summary_path = ARTIFACTS_DIR / "results" / "fold_training_summary.json"
+    if manifest_path is None:
+        manifest_path = ARTIFACTS_DIR / "run_manifest.json"
+
+    recorded = _checkpoint_from_fold_summary(Path(summary_path), fold_idx)
+    if recorded is not None:
+        return recorded
+
+    from_manifest = _checkpoint_from_run_manifest(Path(manifest_path), fold_idx)
+    if from_manifest is not None:
+        return from_manifest
+
+    raise CheckpointResolutionError(
+        f"No checkpoint recorded for fold_{fold_idx}: neither {summary_path} "
+        f"nor {manifest_path} names it; refusing to guess a filename"
+    )
+
+
 def plot_feature_importance(predictions_dict: dict, summary_df: pd.DataFrame, output_path: Path | None = None) -> Path:
     """Create horizontal bar charts of top 15 feature importances per fold and aggregate.
+
+    Checkpoint locations come from the run's recorded artifact paths
+    (``resolve_fold_checkpoint``): the fold summary first, then the run
+    manifest. A fold whose checkpoint is not named by either record raises
+    ``CheckpointResolutionError`` — the plot never guesses a filename. A
+    recorded path whose file is absent is the intentional partial-checkout
+    case (checkpoints pruned after a run): that fold contributes zeros with a
+    warning, preserving the pre-existing behavior so the remaining folds still
+    render.
 
     Args:
         predictions_dict: Dict of fold predictions from load_validation_predictions()
@@ -220,11 +323,10 @@ def plot_feature_importance(predictions_dict: dict, summary_df: pd.DataFrame, ou
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    models_dir = ARTIFACTS_DIR / "checkpoints"
     all_importances = []
 
     for i in range(5):
-        model_path = models_dir / f"fold_{i}_model.pkl"
+        model_path = resolve_fold_checkpoint(i)
         if not model_path.exists():
             logger.warning("Model not found at %s, skipping fold %d", model_path, i)
             all_importances.append(np.zeros(len(INDICATORS)))
