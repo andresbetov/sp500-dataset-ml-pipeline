@@ -11,16 +11,16 @@ model input dates, so the benchmark cannot silently drift from the training rows
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
 from sklearn.metrics import r2_score
 
+from packages.ml.model.utils import get_project_paths
+
 logger = logging.getLogger(__name__)
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-DATASET_PATH = SCRIPT_DIR.parents[3] / "data" / "processed" / "dataset.parquet"
+DATASET_PATH = get_project_paths()["dataset_path"]
 
 # Canonical Corsi lags: daily, weekly, monthly.
 HAR_WINDOWS = (1, 5, 22)
