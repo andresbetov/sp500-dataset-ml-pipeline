@@ -32,6 +32,15 @@ def qlike_loss(actual_log: np.ndarray, forecast_log: np.ndarray) -> float:
 	the Hansen-Lunde loss log(f) + h/f, up to the target-only term ln(h) + 1. The mean
 	comes from ``qlike_mean``, the functional the trainer also optimizes and evaluates.
 
+	Signed identity: QLIKE = HL - ln(h) - 1, equivalently HL = QLIKE + ln(h) + 1 for
+	the Hansen-Lunde loss HL = ln(f) + h/f. The ranking is identical; the absolute
+	level differs only by the target-only constant ln(h) + 1.
+
+	Scale: the loss is in sigma (per-day volatility) units, h = exp(actual_log), not in
+	variance units. The same fit scored in variance units would report roughly 4-6x
+	different absolute magnitudes, so the pipeline's absolute values are not directly
+	comparable to literature numbers computed on a variance scale.
+
 	Unlike the R²/MAE/RMSE block this metric never swallows errors: non-finite inputs
 	or outputs raise.
 	"""
