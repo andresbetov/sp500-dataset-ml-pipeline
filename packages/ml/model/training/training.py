@@ -6,6 +6,7 @@ import time
 
 import joblib
 import numpy as np
+import pandas as pd
 from packages.ml.model.config import get_config
 from packages.ml.model.cross_validation.cv_utils import load_folds_metadata
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
@@ -40,13 +41,37 @@ def qlike_loss(actual_log: np.ndarray, forecast_log: np.ndarray) -> float:
 	return qlike_mean(delta)
 
 
-def _validate_training_prerequisites(y: np.ndarray, folds_metadata: dict) -> None:
+def validate_fold_minima(fold_idx: int, train_indices: np.ndarray, test_indices: np.ndarray) -> None:
+	"""Require both sides of a fold to hold at least one index.
+
+	The single per-fold minima implementation: the pre-training prerequisite pass
+	runs it for every fold, and the cross-validation boundary imports it for the
+	folds it constructs. Empty indices would otherwise surface much later as an
+	opaque model or metric failure.
+	"""
+	if len(train_indices) == 0:
+		raise ValueError(f"Fold {fold_idx}: empty train indices")
+	if len(test_indices) == 0:
+		raise ValueError(f"Fold {fold_idx}: empty test indices")
+
+
+def _validate_training_prerequisites(
+	X: np.ndarray,
+	y: np.ndarray,
+	metadata: dict,
+	folds_metadata: dict,
+) -> None:
 	"""
 	Validate prerequisites that Phase 2-3 couldn't guarantee.
 
 	For regression, validates:
 	- Target is continuous (non-NaN, finite values)
 	- Exactly 5 folds (Phase 3 must have completed correctly)
+	- Features are finite (a non-finite input would poison every fold fit)
+	- No duplicated (ticker, date) rows (one row per ticker-day)
+	- Feature width matches the metadata counts
+	- The regime label exists, is 1-D, row-aligned, and inside the seven buckets
+	- Every fold has non-empty train and test indices (validate_fold_minima)
 	"""
 	# Validate target values (detect data corruption)
 	if not np.isfinite(y).all():
@@ -57,6 +82,63 @@ def _validate_training_prerequisites(y: np.ndarray, folds_metadata: dict) -> Non
 	# Validate folds count (Phase 3 executed correctly)
 	if len(folds_metadata) != 5:
 		raise ValueError(f"Expected 5 folds, got {len(folds_metadata)}")
+
+	# Validate features; a single vectorized scan is fine, X may be a memory map.
+	finite = np.isfinite(X)
+	if not finite.all():
+		nan_count = int(np.isnan(X).sum())
+		inf_count = int(np.isinf(X).sum())
+		raise ValueError(f"Invalid feature values. Found {nan_count} NaNs and {inf_count} infs")
+
+	# Validate one row per (ticker, date): a duplicated pair would silently
+	# double-weight a ticker-day in every fold fit.
+	duplicate_count = int(
+		pd.MultiIndex.from_arrays([metadata["ticker"], metadata["date"]]).duplicated().sum()
+	)
+	if duplicate_count:
+		raise ValueError(f"Duplicate (ticker, date) rows: {duplicate_count} duplicated pairs")
+
+	# Validate the width against the metadata counts Phase 2 wrote.
+	expected_width = int(metadata["n_indicators"]) + int(metadata["n_ticker_features"])
+	if X.shape[1] != expected_width:
+		raise ValueError(
+			f"Feature width mismatch: X has {X.shape[1]} columns but metadata implies "
+			f"{expected_width} (n_indicators={metadata['n_indicators']} + "
+			f"n_ticker_features={metadata['n_ticker_features']})"
+		)
+
+	# Validate the regime contract: the seven integer calendar buckets 0..6, one
+	# label per row. Fail loud while the key is absent rather than train unlabeled.
+	if "regime" not in metadata:
+		raise ValueError("metadata is missing the 'regime' key (seven calendar buckets 0..6)")
+	regime = np.asarray(metadata["regime"])
+	if regime.ndim != 1:
+		raise ValueError(f"metadata['regime'] must be a 1-D array, got shape {regime.shape}")
+	if len(regime) != len(y):
+		raise ValueError(f"metadata['regime'] has {len(regime)} entries but there are {len(y)} rows")
+	if not (
+		np.issubdtype(regime.dtype, np.integer)
+		or np.issubdtype(regime.dtype, np.floating)
+	):
+		raise ValueError(f"metadata['regime'] must be integer-valued, got dtype {regime.dtype}")
+	numeric_regime = regime.astype(np.float64)
+	in_buckets = (
+		(numeric_regime >= 0)
+		& (numeric_regime <= 6)
+		& (numeric_regime == np.floor(numeric_regime))
+	)
+	if not in_buckets.all():
+		invalid_values = np.unique(regime[~in_buckets]).tolist()
+		raise ValueError(
+			f"metadata['regime'] must contain only integers in 0..6; "
+			f"found invalid values: {invalid_values}"
+		)
+
+	# Validate every fold holds both sides (single minima implementation:
+	# validate_fold_minima).
+	for fold_idx in range(5):
+		fold_data = folds_metadata[f"fold_{fold_idx}"]
+		validate_fold_minima(fold_idx, fold_data["train_indices"], fold_data["test_indices"])
 
 	logger.info(f"Pre-training validation passed")
 	logger.info(f"Target statistics: range [{y.min():.6f}, {y.max():.6f}], mean {y.mean():.6f}, std {y.std():.6f}")
@@ -276,7 +358,7 @@ def phase_4_training() -> tuple[dict, dict, list]:
 	logger.info(f"Features: {metadata['n_indicators']} indicators + {metadata['n_ticker_features']} ticker = {X.shape[1]} total")
 
 	# Validate prerequisites
-	_validate_training_prerequisites(y, folds_metadata)
+	_validate_training_prerequisites(X, y, metadata, folds_metadata)
 
 	# Model the log of the target; the floor only touches the exact-zero Yang-Zhang
 	# windows (flat 5-day prices), which would otherwise make log(0) undefined. Rows at
