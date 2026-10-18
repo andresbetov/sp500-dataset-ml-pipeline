@@ -23,6 +23,14 @@ from packages.ml.model.training.har_benchmark import (
 )
 from packages.ml.model.training.model_trainer import train_xgboost_model
 from packages.ml.model.training.qlike_objective import qlike_mean
+from packages.ml.model.run_log import (
+	finish_run,
+	new_run,
+	record_artifacts,
+	record_fold,
+	record_phase,
+	to_repo_relative,
+)
 from packages.ml.model.utils import ARTIFACTS_DIR
 
 logger = logging.getLogger(__name__)
@@ -287,7 +295,7 @@ def _train_fold_model(
 		"train_time_seconds": train_time,
 		"inference_time_seconds": inference_time,
 		"fold_time_seconds": fold_elapsed,
-		"fold_model_path": str(model_path),
+		"fold_model_path": to_repo_relative(model_path),
 		"train_date_range": (fold_data["train_date_min"], fold_data["train_date_max"]),
 		"test_date_range": (fold_data["test_date_min"], fold_data["test_date_max"]),
 	}
@@ -363,13 +371,19 @@ def _save_training_results(
 
 	joblib.dump(validation_predictions, val_pred_path)
 
-	# Convert fold_training_summary to JSON-serializable format
+	# Convert fold_training_summary to JSON-serializable format. Persisted paths
+	# stay repo-relative: to_repo_relative passes already-relative strings through
+	# and converts any absolute path built outside _train_fold_model.
 	summary_json = {}
 	for fold_key, summary in fold_training_summary.items():
 		summary_json[fold_key] = {
 			k: v if not isinstance(v, (np.floating, np.integer)) else float(v)
 			for k, v in summary.items()
 		}
+		if "model_path" in summary_json[fold_key]:
+			summary_json[fold_key]["model_path"] = to_repo_relative(
+				summary_json[fold_key]["model_path"]
+			)
 
 	with open(summary_path, "w") as f:
 		json.dump(summary_json, f, indent=2, default=str)
@@ -451,7 +465,10 @@ def _save_training_results(
 	logger.info(f"Training outputs saved (HAR benchmark report: {har_report_path})")
 
 
-def phase_4_training(coefficient_interpretation: bool = False) -> tuple[dict, dict, list]:
+def phase_4_training(
+	coefficient_interpretation: bool = False,
+	run: dict | None = None,
+) -> tuple[dict, dict, list]:
 	"""
 	Orchestrate Phase 4: Train 5 fold-specific XGBoost models (1 per fold) with no temporal leakage.
 	Each fold_i_model trains exclusively on fold_i_train and is evaluated on fold_i_test.
@@ -471,7 +488,15 @@ def phase_4_training(coefficient_interpretation: bool = False) -> tuple[dict, di
 
 	Returns:
 		validation_predictions, fold_training_summary, fold_model_paths
+
+	``run`` is the caller's run record when the pipeline orchestrator owns the
+	run (one manifest and one JSONL line per pipeline run). When omitted, the
+	phase starts and finalizes its own run on success.
 	"""
+	standalone = run is None
+	if standalone:
+		run = new_run("phase_4_training", ARTIFACTS_DIR)
+	phase_started = time.monotonic()
 	logger.info("Phase 4: Fold-Specific Model Training (1 Model per Fold)")
 	overall_start_time = time.time()
 
@@ -631,6 +656,7 @@ def phase_4_training(coefficient_interpretation: bool = False) -> tuple[dict, di
 			f"clip_rate={har_result['clip_rate']:.6f})"
 		)
 
+		record_fold(run, fold_key, "completed", predictions_dict["fold_time_seconds"])
 		fold_predictions_list.append(predictions_dict)
 		fold_model_paths.append(predictions_dict["fold_model_path"])
 
@@ -648,6 +674,18 @@ def phase_4_training(coefficient_interpretation: bool = False) -> tuple[dict, di
 		fold_training_summary,
 		har_benchmark_results,
 		coefficient_interpretation=coefficient_interpretation,
+	)
+	record_artifacts(
+		run,
+		[
+			ARTIFACTS_DIR / "checkpoints" / f"fold_{fold_idx}_model.pkl"
+			for fold_idx in range(5)
+		]
+		+ [
+			ARTIFACTS_DIR / "results" / "validation_predictions.pkl",
+			ARTIFACTS_DIR / "results" / "fold_training_summary.json",
+			ARTIFACTS_DIR / "results" / "har_benchmark.json",
+		],
 	)
 
 	# Final summary with metrics
@@ -706,5 +744,14 @@ def phase_4_training(coefficient_interpretation: bool = False) -> tuple[dict, di
 			logger.info(f"    └─ Timing: {train_time:.1f}s train + {inference_time:.1f}s inference")
 	else:
 		logger.info(f"Phase 4 complete: 5 fold model(s), {total_time:.1f}s (no valid metrics)")
+
+	if standalone:
+		record_phase(
+			run,
+			"phase_4_training",
+			"completed",
+			time.monotonic() - phase_started,
+		)
+		finish_run(run, status="completed")
 
 	return validation_predictions, fold_training_summary, fold_model_paths
