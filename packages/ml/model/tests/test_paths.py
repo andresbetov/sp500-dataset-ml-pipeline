@@ -185,10 +185,14 @@ def test_load_har_regressors_reads_the_dataset() -> None:
 
     from packages.ml.model.training import har_benchmark
 
-    dates = pd.read_parquet(DATASET_PATH, columns=["date"])["date"].to_numpy()
-    components = har_benchmark.load_har_regressors(dates)
-    assert components.shape == (len(dates), len(har_benchmark.HAR_WINDOWS))
+    columns = pd.read_parquet(DATASET_PATH, columns=["ticker", "date"])
+    components, warmup_mask = har_benchmark.load_har_regressors(
+        columns["date"].to_numpy(), columns["ticker"].to_numpy()
+    )
+    assert components.shape == (len(columns), len(har_benchmark.HAR_WINDOWS))
     assert np.isfinite(components).all()
+    assert warmup_mask.dtype == bool
+    assert warmup_mask.shape == (len(columns),)
 
 
 if __name__ == "__main__":

@@ -49,8 +49,12 @@ LIVE_FOLD_0_KEPT_ROWS = 366_518
 LIVE_FOLD_0_FLOOR_RETAINED_EDGE = 0.07849
 
 
-def _synthetic_har_regressors(dates: np.ndarray) -> np.ndarray:
-    return np.full((len(dates), 3), 0.04, dtype=np.float64)
+def _synthetic_har_regressors(dates: np.ndarray, tickers: np.ndarray) -> tuple:
+    """Constant components with no warm-up rows: this suite pins the floor policy."""
+    return (
+        np.full((len(dates), 3), 0.04, dtype=np.float64),
+        np.zeros(len(tickers), dtype=bool),
+    )
 
 
 def _write_synthetic_artifacts(
@@ -456,7 +460,7 @@ def test_live_floor_retained_edge_reference() -> None:
     coefficients = np.asarray(
         json.loads(har_report_path.read_text())["folds"]["fold_0"]["coefficients"]
     )
-    regressors = load_har_regressors(metadata["date"])
+    regressors, _ = load_har_regressors(metadata["date"], metadata["ticker"])
     design = np.column_stack(
         [np.ones(len(test_indices)), regressors[test_indices]]
     )
