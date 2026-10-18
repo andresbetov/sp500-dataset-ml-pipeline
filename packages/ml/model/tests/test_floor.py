@@ -1,11 +1,13 @@
-"""Tests for the floor-degenerate training-fold guard at the fold-loop call site.
+"""Tests for the single floor policy, row masks, and the empty-fold guard.
 
-An all-floored fold — every raw training target at or below ``RV_FLOOR`` — leaves
-the floor filter with zero training rows. The fold loop must raise a named
-``ValueError`` naming the fold, the raw fold-train size, the floor, and the cause
-before any per-fold log line or trainer entry-point call. The same setup is
-exercised through ``phase_4_training`` against a temporary live-shaped artifact
-set, so no real pipeline run and no real artifacts are involved.
+At-or-below-floor target rows are flat-window artifacts: the same policy excludes
+them from model fitting, model scoring, and the HAR benchmark, and the fold
+artifacts record the original test indices, the aligned retained mask, the scored
+indices, and reconciled counts. An all-floored fold — every raw training target at
+or below ``RV_FLOOR`` — leaves the policy with zero training rows and must raise a
+named ``ValueError`` before any per-fold log line or trainer entry-point call. The
+same setups run through ``phase_4_training`` against temporary live-shaped
+artifact sets, so no real pipeline run and no real artifacts are involved.
 
 Run with pytest from the repository root:
 
@@ -19,6 +21,7 @@ This file also runs standalone:
 from __future__ import annotations
 
 import contextlib
+import json
 import tempfile
 import traceback
 from pathlib import Path
@@ -28,7 +31,7 @@ import joblib
 import numpy as np
 import pytest
 
-from conftest import ARTIFACTS_DIR, requires_live_artifacts
+from conftest import ARTIFACTS_DIR, DATASET_PATH, requires_live_artifacts
 from packages.ml.model.cross_validation import cv_utils
 from packages.ml.model.training import training
 
@@ -37,25 +40,42 @@ BLOCK_ROWS = 10
 N_INDICATORS = 3
 N_TICKER_FEATURES = 1
 ALL_FLOORED_TRAIN_SIZE = BLOCK_ROWS
+POLICY_FLOORED_TRAIN_SIZE = 4
+# One at-or-below-floor test row per fold test block, plus a smallest-positive
+# row in fold 0's test block so the retained side is exercised too.
+TEST_FLOOR_ROWS = (12, 25, 38, 42, 57)
+TEST_SMALLEST_POSITIVE_ROW = 13
 LIVE_FOLD_0_KEPT_ROWS = 366_518
+LIVE_FOLD_0_FLOOR_RETAINED_EDGE = 0.07849
 
 
 def _synthetic_har_regressors(dates: np.ndarray) -> np.ndarray:
     return np.full((len(dates), 3), 0.04, dtype=np.float64)
 
 
-def _write_synthetic_artifacts(root: Path) -> None:
+def _write_synthetic_artifacts(
+    root: Path,
+    *,
+    floored_train_size: int = ALL_FLOORED_TRAIN_SIZE,
+    floor_test_rows: tuple[int, ...] = TEST_FLOOR_ROWS,
+) -> None:
     """Write a live-shaped Phase 2-3 input set under ``root``.
 
-    Fold 0's training rows are all exactly zero (the flat-window artifact that
-    the floor exists for); its test rows are normal. Later folds inherit those
-    degenerate rows in their expanding training window while keeping normal
-    rows, mirroring the live fold geometry.
+    The first ``floored_train_size`` rows are exactly zero (the flat-window
+    artifact that the floor exists for). Each fold's test block carries one
+    at-or-below-floor row, and fold 0's test block also carries the smallest
+    positive value, so excluded and retained test rows are both exercised. The
+    first feature is the row index, letting a recording model identify exactly
+    which rows it scored.
     """
     rng = np.random.default_rng(23)
     y = rng.uniform(0.05, 0.6, size=N_ROWS)
-    y[:ALL_FLOORED_TRAIN_SIZE] = 0.0
+    y[:floored_train_size] = 0.0
+    for row in floor_test_rows:
+        y[row] = training.RV_FLOOR
+    y[TEST_SMALLEST_POSITIVE_ROW] = np.nextafter(training.RV_FLOOR, np.inf)
     X = rng.normal(size=(N_ROWS, N_INDICATORS + N_TICKER_FEATURES))
+    X[:, 0] = np.arange(N_ROWS, dtype=np.float64)
     dates = np.datetime64("2000-01-03") + np.arange(N_ROWS)
 
     metadata = {
@@ -85,23 +105,33 @@ def _write_synthetic_artifacts(root: Path) -> None:
     folds = root / "folds"
     inputs.mkdir(parents=True)
     folds.mkdir(parents=True)
+    (root / "checkpoints").mkdir()
+    (root / "results").mkdir()
     np.save(inputs / "X.npy", X)
     np.save(inputs / "Y.npy", y)
     joblib.dump(metadata, inputs / "metadata.pkl")
     joblib.dump(folds_metadata, folds / "folds_metadata.pkl")
 
 
-def _run_fold_loop(*, trainer=None, logger=None) -> tuple:
+def _run_fold_loop(
+    *,
+    trainer=None,
+    logger=None,
+    har_fit=None,
+    floored_train_size: int = ALL_FLOORED_TRAIN_SIZE,
+    return_inputs: bool = False,
+) -> tuple:
     """Run phase_4_training against synthetic artifacts under a temporary root.
 
-    Only the artifact locations and the HAR loader (which reads the real dataset
-    parquet) are redirected; the prerequisite pass, floor filter, and fold loop
-    run as in the pipeline. ``trainer`` and ``logger`` replace the module-level
-    trainer entry point and module logger when provided.
+    Only the artifact locations, the HAR loader (which reads the real dataset
+    parquet), and optionally the trainer/HAR entry points are redirected; the
+    prerequisite pass, floor policy, and fold loop run as in the pipeline.
+    ``return_inputs`` appends the synthetic raw targets and fold metadata to the
+    returned tuple so checks can reconstruct masks outside the temporary root.
     """
     with tempfile.TemporaryDirectory() as tmpdir:
         root = Path(tmpdir)
-        _write_synthetic_artifacts(root)
+        _write_synthetic_artifacts(root, floored_train_size=floored_train_size)
         with contextlib.ExitStack() as stack:
             stack.enter_context(mock.patch.object(training, "ARTIFACTS_DIR", root))
             stack.enter_context(mock.patch.object(cv_utils, "ARTIFACTS_DIR", root))
@@ -114,9 +144,56 @@ def _run_fold_loop(*, trainer=None, logger=None) -> tuple:
                 stack.enter_context(
                     mock.patch.object(training, "train_xgboost_model", trainer)
                 )
+            if har_fit is not None:
+                stack.enter_context(
+                    mock.patch.object(training, "fit_har_benchmark", har_fit)
+                )
             if logger is not None:
                 stack.enter_context(mock.patch.object(training, "logger", logger))
-            return training.phase_4_training()
+            result = training.phase_4_training()
+            if return_inputs:
+                y = np.load(root / "inputs" / "Y.npy")
+                folds_metadata = joblib.load(root / "folds" / "folds_metadata.pkl")
+                return (*result, y, folds_metadata)
+            return result
+
+
+class _RecordingModel:
+    """Picklable stand-in model that records the row indices it scores."""
+
+    def __init__(self, scored_rows: list) -> None:
+        self._scored_rows = scored_rows
+
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        self._scored_rows.append(np.asarray(X)[:, 0].astype(np.int64))
+        return np.full(len(X), -2.5, dtype=np.float64)
+
+
+def _recording_trainer(record: dict):
+    """Trainer double: records fit rows and returns a recording model."""
+
+    def trainer(X_train, y_train, X_val=None, y_val=None):
+        record["train_rows"].append(np.asarray(X_train)[:, 0].astype(np.int64))
+        return _RecordingModel(record["scored_rows"]), {}
+
+    return trainer
+
+
+def _har_spy(real_fit, calls: list, results: list):
+    """Wrap the HAR entry point, capturing arguments and the returned dict."""
+
+    def spy(**kwargs):
+        calls.append(
+            {
+                key: value.copy() if isinstance(value, np.ndarray) else value
+                for key, value in kwargs.items()
+            }
+        )
+        result = real_fit(**kwargs)
+        results.append(result)
+        return result
+
+    return spy
 
 
 def test_all_floored_fold_raises_named_value_error() -> None:
@@ -189,6 +266,213 @@ def test_strict_floor_filter_drops_at_floor_rows_and_keeps_smallest_positive() -
 
     assert kept.tolist() == [2, 3, 4]
     assert smallest_positive > floor
+
+
+def test_floor_policy_semantics_are_strict_at_the_boundary() -> None:
+    floor = training.RV_FLOOR
+    values = np.array(
+        [
+            0.0,
+            floor,
+            np.nextafter(floor, -np.inf),
+            np.nextafter(floor, np.inf),
+            floor * 2.0,
+            0.25,
+        ]
+    )
+
+    mask = training.floor_retained_mask(values)
+
+    assert mask.dtype == bool
+    assert mask.tolist() == [False, False, False, True, True, True]
+    assert training.floor_retained_mask([]).tolist() == []
+
+
+def test_floor_policy_and_headline_are_single_source() -> None:
+    source = Path(training.__file__).read_text(encoding="utf-8")
+
+    # Exactly one comparison implements the policy; every consumer calls it.
+    assert source.count("> RV_FLOOR") == 1
+    assert "<= RV_FLOOR" not in source
+    # The declared headline row set is a module constant reused by name.
+    assert source.count(f'"{training.HEADLINE_ROW_SET}"') == 1
+
+
+def test_floor_policy_symmetry() -> None:
+    record = {"train_rows": [], "scored_rows": []}
+    har_calls: list = []
+    har_results: list = []
+    real_fit = training.fit_har_benchmark
+    har_spy = _har_spy(real_fit, har_calls, har_results)
+
+    validation, summary, _, y, folds_metadata = _run_fold_loop(
+        trainer=_recording_trainer(record),
+        har_fit=har_spy,
+        floored_train_size=POLICY_FLOORED_TRAIN_SIZE,
+        return_inputs=True,
+    )
+
+    assert len(record["scored_rows"]) == 5
+    assert len(har_calls) == 5
+    assert len(har_results) == 5
+
+    for fold_idx in range(5):
+        fold_key = f"fold_{fold_idx}"
+        fold_data = folds_metadata[fold_key]
+        original_test = np.asarray(fold_data["test_indices"])
+        expected_mask = np.asarray(y[original_test]) > training.RV_FLOOR
+        retained_test = original_test[expected_mask]
+        expected_train = training._model_training_indices(fold_data, y)
+
+        # Both sides of the fold hold excluded rows, so the checks cannot pass
+        # vacuously on a fold with nothing to drop.
+        assert expected_mask.any()
+        assert not expected_mask.all()
+        assert len(expected_train) < len(fold_data["train_indices"])
+
+        # Model fitting and model scoring receive the same retained train/test
+        # rows as the HAR benchmark; no at-or-below-floor row reaches either.
+        assert np.array_equal(record["train_rows"][fold_idx], expected_train)
+        assert np.array_equal(record["scored_rows"][fold_idx], retained_test)
+        assert np.array_equal(har_calls[fold_idx]["train_indices"], expected_train)
+        assert np.array_equal(har_calls[fold_idx]["test_indices"], retained_test)
+        assert np.array_equal(
+            har_calls[fold_idx]["target_log_test"],
+            np.log(np.maximum(y[retained_test], training.RV_FLOOR)),
+        )
+        assert np.all(y[record["scored_rows"][fold_idx]] > training.RV_FLOOR)
+        assert np.all(y[har_calls[fold_idx]["test_indices"]] > training.RV_FLOOR)
+        assert not set(retained_test.tolist()) & set(expected_train.tolist())
+
+        # The stored fold record exposes the same retained set.
+        assert np.array_equal(
+            validation[fold_key]["test_floor_mask"], expected_mask
+        )
+        assert np.array_equal(
+            validation[fold_key]["test_indices_scored"], retained_test
+        )
+
+
+def test_floor_row_masks_emitted() -> None:
+    record = {"train_rows": [], "scored_rows": []}
+    har_calls: list = []
+    har_results: list = []
+    real_fit = training.fit_har_benchmark
+    har_spy = _har_spy(real_fit, har_calls, har_results)
+
+    validation, summary, _, y, folds_metadata = _run_fold_loop(
+        trainer=_recording_trainer(record),
+        har_fit=har_spy,
+        floored_train_size=POLICY_FLOORED_TRAIN_SIZE,
+        return_inputs=True,
+    )
+
+    for fold_idx in range(5):
+        fold_key = f"fold_{fold_idx}"
+        fold_data = folds_metadata[fold_key]
+        original_test = np.asarray(fold_data["test_indices"])
+        expected_mask = np.asarray(y[original_test]) > training.RV_FLOOR
+        retained_test = original_test[expected_mask]
+        n_train_floor_excluded = len(fold_data["train_indices"]) - len(
+            training._model_training_indices(fold_data, y)
+        )
+
+        prediction = validation[fold_key]
+        assert np.array_equal(prediction["test_indices"], original_test)
+        assert prediction["test_floor_mask"].dtype == bool
+        assert np.array_equal(prediction["test_floor_mask"], expected_mask)
+        assert np.array_equal(prediction["test_indices_scored"], retained_test)
+
+        expected_counts = {
+            "n_test_total": len(original_test),
+            "n_test_floor_excluded": int(len(original_test) - expected_mask.sum()),
+            "n_test_scored": int(expected_mask.sum()),
+            "n_train_floor_excluded": n_train_floor_excluded,
+        }
+        for key, expected in expected_counts.items():
+            assert prediction[key] == expected, f"{fold_key}.{key}"
+            assert summary[fold_key][key] == expected, f"summary.{fold_key}.{key}"
+
+        assert (
+            prediction["n_test_scored"] + prediction["n_test_floor_excluded"]
+            == prediction["n_test_total"]
+        )
+        assert prediction["n_test_samples"] == prediction["n_test_scored"]
+        assert len(prediction["test_pred"]) == prediction["n_test_scored"]
+        assert len(prediction["test_true"]) == prediction["n_test_scored"]
+        assert prediction["headline_row_set"] == training.HEADLINE_ROW_SET
+        assert summary[fold_key]["headline_row_set"] == training.HEADLINE_ROW_SET
+
+        # The HAR result carries the matching counts and the declaration.
+        har_result = har_results[fold_idx]
+        assert har_result["n_test"] == prediction["n_test_scored"]
+        assert har_result["n_test_total"] == prediction["n_test_total"]
+        assert (
+            har_result["n_test_floor_excluded"]
+            == prediction["n_test_floor_excluded"]
+        )
+        assert har_result["n_test_scored"] == prediction["n_test_scored"]
+        assert (
+            har_result["n_train_floor_excluded"]
+            == prediction["n_train_floor_excluded"]
+        )
+        assert har_result["headline_row_set"] == training.HEADLINE_ROW_SET
+
+
+def test_floor_policy_non_regression() -> None:
+    # Training membership is unchanged: the live fold-0 set is pinned by the
+    # live check below, and the policy still keeps strict `>` semantics.
+    low = training.qlike_loss(np.array([-23.025851]), np.array([0.0]))
+    high = training.qlike_loss(np.array([23.025851]), np.array([0.0]))
+    assert low == pytest.approx(22.025851, rel=1e-9)
+    assert high == pytest.approx(1e10, rel=1e-6)
+
+
+def test_live_floor_retained_edge_reference() -> None:
+    requires_live_artifacts(ARTIFACTS_DIR)
+    predictions_path = ARTIFACTS_DIR / "results" / "validation_predictions.pkl"
+    har_report_path = ARTIFACTS_DIR / "results" / "har_benchmark.json"
+    metadata_path = ARTIFACTS_DIR / "inputs" / "metadata.pkl"
+    if not (
+        predictions_path.is_file()
+        and har_report_path.is_file()
+        and metadata_path.is_file()
+        and DATASET_PATH.is_file()
+    ):
+        pytest.skip(
+            "requires stored live predictions, HAR report, metadata, and dataset parquet"
+        )
+
+    from packages.ml.model.training.har_benchmark import load_har_regressors
+
+    folds_metadata = joblib.load(ARTIFACTS_DIR / "folds" / "folds_metadata.pkl")
+    y = np.asarray(np.load(ARTIFACTS_DIR / "inputs" / "Y.npy", mmap_mode="r"))
+    metadata = joblib.load(metadata_path)
+    prediction = joblib.load(predictions_path)["fold_0"]
+    test_indices = np.asarray(folds_metadata["fold_0"]["test_indices"])
+    mask = np.asarray(y[test_indices]) > training.RV_FLOOR
+    assert mask.any() and not mask.all()
+
+    coefficients = np.asarray(
+        json.loads(har_report_path.read_text())["folds"]["fold_0"]["coefficients"]
+    )
+    regressors = load_har_regressors(metadata["date"])
+    design = np.column_stack(
+        [np.ones(len(test_indices)), regressors[test_indices]]
+    )
+    forecast_variance = np.maximum(
+        design @ coefficients, training.RV_FLOOR**2
+    )
+    har_forecast_log = 0.5 * np.log(forecast_variance)
+
+    retained_true = prediction["test_true"][mask]
+    model_qlike = training.qlike_loss(retained_true, prediction["test_pred"][mask])
+    har_qlike = training.qlike_loss(retained_true, har_forecast_log[mask])
+    edge = abs(model_qlike - har_qlike)
+
+    assert edge == pytest.approx(
+        LIVE_FOLD_0_FLOOR_RETAINED_EDGE, abs=1e-3
+    ), f"floor-retained fold-0 model-vs-HAR edge {edge:.8f}"
 
 
 def test_live_fold_0_keeps_exactly_the_above_floor_rows() -> None:

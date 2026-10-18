@@ -22,6 +22,23 @@ logger = logging.getLogger(__name__)
 # smallest positive target in the frame is ~2.6e-10.
 RV_FLOOR = float(get_config()["rv_floor"])
 
+# The one declared headline row set. Fitting, model scoring, and the HAR benchmark
+# all consume this same floor-retained set; the downstream with/without decomposition
+# reads the per-fold masks and counts emitted below.
+HEADLINE_ROW_SET = "floor-retained rows (raw RV strictly above RV_FLOOR)"
+
+
+def floor_retained_mask(values: np.ndarray) -> np.ndarray:
+	"""The single floor policy: True where a raw target is strictly above RV_FLOOR.
+
+	At-or-below-floor targets are flat-window artifacts: their log label is undefined
+	and their QLIKE contribution is an extreme artifact of the floor. The same
+	predicate filters fold training, model scoring, and the HAR benchmark, so no row is
+	fitted or scored under a different rule. The comparison is strict, so a target
+	exactly at the floor is excluded and the smallest positive target is kept.
+	"""
+	return np.asarray(values) > RV_FLOOR
+
 
 def qlike_loss(actual_log: np.ndarray, forecast_log: np.ndarray) -> float:
 	"""QLIKE loss for log-sigma forecasts (Patton 2011; Hansen-Lunde 2005).
@@ -157,17 +174,17 @@ def _validate_training_prerequisites(
 
 
 def _model_training_indices(fold_data: dict, y: np.ndarray) -> np.ndarray:
-	"""Training row indices for one fold, with degenerate at-or-below-floor rows removed.
+	"""Training row indices for one fold, with floor-artifact rows removed.
 
 	The exact-zero Yang-Zhang windows are flat-price artifacts: their log target is
 	undefined (floored for finiteness). A QLIKE-trained model that fits their
 	extreme labels under-forecasts similar test rows by ~20 log-units, where the
-	exponential term explodes. The filter uses the same floor as the target
-	transform, so a positive target at floor level cannot enter training as a
-	floored degenerate label. Test sets keep every row.
+	exponential term explodes. This is the training side of the single floor policy;
+	the same ``floor_retained_mask`` excludes those rows from scoring and the HAR
+	benchmark too.
 	"""
 	train_indices = np.array(fold_data["train_indices"])
-	return train_indices[y[train_indices] > RV_FLOOR]
+	return train_indices[floor_retained_mask(y[train_indices])]
 
 
 def _train_fold_model(
@@ -177,19 +194,21 @@ def _train_fold_model(
 	X_test: np.ndarray,
 	y_test: np.ndarray,
 	fold_data: dict,
+	row_policy: dict | None = None,
 ) -> tuple:
 	"""
 	Train one XGBoost model per fold on the log target. No temporal leakage: model
-	trained only on fold_i_train, evaluated on fold_i_test (which is strictly future to
-	train dates).
+	trained only on fold_i_train, evaluated on the floor-retained fold_i_test rows
+	(which are strictly future to train dates).
 
 	Args:
 		fold_idx: Fold index (0-4)
 		X_train: Training features from fold_i_train
 		y_train: Training log-target from fold_i_train
-		X_test: Test features from fold_i_test
-		y_test: Test log-target from fold_i_test
+		X_test: Floor-retained test features from fold_i_test
+		y_test: Floor-retained test log-target from fold_i_test
 		fold_data: Fold metadata (dates, counts)
+		row_policy: Per-fold floor mask, indices, counts, and headline declaration
 
 	Returns:
 		(model, predictions_dict)
@@ -258,6 +277,8 @@ def _train_fold_model(
 		"train_date_range": (fold_data["train_date_min"], fold_data["train_date_max"]),
 		"test_date_range": (fold_data["test_date_min"], fold_data["test_date_max"]),
 	}
+	if row_policy is not None:
+		predictions_dict.update(row_policy)
 
 	return model, predictions_dict
 
@@ -283,6 +304,11 @@ def _aggregate_fold_results(fold_predictions_list: list) -> tuple[dict, dict]:
 			"test_date_max": pred_dict["test_date_range"][1],
 			"n_train_samples": int(pred_dict["n_train_samples"]),
 			"n_test_samples": int(pred_dict["n_test_samples"]),
+			"n_test_total": int(pred_dict["n_test_total"]),
+			"n_test_floor_excluded": int(pred_dict["n_test_floor_excluded"]),
+			"n_test_scored": int(pred_dict["n_test_scored"]),
+			"n_train_floor_excluded": int(pred_dict["n_train_floor_excluded"]),
+			"headline_row_set": pred_dict["headline_row_set"],
 			"n_features": int(pred_dict["n_features"]),
 			"model_path": pred_dict["fold_model_path"],
 			"test_r2": pred_dict["test_r2"],
@@ -329,6 +355,7 @@ def _save_training_results(
 		"target": "log(realized_volatility_5d)",
 		"r2_convention": "log-target scale, fold-own-mean (sklearn r2_score)",
 		"qlike": "h/f - ln(h/f) - 1 with h=exp(actual), f=exp(forecast); target in native per-day sigma units",
+		"headline_row_set": HEADLINE_ROW_SET,
 		"folds": {
 			fold_key: {
 				**result,
@@ -350,8 +377,9 @@ def phase_4_training() -> tuple[dict, dict, list]:
 	Each fold_i_model trains exclusively on fold_i_train and is evaluated on fold_i_test.
 	The modeled target is log(RV) — the Yang-Zhang variance is closer to log-normal and
 	the fold models minimize QLIKE on that log target — and every fold also fits the
-	canonical HAR-RV benchmark on its training rows only. Degenerate exact-zero target
-	rows are excluded from the training sets and kept in the test sets.
+	canonical HAR-RV benchmark on its training rows only. Degenerate at-or-below-floor
+	target rows are flat-window artifacts and are excluded from fitting and scoring
+	under the single floor policy; the retained row set is declared and counted.
 
 	Returns:
 		validation_predictions, fold_training_summary, fold_model_paths
@@ -373,13 +401,14 @@ def phase_4_training() -> tuple[dict, dict, list]:
 	_validate_training_prerequisites(X, y, metadata, folds_metadata)
 
 	# Model the log of the target; the floor only touches the exact-zero Yang-Zhang
-	# windows (flat 5-day prices), which would otherwise make log(0) undefined. Rows at
-	# or below the floor are excluded from the fold training sets (see
-	# _model_training_indices) but stay in the test sets.
+	# windows (flat 5-day prices), which would otherwise make log(0) undefined. The
+	# same floor policy excludes those artifact rows from fold fitting, model
+	# scoring, and the HAR benchmark (see floor_retained_mask).
 	y_log = np.log(np.maximum(y, RV_FLOOR))
+	floor_retained = floor_retained_mask(y)
 	logger.info(
-		f"Log target: log(RV) with floor {RV_FLOOR:g}; rows at or below the floor = {int(np.count_nonzero(y <= RV_FLOOR)):,} "
-		f"(excluded from training, kept in test sets)"
+		f"Log target: log(RV) with floor {RV_FLOOR:g}; rows at or below the floor = {int(y.size - np.count_nonzero(floor_retained)):,} "
+		f"(excluded from fitting and scoring; headline row set: {HEADLINE_ROW_SET})"
 	)
 
 	har_regressors = load_har_regressors(metadata["date"])
@@ -393,8 +422,9 @@ def phase_4_training() -> tuple[dict, dict, list]:
 		fold_key = f"fold_{fold_idx}"
 		fold_data = folds_metadata[fold_key]
 
-		# Extract fold-specific data; degenerate at-or-below-floor rows are dropped
-		# from the training side only (the HAR benchmark shares the same rows).
+		# Extract fold-specific data under the single floor policy: the same
+		# floor-retained rows feed model fitting, model scoring, and the HAR
+		# benchmark. The HAR fit itself still sees training rows only.
 		train_indices = _model_training_indices(fold_data, y)
 
 		# An all-floored fold keeps no training rows: every label would be the
@@ -407,16 +437,42 @@ def phase_4_training() -> tuple[dict, dict, list]:
 			)
 
 		test_indices = np.array(fold_data["test_indices"])
+		test_floor_mask = floor_retained_mask(y[test_indices])
+		test_indices_scored = test_indices[test_floor_mask]
+		n_test_total = int(len(test_indices))
+		n_test_scored = int(len(test_indices_scored))
+		n_test_floor_excluded = n_test_total - n_test_scored
+		n_train_floor_excluded = int(fold_data["n_train"]) - len(train_indices)
+
+		# An all-floored test fold has nothing left to score; name it rather than
+		# letting an empty prediction array fail later in a metric.
+		if test_indices_scored.size == 0:
+			raise ValueError(
+				f"Fold {fold_idx} ({fold_key}): all {n_test_total} fold-test rows "
+				f"are at or below the floor {RV_FLOOR:g} (RV_FLOOR); no scoring rows remain"
+			)
+
+		row_policy = {
+			"test_indices": test_indices,
+			"test_floor_mask": test_floor_mask,
+			"test_indices_scored": test_indices_scored,
+			"n_test_total": n_test_total,
+			"n_test_floor_excluded": n_test_floor_excluded,
+			"n_test_scored": n_test_scored,
+			"n_train_floor_excluded": n_train_floor_excluded,
+			"headline_row_set": HEADLINE_ROW_SET,
+		}
 
 		logger.info(
-			f"  Fold {fold_idx}: excluded {int(fold_data['n_train']) - len(train_indices):,} "
-			f"degenerate at-or-below-floor rows from training"
+			f"  Fold {fold_idx}: excluded {n_train_floor_excluded:,} degenerate "
+			f"at-or-below-floor rows from training; excluded {n_test_floor_excluded:,} "
+			f"of {n_test_total:,} test rows from scoring"
 		)
 
 		X_train = X[train_indices]
 		y_train = y_log[train_indices]
-		X_test = X[test_indices]
-		y_test = y_log[test_indices]
+		X_test = X[test_indices_scored]
+		y_test = y_log[test_indices_scored]
 
 		# Train fold model (1 model per fold, only on fold_i_train data, no leakage)
 		model, predictions_dict = _train_fold_model(
@@ -426,16 +482,27 @@ def phase_4_training() -> tuple[dict, dict, list]:
 			X_test=X_test,
 			y_test=y_test,
 			fold_data=fold_data,
+			row_policy=row_policy,
 		)
 
-		# Canonical HAR-RV benchmark on the same fold rows, fitted on train only.
+		# Canonical HAR-RV benchmark on the same floor-retained rows, fitted on
+		# train only and scored on the retained test rows.
 		har_result = fit_har_benchmark(
 			train_indices=train_indices,
-			test_indices=test_indices,
+			test_indices=test_indices_scored,
 			target_log_train=y_train,
 			target_log_test=y_test,
 			regressors=har_regressors,
 			forecast_floor=RV_FLOOR,
+		)
+		har_result.update(
+			{
+				"n_test_total": n_test_total,
+				"n_test_floor_excluded": n_test_floor_excluded,
+				"n_test_scored": n_test_scored,
+				"n_train_floor_excluded": n_train_floor_excluded,
+				"headline_row_set": HEADLINE_ROW_SET,
+			}
 		)
 		har_result["har_qlike"] = qlike_loss(y_test, har_result.pop("forecast_log"))
 		predictions_dict["har_r2"] = har_result["har_r2"]
