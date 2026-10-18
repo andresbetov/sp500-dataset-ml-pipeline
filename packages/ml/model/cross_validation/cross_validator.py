@@ -5,8 +5,8 @@ import logging
 import joblib
 import numpy as np
 import pandas as pd
-from config import get_config
-from utils import ARTIFACTS_DIR
+from packages.ml.model.config import get_config
+from packages.ml.model.utils import ARTIFACTS_DIR
 
 logger = logging.getLogger(__name__)
 N_FOLDS = get_config()["folds"]["n_folds"]

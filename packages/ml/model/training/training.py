@@ -6,12 +6,12 @@ import time
 
 import joblib
 import numpy as np
-from config import get_config
-from cross_validation.cv_utils import load_folds_metadata
+from packages.ml.model.config import get_config
+from packages.ml.model.cross_validation.cv_utils import load_folds_metadata
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
-from training.har_benchmark import fit_har_benchmark, load_har_regressors
-from training.model_trainer import train_xgboost_model
-from utils import ARTIFACTS_DIR
+from packages.ml.model.training.har_benchmark import fit_har_benchmark, load_har_regressors
+from packages.ml.model.training.model_trainer import train_xgboost_model
+from packages.ml.model.utils import ARTIFACTS_DIR
 
 logger = logging.getLogger(__name__)
 

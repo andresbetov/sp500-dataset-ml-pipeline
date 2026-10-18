@@ -1,13 +1,23 @@
 from __future__ import annotations
 
 import logging
+import sys
+from pathlib import Path
+
+if __name__ == "__main__" and __package__ is None:
+    # Direct execution: python packages/ml/model/main.py — normalize to the
+    # canonical package identity so the package-absolute imports below resolve
+    # without an installation (PEP 366).
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+    __package__ = "packages.ml.model"
 
 import numpy as np
-from features.feature_engineering import phase_2_feature_selection
-from cross_validation.cross_validator import phase_3_cross_validation
-from training.training import phase_4_training
-from visualization.visualize import generate_all_visualizations
-from utils import ARTIFACTS_DIR, setup_logging
+
+from packages.ml.model.features.feature_engineering import phase_2_feature_selection
+from packages.ml.model.cross_validation.cross_validator import phase_3_cross_validation
+from packages.ml.model.training.training import phase_4_training
+from packages.ml.model.visualization.visualize import generate_all_visualizations
+from packages.ml.model.utils import ARTIFACTS_DIR, setup_logging
 
 logger = logging.getLogger(__name__)
 
@@ -19,9 +29,20 @@ def _ensure_model_directories() -> None:
         (ARTIFACTS_DIR / subdir).mkdir(parents=True, exist_ok=True)
 
 
-def main() -> None:
-    """Orchestrate ML pipeline: Phase 2 → Phase 3 → Phase 4 → Phase 5 (Visualization)."""
+def main(dry_run: bool = False) -> None:
+    """Orchestrate ML pipeline: Phase 2 → Phase 3 → Phase 4 → Phase 5 (Visualization).
+
+    With ``dry_run`` the planned phases are logged and nothing else runs.
+    """
     setup_logging()
+    if dry_run:
+        logger.info(
+            "Dry run: planned phases — Phase 2 (feature selection), "
+            "Phase 3 (temporal cross-validation), Phase 4 (model training), "
+            "Phase 5 (visualization)"
+        )
+        return
+
     _ensure_model_directories()
     logger.info("ML Pipeline - Phases 2-5 (Volatility Regression + Visualization)")
 
@@ -56,4 +77,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    args = sys.argv[1:]
+    if args and args != ["--dry-run"]:
+        sys.exit("usage: python -m packages.ml.model.main [--dry-run]")
+    main(dry_run=args == ["--dry-run"])

@@ -8,7 +8,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import pandas as pd
 
-from visualization.data_loader import load_fold_training_summary
+from packages.ml.model.visualization.data_loader import load_fold_training_summary
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +25,7 @@ def plot_r2_scores(summary_df: pd.DataFrame, output_path: Path | None = None) ->
         Path to saved figure
     """
     if output_path is None:
-        from utils import get_project_paths
+        from packages.ml.model.utils import get_project_paths
         output_path = get_project_paths()["outputs_dir"] / "r2_scores_by_fold.png"
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -75,7 +75,7 @@ def plot_mae_rmse_comparison(summary_df: pd.DataFrame, output_path: Path | None 
         Path to saved figure
     """
     if output_path is None:
-        from utils import get_project_paths
+        from packages.ml.model.utils import get_project_paths
         output_path = get_project_paths()["outputs_dir"] / "mae_rmse_comparison.png"
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -140,7 +140,7 @@ def plot_metric_heatmap(summary_df: pd.DataFrame, output_path: Path | None = Non
         Path to saved figure
     """
     if output_path is None:
-        from utils import get_project_paths
+        from packages.ml.model.utils import get_project_paths
         output_path = get_project_paths()["outputs_dir"] / "metrics_heatmap.png"
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -199,7 +199,7 @@ def generate_metrics_visualizations(summary_df: pd.DataFrame | None = None, outp
         summary_df = load_fold_training_summary()
 
     if output_dir is None:
-        from utils import get_project_paths
+        from packages.ml.model.utils import get_project_paths
         output_dir = get_project_paths()["outputs_dir"]
 
     output_dir.mkdir(parents=True, exist_ok=True)

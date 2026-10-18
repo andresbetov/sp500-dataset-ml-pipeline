@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import pandas as pd
 
-from visualization.data_loader import load_fold_training_summary
+from packages.ml.model.visualization.data_loader import load_fold_training_summary
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +29,7 @@ def plot_temporal_fold_ranges(summary_df: pd.DataFrame, output_path: Path | None
         Path to saved figure
     """
     if output_path is None:
-        from utils import get_project_paths
+        from packages.ml.model.utils import get_project_paths
         output_path = get_project_paths()["outputs_dir"] / "temporal_fold_ranges.png"
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -100,7 +100,7 @@ def plot_fold_sample_distribution(summary_df: pd.DataFrame, output_path: Path | 
         Path to saved figure
     """
     if output_path is None:
-        from utils import get_project_paths
+        from packages.ml.model.utils import get_project_paths
         output_path = get_project_paths()["outputs_dir"] / "fold_sample_distribution.png"
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -154,7 +154,7 @@ def plot_temporal_metric_trend(summary_df: pd.DataFrame, output_path: Path | Non
         Path to saved figure
     """
     if output_path is None:
-        from utils import get_project_paths
+        from packages.ml.model.utils import get_project_paths
         output_path = get_project_paths()["outputs_dir"] / "temporal_metric_trend.png"
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -215,7 +215,7 @@ def generate_temporal_visualizations(summary_df: pd.DataFrame | None = None, out
         summary_df = load_fold_training_summary()
 
     if output_dir is None:
-        from utils import get_project_paths
+        from packages.ml.model.utils import get_project_paths
         output_dir = get_project_paths()["outputs_dir"]
 
     output_dir.mkdir(parents=True, exist_ok=True)

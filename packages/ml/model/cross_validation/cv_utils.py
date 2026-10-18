@@ -5,7 +5,7 @@ import logging
 import joblib
 import numpy as np
 
-from utils import ARTIFACTS_DIR
+from packages.ml.model.utils import ARTIFACTS_DIR
 
 logger = logging.getLogger(__name__)
 
