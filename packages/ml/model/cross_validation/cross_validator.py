@@ -10,10 +10,13 @@ from packages.ml.model.utils import ARTIFACTS_DIR
 
 logger = logging.getLogger(__name__)
 N_FOLDS = get_config()["folds"]["n_folds"]
-# Complete trading days that must be excluded between the last kept training date and
-# the first kept test date; enforced as first_test_idx - last_train_idx >= SEPARATION_MIN
-# in unique-trading-date index space.
-CV_EMBARGO_DAYS = get_config()["folds"]["purge_horizon_days"]
+# The purge span in unique-trading-date index space: complete trading days excluded
+# between the last kept training date and the first kept test date; enforced as
+# first_test_idx - last_train_idx >= SEPARATION_MIN.
+PURGE_HORIZON_D = get_config()["folds"]["purge_horizon_days"]
+# Legacy embargo-named alias kept for existing imports; the purge-span constant
+# above is the real one.
+CV_EMBARGO_DAYS = PURGE_HORIZON_D
 # The target of row t aggregates the forward window [t+1, t+5], so a row's label window
 # reaches five trading days past its own date.
 LABEL_HORIZON_DAYS = get_config()["folds"]["label_horizon_days"]
@@ -36,9 +39,19 @@ def _fold_boundaries(n_dates: int) -> np.ndarray:
     """Contiguous block edges over the sorted unique trading dates.
 
     N_FOLDS + 1 blocks: fold k tests on block k+1 and trains on blocks 0..k, so the
-    first block is train-only and the training window expands with every fold.
+    first block is train-only and the training window expands with every fold. The
+    edges are the exact integer floors (k * n_dates) // (N_FOLDS + 1), so the last
+    edge is exactly n_dates, the per-edge arithmetic stays integer, and no block is
+    empty.
     """
-    return np.linspace(0, n_dates, N_FOLDS + 2).astype(int)
+    edges = (np.arange(N_FOLDS + 2) * n_dates) // (N_FOLDS + 1)
+    if np.any(np.diff(edges) <= 0):
+        raise ValueError(
+            f"degenerate calendar: empty block boundary set for {n_dates} unique "
+            f"trading dates ({edges.tolist()} cannot form {N_FOLDS + 1} non-empty "
+            f"contiguous blocks)"
+        )
+    return edges
 
 
 def _split_date_blocks(
@@ -71,11 +84,14 @@ def _verify_fold_separation(
     test_tpos: np.ndarray,
     purge_train_count: int,
 ) -> int:
-    """Enforce the separation predicate and the non-empty train purge for one fold.
+    """Enforce the separation predicate and the window invariant for one fold.
 
     The single embargo predicate lives in unique-trading-date index space:
     first_test_idx - last_train_idx >= SEPARATION_MIN (at least five complete
-    excluded trading days). It subsumes train/test date disjointness.
+    excluded trading days). It subsumes train/test date disjointness. The window
+    invariant max_kept_train + LABEL_HORIZON_DAYS < min_kept_test restates the
+    no-overlap condition it guarantees, so a config drift that lowers the minimum
+    below the label horizon still fails by name.
 
     Returns:
         The observed date-index separation.
@@ -87,6 +103,12 @@ def _verify_fold_separation(
         raise ValueError(
             f"Fold {fold_idx}: embargo violated — first test date index {first_test_idx} "
             f"minus last train date index {last_train_idx} = {separation} < {SEPARATION_MIN}"
+        )
+    if last_train_idx + LABEL_HORIZON_DAYS >= first_test_idx:
+        raise ValueError(
+            f"Fold {fold_idx}: window invariant violated — last kept train index "
+            f"{last_train_idx} + label horizon {LABEL_HORIZON_DAYS} >= first kept "
+            f"test index {first_test_idx}"
         )
     if purge_train_count <= 0:
         raise ValueError(
@@ -106,7 +128,9 @@ def phase_3_cross_validation() -> dict:
     complete trading dates (the block start minus 5 through minus 1) are excluded
     between the last kept training date and the first kept test date; the test block
     itself is kept whole. Row indices are positions in the Phase 2 inputs;
-    first_test_idx / last_train_idx index the sorted unique-date array.
+    first_test_idx / last_train_idx index the sorted unique-date array, and both kept
+    sets are positions in that same array, so under the shared trading-calendar
+    assumption an index-space gap equals the trading-day distance.
 
     Returns:
         folds: Dict with 5 folds containing train/test indices and date bounds
@@ -136,16 +160,27 @@ def phase_3_cross_validation() -> dict:
     tpos = np.searchsorted(unique_dates, dates)
     logger.info(f"Unique trading dates: {len(unique_dates):,}")
 
-    if len(unique_dates) < N_FOLDS + 1:
-        raise ValueError(f"Need at least {N_FOLDS + 1} unique trading dates, got {len(unique_dates)}")
+    # Every one of the N_FOLDS + 1 blocks needs PURGE_HORIZON_D + 1 trading dates so
+    # the earliest fold still keeps a training date after the train-side purge; 36
+    # with the current config. The minimum is derived from the split arithmetic.
+    min_unique_dates = (N_FOLDS + 1) * (PURGE_HORIZON_D + 1)
+    if len(unique_dates) < min_unique_dates:
+        raise ValueError(
+            f"Need at least {min_unique_dates} unique trading dates "
+            f"((N_FOLDS + 1) * (PURGE_HORIZON_D + 1)), got {len(unique_dates)}"
+        )
 
     boundaries = _fold_boundaries(len(unique_dates))
     logger.info(
         f"Date-group folds: {N_FOLDS} expanding folds over {N_FOLDS + 1} contiguous blocks "
-        f"of the unique dates, embargo={CV_EMBARGO_DAYS} trading days"
+        f"of the unique dates, purge span {PURGE_HORIZON_D} trading days"
     )
 
     folds = {}
+
+    # Function-local import keeps the heavy training stack off this module's import
+    # path; validate_fold_minima is the single per-fold minima implementation.
+    from packages.ml.model.training.training import validate_fold_minima
 
     for fold_idx in range(N_FOLDS):
         block_start = int(boundaries[fold_idx + 1])
@@ -154,6 +189,7 @@ def phase_3_cross_validation() -> dict:
         train_indices, test_indices, purge_train_count = _split_date_blocks(
             tpos, block_start, block_end
         )
+        validate_fold_minima(fold_idx, train_indices, test_indices)
 
         train_tpos = tpos[train_indices]
         test_tpos = tpos[test_indices]
@@ -187,7 +223,7 @@ def phase_3_cross_validation() -> dict:
             "train_date_max": train_date_max,
             "test_date_min": test_date_min,
             "test_date_max": test_date_max,
-            "gap_days": CV_EMBARGO_DAYS,
+            "gap_days": PURGE_HORIZON_D,
             "n_train": len(train_indices),
             "n_test": len(test_indices),
             "first_test_idx": int(test_tpos.min()),
