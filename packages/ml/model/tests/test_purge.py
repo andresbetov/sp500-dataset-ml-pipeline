@@ -621,7 +621,7 @@ def test_fold_loop_consumes_the_single_minima_helper() -> None:
 
 
 def test_live_edges_are_unchanged_behind_the_skip_guard() -> None:
-    """The live calendar still reproduces the holdout-aware block edges."""
+    """The live calendar and the regenerated stored folds share the block edges."""
     requires_live_artifacts(ARTIFACTS_DIR)
 
     live_metadata = joblib.load(ARTIFACTS_DIR / "inputs" / "metadata.pkl")
@@ -635,12 +635,25 @@ def test_live_edges_are_unchanged_behind_the_skip_guard() -> None:
         == LIVE_FOLD_EDGES
     )
 
-    # The stored artifact predates the holdout reservation and the versioned
-    # schema; tolerate it by iterating only its fold_* keys.
+    # The regenerated stored folds carry the same remainder-calendar edges:
+    # first_test_idx is the block start and last_train_idx sits exactly
+    # SEPARATION_MIN date positions before it.
     stored_fold_keys = {key for key in live_folds if key.startswith("fold_")}
     assert stored_fold_keys == {
         f"fold_{idx}" for idx in range(cross_validator.N_FOLDS)
     }
+    stored_starts = [
+        int(live_folds[f"fold_{idx}"]["first_test_idx"])
+        for idx in range(cross_validator.N_FOLDS)
+    ]
+    assert stored_starts == LIVE_FOLD_EDGES[1:-1]
+    for fold_idx in range(cross_validator.N_FOLDS):
+        record = live_folds[f"fold_{fold_idx}"]
+        assert (
+            record["last_train_idx"]
+            == LIVE_FOLD_EDGES[fold_idx + 1] - cross_validator.SEPARATION_MIN
+        ), fold_idx
+        assert record["n_dates"] == LIVE_FOLD_EDGES[-1], fold_idx
 
 
 if __name__ == "__main__":
