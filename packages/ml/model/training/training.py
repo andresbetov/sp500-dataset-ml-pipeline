@@ -6,6 +6,7 @@ import time
 
 import joblib
 import numpy as np
+from config import get_config
 from cross_validation.cv_utils import load_folds_metadata
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from training.har_benchmark import fit_har_benchmark, load_har_regressors
@@ -17,7 +18,7 @@ logger = logging.getLogger(__name__)
 # Daily-volatility floor for the log target. The Yang-Zhang target is exactly zero on
 # flat windows, where log(0) is undefined; 1e-12 only binds those rows, since the
 # smallest positive target in the frame is ~2.6e-10.
-RV_FLOOR = 1e-12
+RV_FLOOR = float(get_config()["rv_floor"])
 
 
 def qlike_loss(actual_log: np.ndarray, forecast_log: np.ndarray) -> float:

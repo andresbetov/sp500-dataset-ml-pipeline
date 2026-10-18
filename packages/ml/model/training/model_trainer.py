@@ -4,8 +4,12 @@ import logging
 
 import numpy as np
 import xgboost as xgb
+from config import get_config
 
 logger = logging.getLogger(__name__)
+
+RANDOM_STATE = get_config()["training"]["seed"]
+N_JOBS = get_config()["training"]["n_jobs"]
 
 
 def _map_labels_to_classes(y: np.ndarray) -> tuple[np.ndarray, dict]:
@@ -48,9 +52,9 @@ def train_xgboost_model(
 	# XGBoost regression configuration
 	model = xgb.XGBRegressor(
 		objective="reg:squarederror",
-		random_state=42,
+		random_state=RANDOM_STATE,
 		verbosity=0,
-		n_jobs=-1,
+		n_jobs=N_JOBS,
 		tree_method="hist",
 		eval_metric="rmse",
 		# Tree structure

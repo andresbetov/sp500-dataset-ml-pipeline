@@ -5,17 +5,20 @@ import logging
 import joblib
 import numpy as np
 import pandas as pd
+from config import get_config
 from utils import ARTIFACTS_DIR
 
 logger = logging.getLogger(__name__)
-N_FOLDS = 5
+N_FOLDS = get_config()["folds"]["n_folds"]
 # Complete trading days that must be excluded between the last kept training date and
-# the first kept test date; enforced as first_test_idx - last_train_idx >= CV_EMBARGO_DAYS + 1
+# the first kept test date; enforced as first_test_idx - last_train_idx >= SEPARATION_MIN
 # in unique-trading-date index space.
-CV_EMBARGO_DAYS = 5
+CV_EMBARGO_DAYS = get_config()["folds"]["purge_horizon_days"]
 # The target of row t aggregates the forward window [t+1, t+5], so a row's label window
 # reaches five trading days past its own date.
-LABEL_HORIZON_DAYS = 5
+LABEL_HORIZON_DAYS = get_config()["folds"]["label_horizon_days"]
+# Minimum separation in unique-trading-date index space; equals CV_EMBARGO_DAYS + 1.
+SEPARATION_MIN = get_config()["folds"]["separation_min"]
 # Seven calendar buckets, mirroring the dataset's market_regime label.
 REGIME_NAMES = {
     0: "pre-crisis (2000-2007)",
@@ -73,7 +76,7 @@ def _verify_fold_separation(
     """Enforce the embargo predicate and the non-empty purges for one fold.
 
     The single embargo predicate lives in unique-trading-date index space:
-    first_test_idx - last_train_idx >= CV_EMBARGO_DAYS + 1 (at least five complete
+    first_test_idx - last_train_idx >= SEPARATION_MIN (at least five complete
     excluded trading days). It subsumes train/test date disjointness.
 
     Returns:
@@ -82,10 +85,10 @@ def _verify_fold_separation(
     first_test_idx = int(test_tpos.min())
     last_train_idx = int(train_tpos.max())
     separation = first_test_idx - last_train_idx
-    if separation < CV_EMBARGO_DAYS + 1:
+    if separation < SEPARATION_MIN:
         raise ValueError(
             f"Fold {fold_idx}: embargo violated — first test date index {first_test_idx} "
-            f"minus last train date index {last_train_idx} = {separation} < {CV_EMBARGO_DAYS + 1}"
+            f"minus last train date index {last_train_idx} = {separation} < {SEPARATION_MIN}"
         )
     if purge_train_count <= 0 or purge_test_count <= 0:
         raise ValueError(
