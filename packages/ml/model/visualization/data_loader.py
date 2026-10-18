@@ -43,6 +43,16 @@ def load_fold_training_summary(summary_path: Path | None = None) -> pd.DataFrame
         rows.append(row)
 
     df = pd.DataFrame(rows)
+
+    # Stored paths are repo-relative (legacy summaries may still hold absolute
+    # paths); resolve both forms back to absolute for downstream consumers.
+    if "model_path" in df.columns:
+        from packages.ml.model.run_log import resolve_stored_path
+
+        df["model_path"] = df["model_path"].map(
+            lambda stored: str(resolve_stored_path(stored)) if stored else stored
+        )
+
     logger.info(f"Loaded {len(df)} fold summaries")
 
     return df
