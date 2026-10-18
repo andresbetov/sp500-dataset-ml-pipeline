@@ -27,10 +27,10 @@ from packages.ml.model.cross_validation import cross_validator
 from packages.ml.model.training import model_trainer, training
 from packages.ml.model.utils import get_project_paths
 
-# Fold floor-row counts as persisted in artifacts/folds/folds_metadata.pkl's
-# snapshot (Y <= rv_floor, training rows and test rows respectively).
-EXPECTED_FLOOR_TRAIN = [684, 708, 1389, 2310, 2583]
-EXPECTED_FLOOR_TEST = [25, 677, 920, 269, 37]
+# Fold floor-row counts frozen from the holdout-aware split recomputed from the
+# live inputs (Y <= rv_floor, training rows and test rows respectively).
+EXPECTED_FLOOR_TRAIN = [683, 690, 1267, 1997, 2561]
+EXPECTED_FLOOR_TEST = [7, 581, 733, 557, 44]
 
 
 def _reload_config_consumers() -> None:
@@ -112,21 +112,26 @@ def test_no_behavior_drift(artifacts_dir: Path) -> None:
 
     dates = metadata["date"]
     unique_dates = np.sort(np.unique(dates))
-    tpos = np.searchsorted(unique_dates, dates)
+    holdout_n_dates = cross_validator.HOLDOUT_N_DATES
+    fold_dates = unique_dates[:-holdout_n_dates]
+    tpos = np.searchsorted(fold_dates, dates)
 
     rv_floor = config.get_config()["rv_floor"]
-    boundaries = cross_validator._fold_boundaries(len(unique_dates))
+    boundaries = cross_validator._fold_boundaries(len(fold_dates))
 
-    # The stored test-side membership is interim: the test blocks predate the
-    # train-only purge and are regenerated at the later integration re-run, so
-    # the test side is checked structurally instead of index-for-index. The
-    # train side is unchanged by the purge change, so its stored comparisons
-    # stay exact (and remain so after the re-run). The exact membership contract
-    # is asserted from in-memory recomputation in tests/test_purge.py.
+    # The branch-point snapshot predates the holdout reservation and the
+    # versioned schema, so it is tolerated structurally: only its fold_* keys
+    # are folds, and its records carry the stable index fields.
+    stored_fold_keys = {key for key in folds_metadata if key.startswith("fold_")}
+    assert stored_fold_keys == {
+        f"fold_{fold_idx}" for fold_idx in range(cross_validator.N_FOLDS)
+    }
+
+    # The holdout-aware membership is recomputed from the live inputs; the
+    # exact membership contract is also asserted in tests/test_purge.py.
     train_sets: list[set[int]] = []
     test_sets: list[set[int]] = []
     for fold_idx in range(cross_validator.N_FOLDS):
-        fold = folds_metadata[f"fold_{fold_idx}"]
         block_start = int(boundaries[fold_idx + 1])
         block_end = int(boundaries[fold_idx + 2])
 
@@ -142,22 +147,15 @@ def test_no_behavior_drift(artifacts_dir: Path) -> None:
             np.flatnonzero((tpos >= block_start) & (tpos < block_end)),
         ), fold_idx
         assert (tpos[train_indices] < block_start).all(), fold_idx
+        assert (dates[train_indices] < unique_dates[len(fold_dates)]).all(), fold_idx
+        assert (dates[test_indices] < unique_dates[len(fold_dates)]).all(), fold_idx
         train_sets.append(set(train_indices.tolist()))
         test_sets.append(set(test_indices.tolist()))
 
-        # Train-side equality against the stored snapshot: the one-sided purge
-        # never touched the training rows.
-        assert np.array_equal(train_indices, fold["train_indices"]), fold_idx
-        assert purge_train_count == fold["purge_train_count"], fold_idx
-        assert int(tpos[train_indices].max()) == fold["last_train_idx"], fold_idx
-
-        # Floor census against the stored membership: Y and the stored index
-        # arrays are untouched by the purge change, so the branch-point census
-        # values still describe the stored snapshot.
-        stored_train = np.asarray(fold["train_indices"])
-        stored_test = np.asarray(fold["test_indices"])
-        floor_train = int(np.count_nonzero(Y[stored_train] <= rv_floor))
-        floor_test = int(np.count_nonzero(Y[stored_test] <= rv_floor))
+        # Floor census against the recomputed membership: Y is untouched, so
+        # the frozen counts still describe the fold population.
+        floor_train = int(np.count_nonzero(Y[train_indices] <= rv_floor))
+        floor_test = int(np.count_nonzero(Y[test_indices] <= rv_floor))
         assert floor_train == EXPECTED_FLOOR_TRAIN[fold_idx]
         assert floor_test == EXPECTED_FLOOR_TEST[fold_idx]
 

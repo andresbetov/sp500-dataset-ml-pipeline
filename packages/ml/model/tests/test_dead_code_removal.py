@@ -79,7 +79,9 @@ def test_live_fold_metadata(artifacts_dir: Path) -> None:
     from packages.ml.model.cross_validation.cv_utils import load_folds_metadata
 
     folds_metadata = load_folds_metadata()
-    assert set(folds_metadata) == {f"fold_{fold_id}" for fold_id in range(5)}
+    # Only fold_* keys are folds; versioned schema metadata keys may coexist.
+    fold_keys = {key for key in folds_metadata if key.startswith("fold_")}
+    assert fold_keys == {f"fold_{fold_id}" for fold_id in range(5)}
 
 
 def test_no_live_references() -> None:
