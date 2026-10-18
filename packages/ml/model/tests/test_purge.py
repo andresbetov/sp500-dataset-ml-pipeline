@@ -1,11 +1,14 @@
-"""Tests for the canonical train-only purge of the cross-validation split.
+"""Tests for the canonical train-only purge and the CV boundary guards.
 
 The split keeps every test block whole and purges only training rows whose
 forward label window reaches into the test block: the last kept training date
 sits five trading dates before the block start, the first kept test date is the
-block start, and exactly the five dates in between are excluded. Every check
+block start, and exactly the five dates in between are excluded. Block edges
+come from exact integer floors, undersized and degenerate calendars fail with
+named errors, and every fold satisfies the label-window invariant. Every check
 runs against a synthetic business-day calendar and temporary artifact roots, so
-the live inputs and the stored fold artifacts are neither read nor written.
+the live inputs and the stored fold artifacts are neither read nor written; the
+one live non-regression check reads them behind the shared skip guard.
 
 Run with pytest from the repository root:
 
@@ -18,6 +21,9 @@ This file also runs standalone:
 
 from __future__ import annotations
 
+import ast
+import inspect
+import re
 import tempfile
 import traceback
 from pathlib import Path
@@ -28,7 +34,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from conftest import REPO_ROOT
+from conftest import ARTIFACTS_DIR, REPO_ROOT, requires_live_artifacts
+from packages.ml.model import config as model_config
 from packages.ml.model.cross_validation import cross_validator
 from packages.ml.model.training import training
 
@@ -54,15 +61,64 @@ FOLD_PAYLOAD_KEYS = frozenset(
     }
 )
 
+MODEL_ROOT = REPO_ROOT / "packages" / "ml" / "model"
+TESTS_DIR = MODEL_ROOT / "tests"
+CROSS_VALIDATOR_PATH = MODEL_ROOT / "cross_validation" / "cross_validator.py"
+TRAINING_PATH = MODEL_ROOT / "training" / "training.py"
+INLINE_FOLD_MINIMA = re.compile(
+    r"len\(\s*\w*(?:train|test)_indices\s*\)\s*(?:==|<=|<)\s*0"
+)
 
-def _synthetic_inputs() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+# The live calendar at the branch point: 6504 unique trading dates with edges
+# exactly divisible by the six blocks.
+LIVE_N_DATES = 6504
+LIVE_EDGES = [0, 1084, 2168, 3252, 4336, 5420, 6504]
+
+# (N_FOLDS + 1) * (PURGE_HORIZON_D + 1) with the current config; the constants
+# test re-derives it from the module symbols.
+MINIMUM_N_DATES = 36
+
+
+def _function(tree: ast.Module, name: str) -> ast.FunctionDef:
+    return next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == name
+    )
+
+
+def _synthetic_calendar(n_dates: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Rows over a synthetic trading calendar and their unique-date positions."""
     dates = np.repeat(
-        pd.bdate_range("2000-01-03", periods=N_DATES).values, len(TICKERS)
+        pd.bdate_range("2000-01-03", periods=n_dates).values, len(TICKERS)
     )
     unique_dates = np.sort(np.unique(dates))
     tpos = np.searchsorted(unique_dates, dates)
     return dates, unique_dates, tpos
+
+
+def _synthetic_inputs() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Rows over a synthetic trading calendar and their unique-date positions."""
+    return _synthetic_calendar(N_DATES)
+
+
+def _write_phase_2_inputs(root: Path, n_dates: int) -> None:
+    """Write minimal Phase 2 inputs for n_dates over the synthetic calendar."""
+    dates, _, _ = _synthetic_calendar(n_dates)
+    inputs = root / "inputs"
+    inputs.mkdir(parents=True)
+    np.save(inputs / "X.npy", np.zeros((len(dates), 1)))
+    np.save(inputs / "Y.npy", np.full(len(dates), 0.25))
+    joblib.dump(
+        {
+            "date": dates,
+            "ticker": np.tile(np.array(TICKERS), n_dates),
+            "regime": (
+                np.arange(len(dates)) % len(cross_validator.REGIME_NAMES)
+            ).astype(np.int8),
+        },
+        inputs / "metadata.pkl",
+    )
 
 
 def test_every_fold_keeps_the_test_block_whole_with_five_excluded_dates() -> None:
@@ -199,7 +255,7 @@ def test_fold_structure_and_persisted_payload_without_the_test_purge_key() -> No
         assert FOLD_PAYLOAD_KEYS <= set(fold), fold_idx
         assert "purge_test_count" not in fold, fold_idx
         assert "purge_test_count" not in stored, fold_idx
-        assert stored["gap_days"] == cross_validator.CV_EMBARGO_DAYS, fold_idx
+        assert stored["gap_days"] == cross_validator.PURGE_HORIZON_D, fold_idx
         assert stored["n_train"] == len(stored["train_indices"]), fold_idx
         assert stored["n_test"] == len(stored["test_indices"]), fold_idx
 
@@ -300,17 +356,219 @@ def test_model_training_indices_floor_semantics_unchanged() -> None:
     assert len(kept) == len(train_indices) - 5
 
 
+def test_fold_boundaries_use_exact_integer_edges() -> None:
+    """n = 100: integer edges, the final edge is n_dates, fold 4 is non-empty."""
+    edges = cross_validator._fold_boundaries(100)
+
+    assert edges.tolist() == [0, 16, 33, 50, 66, 83, 100]
+    assert int(edges[-1]) == 100
+    assert int(edges[-2]) < int(edges[-1])
+    assert np.array_equal(
+        edges,
+        (np.arange(cross_validator.N_FOLDS + 2) * 100)
+        // (cross_validator.N_FOLDS + 1),
+    )
+    # The float-step construction is gone from the boundary function.
+    assert "linspace" not in inspect.getsource(cross_validator._fold_boundaries)
+
+
+def test_block_guards() -> None:
+    """Undersized calendars fail by name; the derived minimum builds every fold."""
+    minimum = MINIMUM_N_DATES
+
+    # A calendar one date short of the minimum, and a lone tiny one, name the
+    # minimum instead of failing inside a numpy reduction.
+    for undersized in (8, minimum - 1):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            _write_phase_2_inputs(root, undersized)
+            with mock.patch.object(cross_validator, "ARTIFACTS_DIR", root):
+                with pytest.raises(
+                    ValueError,
+                    match=rf"at least {minimum} unique trading dates",
+                ) as excinfo:
+                    cross_validator.phase_3_cross_validation()
+
+        message = str(excinfo.value)
+        assert "zero-size" not in message, (undersized, message)
+        assert str(undersized) in message, (undersized, message)
+
+    # The derived minimum passes the guard and builds all five folds.
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        _write_phase_2_inputs(root, minimum)
+        with mock.patch.object(cross_validator, "ARTIFACTS_DIR", root):
+            folds = cross_validator.phase_3_cross_validation()
+
+    assert set(folds) == {f"fold_{idx}" for idx in range(cross_validator.N_FOLDS)}
+    for fold in folds.values():
+        assert fold["n_train"] > 0
+        assert fold["n_test"] > 0
+        assert (
+            fold["first_test_idx"] - fold["last_train_idx"]
+            == cross_validator.SEPARATION_MIN
+        )
+
+    # Degenerate calendars cannot form N_FOLDS + 1 non-empty blocks at all.
+    for n_dates in (0, cross_validator.N_FOLDS):
+        with pytest.raises(ValueError, match="degenerate calendar"):
+            cross_validator._fold_boundaries(n_dates)
+    cross_validator._fold_boundaries(cross_validator.N_FOLDS + 1)
+
+
+def test_window_invariant_holds_across_the_calendar_sweep() -> None:
+    """Valid calendars: the label window never crosses the train/test boundary."""
+    for n_dates in (36, 60, 100, 500, 6504):
+        _, unique_dates, tpos = _synthetic_calendar(n_dates)
+        assert len(unique_dates) == n_dates
+        edges = cross_validator._fold_boundaries(n_dates)
+        assert int(edges[-1]) == n_dates
+
+        train_sets: list[set[int]] = []
+        test_sets: list[set[int]] = []
+        for fold_idx in range(cross_validator.N_FOLDS):
+            block_start = int(edges[fold_idx + 1])
+            block_end = int(edges[fold_idx + 2])
+            assert block_start < block_end
+
+            train_indices, test_indices, purge_train_count = (
+                cross_validator._split_date_blocks(tpos, block_start, block_end)
+            )
+            assert purge_train_count > 0
+            train_tpos = tpos[train_indices]
+            test_tpos = tpos[test_indices]
+            assert train_tpos.size > 0 and test_tpos.size > 0
+
+            # The label window of the last kept training date ends strictly
+            # before the first kept test date, in unique-date index space.
+            assert (
+                int(train_tpos.max()) + cross_validator.LABEL_HORIZON_DAYS
+                < int(test_tpos.min())
+            )
+            train_sets.append(set(np.unique(train_tpos).tolist()))
+            test_sets.append(set(np.unique(test_tpos).tolist()))
+
+        # Test blocks stay disjoint and partition the remainder.
+        seen: set[int] = set()
+        for test_set in test_sets:
+            assert not (seen & test_set)
+            seen |= test_set
+        assert seen == set(range(int(edges[1]), n_dates))
+
+        # Training windows expand strictly fold over fold.
+        for earlier, later in zip(train_sets, train_sets[1:]):
+            assert earlier < later
+
+
+def test_window_invariant_raises_by_name_when_the_predicate_would_pass() -> None:
+    """A 5-index separation passes a lowered predicate but still fails the invariant."""
+    train_tpos = np.array([0, 1, 2, 3, 4])
+    test_tpos = np.array([9, 10])
+
+    with mock.patch.object(cross_validator, "SEPARATION_MIN", 5):
+        with pytest.raises(ValueError, match="window invariant"):
+            cross_validator._verify_fold_separation(0, train_tpos, test_tpos, 1)
+
+
+def test_purge_span_constants_come_from_config() -> None:
+    """PURGE_HORIZON_D and SEPARATION_MIN mirror the loaded config."""
+    loaded = model_config.load_config()
+
+    assert cross_validator.PURGE_HORIZON_D == loaded["folds"]["purge_horizon_days"] == 5
+    assert cross_validator.SEPARATION_MIN == loaded["folds"]["separation_min"] == 6
+    assert cross_validator.LABEL_HORIZON_DAYS == loaded["folds"]["label_horizon_days"]
+    assert (
+        (cross_validator.N_FOLDS + 1) * (cross_validator.PURGE_HORIZON_D + 1)
+        == MINIMUM_N_DATES
+        == 36
+    )
+    # The legacy embargo-named alias stays in step with the real purge-span name.
+    assert cross_validator.CV_EMBARGO_DAYS == cross_validator.PURGE_HORIZON_D
+
+
+def test_fold_loop_consumes_the_single_minima_helper() -> None:
+    """Exactly one minima implementation, and the CV fold loop calls it."""
+    source = CROSS_VALIDATOR_PATH.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(CROSS_VALIDATOR_PATH))
+
+    definitions = [
+        str(path.relative_to(REPO_ROOT))
+        for path in sorted(MODEL_ROOT.rglob("*.py"))
+        if TESTS_DIR not in path.parents
+        and any(
+            isinstance(node, ast.FunctionDef) and node.name == "validate_fold_minima"
+            for node in ast.walk(
+                ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            )
+        )
+    ]
+    assert definitions == [str(TRAINING_PATH.relative_to(REPO_ROOT))]
+
+    imports_helper = any(
+        isinstance(node, ast.ImportFrom)
+        and node.module == "packages.ml.model.training.training"
+        and any(alias.name == "validate_fold_minima" for alias in node.names)
+        for node in ast.walk(tree)
+    )
+    assert imports_helper, "the training-phase helper must be imported"
+
+    fold_loop_calls = [
+        node
+        for loop in ast.walk(_function(tree, "phase_3_cross_validation"))
+        if isinstance(loop, ast.For)
+        for node in ast.walk(loop)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "validate_fold_minima"
+    ]
+    assert fold_loop_calls, "the fold loop must call validate_fold_minima"
+
+    # No second inline emptiness check for fold minima in the CV module.
+    inline_hits = [
+        line_number
+        for line_number, line in enumerate(source.splitlines(), start=1)
+        if INLINE_FOLD_MINIMA.search(line)
+    ]
+    assert not inline_hits, f"inline fold-minima checks at lines {inline_hits}"
+
+
+def test_live_edges_are_unchanged_behind_the_skip_guard() -> None:
+    """The live calendar still reproduces the branch-point block edges."""
+    requires_live_artifacts(ARTIFACTS_DIR)
+
+    live_metadata = joblib.load(ARTIFACTS_DIR / "inputs" / "metadata.pkl")
+    live_folds = joblib.load(ARTIFACTS_DIR / "folds" / "folds_metadata.pkl")
+
+    n_dates = int(np.unique(live_metadata["date"]).size)
+    assert n_dates == LIVE_N_DATES
+    assert cross_validator._fold_boundaries(n_dates).tolist() == LIVE_EDGES
+
+    # The stored artifact predates the train-only purge, so its block starts are
+    # recovered from the stable last_train_idx = block_start - SEPARATION_MIN.
+    stored_starts = [
+        int(live_folds[f"fold_{idx}"]["last_train_idx"])
+        + cross_validator.SEPARATION_MIN
+        for idx in range(cross_validator.N_FOLDS)
+    ]
+    assert stored_starts == LIVE_EDGES[1:-1]
+
+
 if __name__ == "__main__":
     failures = 0
+    skipped = 0
     for _name, _fn in list(globals().items()):
         if _name.startswith("test_") and callable(_fn):
             try:
                 _fn()
                 print(f"PASS {_name}")
+            except pytest.skip.Exception as exc:
+                skipped += 1
+                print(f"SKIP {_name}: {exc}")
             except Exception:
                 failures += 1
                 print(f"FAIL {_name}")
                 traceback.print_exc()
     if failures:
         raise SystemExit(f"{failures} test(s) failed")
-    print("All tests passed")
+    suffix = f" ({skipped} skipped)" if skipped else ""
+    print(f"All tests passed{suffix}")
