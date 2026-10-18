@@ -153,6 +153,7 @@ def _synthetic_frame(rows: int = 4, drop: str | None = None) -> pd.DataFrame:
         "date": pd.date_range("2020-01-01", periods=rows, freq="D"),
         "ticker": ["AAA"] * rows,
         "realized_volatility_5d": np.full(rows, 0.01, dtype=np.float64),
+        "market_regime": (np.arange(rows) % 7).astype(np.int8),
     }
     for name in feature_engineering.INDICATORS:
         if name != drop:

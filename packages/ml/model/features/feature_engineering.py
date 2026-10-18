@@ -213,8 +213,8 @@ def _extract_inputs(df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray, dict]:
 
     Returns X (the 37 pinned indicators in contract order), Y (the realized
     volatility target), and the metadata later phases consume: the date and
-    ticker columns, the feature counts, the pinned dataset record, and the
-    extraction input checks.
+    ticker columns, the row-aligned calendar regime labels, the feature counts,
+    the pinned dataset record, and the extraction input checks.
     """
     # Extract metadata (original ticker and date columns for reference); the
     # date column is canonicalized so representation-only differences do not
@@ -241,6 +241,7 @@ def _extract_inputs(df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray, dict]:
     metadata = {
         "date": date_column,
         "ticker": ticker_column,
+        "regime": df["market_regime"].values,
         "n_indicators": len(INDICATORS),
         "n_ticker_features": 0,
         "dataset": _dataset_pin(df),
@@ -256,8 +257,9 @@ def phase_2_feature_selection() -> tuple[np.ndarray, np.ndarray, dict, None]:
     Returns:
         X: Feature matrix (n_samples, n_features) = the 37 pinned indicators only
         Y: Target vector (n_samples,) with continuous volatility values
-        metadata: Dict with 'date' and 'ticker' columns, n_indicators, n_ticker_features,
-            the pinned dataset record, and the extraction input checks
+        metadata: Dict with 'date' and 'ticker' columns, the row-aligned
+            'regime' labels, n_indicators, n_ticker_features, the pinned dataset
+            record, and the extraction input checks
         encoder: None (no ticker encoding applied)
     """
     logger.info("Phase 2: Feature Selection (No Ticker Encoding)")

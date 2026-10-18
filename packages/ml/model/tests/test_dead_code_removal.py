@@ -35,13 +35,13 @@ REMOVED_BULLETS = (
     "- `model/training/inference.py` is never imported; the live path inlines "
     "`model.predict()` in `training.py`. Editing it changes nothing.",
     "- `cross_validation/cv_utils.py:load_fold_data` is never called.",
+    "- `metadata.pkl` carries no `regime` key, so per-fold regime distributions "
+    "are always empty.",
 )
 
 RETAINED_BULLETS = (
     "- The early-stopping branch in `model_trainer.py` is unreachable: "
     "`training.py` passes `X_val=None, y_val=None`.",
-    "- `metadata.pkl` carries no `regime` key, so per-fold regime distributions "
-    "are always empty.",
 )
 
 

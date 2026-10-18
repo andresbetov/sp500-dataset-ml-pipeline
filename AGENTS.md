@@ -43,7 +43,6 @@ Run both phases from the repository root. The dataset entry takes no arguments; 
 ## Known dead or broken code
 
 - The early-stopping branch in `model_trainer.py` is unreachable: `training.py` passes `X_val=None, y_val=None`.
-- `metadata.pkl` carries no `regime` key, so per-fold regime distributions are always empty.
 - `.idea/workspace.xml` still carries a `RunManager` entry for the deleted `run_pipeline.py`. It is untracked and stale.
 
 ## Conventions
