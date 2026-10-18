@@ -51,7 +51,9 @@ def main(dry_run: bool = False) -> None:
         logger.info("Phase 2: Feature Selection & Encoding")
         X, y, metadata, encoder = phase_2_feature_selection()
         logger.info(f"Phase 2 complete: X {X.shape}, y {y.shape}")
-        
+        # Phase 4 reloads the inputs from disk; release the Phase-2 frame copies.
+        del X, y, metadata, encoder
+
         # Phase 3: Cross-validation setup
         logger.info("Phase 3: Temporal Cross-Validation Setup")
         folds = phase_3_cross_validation()
