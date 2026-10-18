@@ -1,7 +1,10 @@
 """Tests for the model package's config single source and its consumers.
 
-pytest is not installed yet, so this file also runs standalone from the
-repository root:
+Run with pytest from the repository root:
+
+    uv run --frozen python -m pytest packages/ml/model/tests -q
+
+This file also runs standalone:
 
     .venv/bin/python -B packages/ml/model/tests/test_config.py
 """
@@ -10,7 +13,6 @@ from __future__ import annotations
 
 import importlib
 import os
-import sys
 import tempfile
 import traceback
 from pathlib import Path
@@ -19,17 +21,11 @@ import joblib
 import numpy as np
 import yaml
 
-_REPO_ROOT = Path(__file__).resolve().parents[4]
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
-
+from conftest import requires_generated_data, requires_live_artifacts
 from packages.ml.model import config
 from packages.ml.model.cross_validation import cross_validator
 from packages.ml.model.training import model_trainer, training
 from packages.ml.model.utils import get_project_paths
-
-REPO_ROOT = get_project_paths()["project_root"]
-ARTIFACTS_DIR = get_project_paths()["artifacts_dir"]
 
 # Fold floor-row counts as persisted in artifacts/folds/folds_metadata.pkl's
 # snapshot (Y <= rv_floor, training rows and test rows respectively).
@@ -107,10 +103,12 @@ def test_propagation() -> None:
     assert cross_validator.N_FOLDS == 5
 
 
-def test_no_behavior_drift() -> None:
-    folds_metadata = joblib.load(ARTIFACTS_DIR / "folds" / "folds_metadata.pkl")
-    Y = np.load(ARTIFACTS_DIR / "inputs" / "Y.npy")
-    metadata = joblib.load(ARTIFACTS_DIR / "inputs" / "metadata.pkl")
+def test_no_behavior_drift(artifacts_dir: Path) -> None:
+    requires_live_artifacts(artifacts_dir)
+
+    folds_metadata = joblib.load(artifacts_dir / "folds" / "folds_metadata.pkl")
+    Y = np.load(artifacts_dir / "inputs" / "Y.npy")
+    metadata = joblib.load(artifacts_dir / "inputs" / "metadata.pkl")
 
     dates = metadata["date"]
     unique_dates = np.sort(np.unique(dates))
@@ -145,34 +143,63 @@ def test_no_behavior_drift() -> None:
         assert floor_test == EXPECTED_FLOOR_TEST[fold_idx]
 
 
-def test_path_resolution() -> None:
+def test_path_resolution(
+    repo_root: Path,
+    artifacts_dir: Path,
+    outputs_dir: Path,
+    dataset_path: Path,
+) -> None:
+    requires_generated_data(artifacts_dir, dataset_path, outputs_dir)
+
     paths = config.get_config()["paths"]
     project_paths = get_project_paths()
 
-    dataset_path = (REPO_ROOT / paths["dataset"]).resolve()
-    assert dataset_path == project_paths["dataset_path"]
-    assert dataset_path.exists()
+    resolved_dataset = (repo_root / paths["dataset"]).resolve()
+    assert resolved_dataset == project_paths["dataset_path"]
+    assert resolved_dataset.exists()
 
-    artifacts_dir = (REPO_ROOT / paths["artifacts"]).resolve()
-    assert artifacts_dir == project_paths["artifacts_dir"]
-    assert artifacts_dir.is_dir()
+    resolved_artifacts = (repo_root / paths["artifacts"]).resolve()
+    assert resolved_artifacts == project_paths["artifacts_dir"]
+    assert resolved_artifacts.is_dir()
 
-    outputs_dir = (REPO_ROOT / paths["outputs"]).resolve()
-    assert outputs_dir == project_paths["outputs_dir"]
-    assert outputs_dir.is_dir()
+    resolved_outputs = (repo_root / paths["outputs"]).resolve()
+    assert resolved_outputs == project_paths["outputs_dir"]
+    assert resolved_outputs.is_dir()
 
 
 if __name__ == "__main__":
+    import inspect
+
+    import pytest
+
+    from conftest import ARTIFACTS_DIR, DATASET_PATH, OUTPUTS_DIR, REPO_ROOT
+
+    fixtures = {
+        "repo_root": REPO_ROOT,
+        "artifacts_dir": ARTIFACTS_DIR,
+        "outputs_dir": OUTPUTS_DIR,
+        "dataset_path": DATASET_PATH,
+    }
+
     failures = 0
+    skipped = 0
     for _name, _fn in list(globals().items()):
         if _name.startswith("test_") and callable(_fn):
+            kwargs = {
+                parameter: fixtures[parameter]
+                for parameter in inspect.signature(_fn).parameters
+            }
             try:
-                _fn()
+                _fn(**kwargs)
                 print(f"PASS {_name}")
+            except pytest.skip.Exception as exc:
+                skipped += 1
+                print(f"SKIP {_name}: {exc}")
             except Exception:
                 failures += 1
                 print(f"FAIL {_name}")
                 traceback.print_exc()
     if failures:
         raise SystemExit(f"{failures} test(s) failed")
-    print("All tests passed")
+    suffix = f" ({skipped} skipped)" if skipped else ""
+    print(f"All tests passed{suffix}")
