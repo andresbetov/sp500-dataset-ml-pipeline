@@ -22,9 +22,6 @@ HOLDOUT_N_DATES = get_config()["holdout"]["n_dates"]
 # between the last kept training date and the first kept test date; enforced as
 # first_test_idx - last_train_idx >= SEPARATION_MIN.
 PURGE_HORIZON_D = get_config()["folds"]["purge_horizon_days"]
-# Legacy embargo-named alias kept for existing imports; the purge-span constant
-# above is the real one.
-CV_EMBARGO_DAYS = PURGE_HORIZON_D
 # The target of row t aggregates the forward window [t+1, t+5], so a row's label window
 # reaches five trading days past its own date.
 LABEL_HORIZON_DAYS = get_config()["folds"]["label_horizon_days"]
@@ -94,10 +91,12 @@ def _verify_fold_separation(
 ) -> int:
     """Enforce the separation predicate and the window invariant for one fold.
 
-    The single embargo predicate lives in unique-trading-date index space:
+    The single separation predicate lives in unique-trading-date index space:
     first_test_idx - last_train_idx >= SEPARATION_MIN (at least five complete
-    excluded trading days). It subsumes train/test date disjointness. The window
-    invariant max_kept_train + LABEL_HORIZON_DAYS < min_kept_test restates the
+    excluded trading days); this module applies no AFML-style embargo — the
+    only exclusion is the training-side purge of the label horizon. It subsumes
+    train/test date disjointness. The window invariant
+    max_kept_train + LABEL_HORIZON_DAYS < min_kept_test restates the
     no-overlap condition it guarantees, so a config drift that lowers the minimum
     below the label horizon still fails by name.
 
@@ -109,8 +108,9 @@ def _verify_fold_separation(
     separation = first_test_idx - last_train_idx
     if separation < SEPARATION_MIN:
         raise ValueError(
-            f"Fold {fold_idx}: embargo violated — first test date index {first_test_idx} "
-            f"minus last train date index {last_train_idx} = {separation} < {SEPARATION_MIN}"
+            f"Fold {fold_idx}: separation predicate violated — first test date index "
+            f"{first_test_idx} minus last train date index {last_train_idx} = "
+            f"{separation} < {SEPARATION_MIN}"
         )
     if last_train_idx + LABEL_HORIZON_DAYS >= first_test_idx:
         raise ValueError(

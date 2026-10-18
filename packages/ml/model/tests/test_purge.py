@@ -220,7 +220,7 @@ def test_separation_predicate_uses_the_configured_minimum_and_train_purge() -> N
     assert cross_validator.SEPARATION_MIN == 6
     assert cross_validator._verify_fold_separation(0, train_tpos, test_tpos, 1) == 6
 
-    with pytest.raises(ValueError, match="embargo"):
+    with pytest.raises(ValueError, match="separation"):
         cross_validator._verify_fold_separation(0, train_tpos, np.array([9, 10]), 1)
 
     with pytest.raises(ValueError, match="purge"):
@@ -522,8 +522,56 @@ def test_purge_span_constants_come_from_config() -> None:
         == MINIMUM_N_DATES
         == 536
     )
-    # The legacy embargo-named alias stays in step with the real purge-span name.
-    assert cross_validator.CV_EMBARGO_DAYS == cross_validator.PURGE_HORIZON_D
+    # The legacy alias is gone: the purge-span name is the only one in play.
+    assert not hasattr(cross_validator, "CV_EMBARGO_DAYS")
+
+
+def test_terminology() -> None:
+    """The module speaks only purge-span terms, with one explanatory sentence.
+
+    The only case-insensitive occurrence of the bare token in the module
+    source is the single sentence recording that no AFML-style embargo is
+    applied here; the legacy alias is gone, the values and the fold masks are
+    unchanged, and the violation message names the separation predicate.
+    """
+    source = CROSS_VALIDATOR_PATH.read_text(encoding="utf-8")
+
+    # The single allowed occurrence: the explanatory sentence is the only
+    # place the bare token appears, and it states that no AFML-style embargo
+    # is applied here.
+    assert len(re.findall(r"embargo", source, re.IGNORECASE)) == 1
+    assert source.count("AFML-style embargo") == 1
+    assert re.search(r"\bno AFML-style embargo\b", source)
+
+    # The legacy alias is gone; the purge-span constants keep their values.
+    assert not hasattr(cross_validator, "CV_EMBARGO_DAYS")
+    assert cross_validator.PURGE_HORIZON_D == 5
+    assert cross_validator.SEPARATION_MIN == 6
+
+    # Rename-only: the separation and the train purge count on the shared
+    # synthetic fixture keep the branch-point values.
+    _, _, tpos = _synthetic_inputs()
+    boundaries = cross_validator._fold_boundaries(FOLD_N_DATES)
+    for fold_idx in range(cross_validator.N_FOLDS):
+        block_start = int(boundaries[fold_idx + 1])
+        block_end = int(boundaries[fold_idx + 2])
+        train_indices, test_indices, purge_train_count = (
+            cross_validator._split_date_blocks(tpos, block_start, block_end)
+        )
+        separation = cross_validator._verify_fold_separation(
+            fold_idx, tpos[train_indices], tpos[test_indices], purge_train_count
+        )
+        assert separation == 6, fold_idx
+        assert purge_train_count == EXCLUDED_DATES * len(TICKERS), fold_idx
+
+    # The violation message uses purge-span terms, not embargo wording.
+    with pytest.raises(ValueError) as excinfo:
+        cross_validator._verify_fold_separation(
+            0, np.array([0, 1, 2, 3, 4]), np.array([9, 10]), 1
+        )
+    message = str(excinfo.value)
+    assert "separation" in message
+    assert "embargo" not in message.lower()
 
 
 def test_fold_loop_consumes_the_single_minima_helper() -> None:

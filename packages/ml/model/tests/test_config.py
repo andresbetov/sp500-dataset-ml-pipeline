@@ -87,7 +87,7 @@ def test_propagation() -> None:
 
             assert training.RV_FLOOR == 1e-9
             assert cross_validator.N_FOLDS == 7
-            assert cross_validator.CV_EMBARGO_DAYS == 5
+            assert cross_validator.PURGE_HORIZON_D == 5
             assert cross_validator.LABEL_HORIZON_DAYS == 5
             assert cross_validator.SEPARATION_MIN == 6
             assert model_trainer.RANDOM_STATE == 7
