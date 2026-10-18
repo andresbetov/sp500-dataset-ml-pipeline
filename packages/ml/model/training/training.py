@@ -384,6 +384,16 @@ def phase_4_training() -> tuple[dict, dict, list]:
 		# Extract fold-specific data; degenerate at-or-below-floor rows are dropped
 		# from the training side only (the HAR benchmark shares the same rows).
 		train_indices = _model_training_indices(fold_data, y)
+
+		# An all-floored fold keeps no training rows: every label would be the
+		# floor itself, so there is nothing to fit. Name the fold and the floor
+		# before the per-fold log line and any fit attempt.
+		if train_indices.size == 0:
+			raise ValueError(
+				f"Fold {fold_idx} ({fold_key}): all {int(fold_data['n_train'])} fold-train rows "
+				f"are at or below the floor {RV_FLOOR:g} (RV_FLOOR); no training rows remain"
+			)
+
 		test_indices = np.array(fold_data["test_indices"])
 
 		logger.info(
