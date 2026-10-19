@@ -153,7 +153,8 @@ def _fold_prediction(clip_count: int, n_test: int) -> dict:
         "clip_rate": clip_count / n_test,
         "train_time_seconds": 1.0,
         "inference_time_seconds": 0.1,
-        "fold_time_seconds": 1.1,
+        "har_time_seconds": 0.2,
+        "fold_time_seconds": 1.3,
     }
 
 
