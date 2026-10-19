@@ -335,7 +335,7 @@ def test_plot_refuses_to_guess_a_missing_checkpoint_record() -> None:
 
         with mock.patch.object(training_diagnostics, "ARTIFACTS_DIR", root):
             with pytest.raises(training_diagnostics.CheckpointResolutionError):
-                training_diagnostics.plot_feature_importance({}, None, output)
+                training_diagnostics.plot_feature_importance(output)
 
         assert not output.exists(), "the plot must not render after a refusal"
 
@@ -343,7 +343,7 @@ def test_plot_refuses_to_guess_a_missing_checkpoint_record() -> None:
 def test_plot_loads_the_run_scoped_checkpoints_the_manifest_names() -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         root = _prepared_root(tmpdir)
-        validation, _summary, _model_paths = _exercise_run(root)
+        _validation, _summary, _model_paths = _exercise_run(root)
         run_id = _read_manifest(root)["run_id"]
 
         loaded: list[Path] = []
@@ -361,13 +361,20 @@ def test_plot_loads_the_run_scoped_checkpoints_the_manifest_names() -> None:
             stack.enter_context(
                 mock.patch.object(artifact_integrity.joblib, "load", spy)
             )
-            training_diagnostics.plot_feature_importance(validation, None, output)
+            training_diagnostics.plot_feature_importance(output)
 
         expected = {
             root / "checkpoints" / run_id / f"fold_{fold_idx}.pkl"
             for fold_idx in range(5)
         }
-        assert set(loaded) == expected, loaded
+        checkpoint_loads = {
+            path
+            for path in loaded
+            if path.parent.parent.name == "checkpoints"
+        }
+        assert checkpoint_loads == expected, loaded
+        # The fold schema's persisted names are verified before any mapping.
+        assert root / "folds" / "folds_metadata.pkl" in loaded, loaded
         assert output.is_file() and output.stat().st_size > 0
 
 
@@ -395,7 +402,7 @@ def test_plot_renders_zeros_only_when_a_recorded_checkpoint_file_is_absent() -> 
         logger.addHandler(handler)
         try:
             with mock.patch.object(training_diagnostics, "ARTIFACTS_DIR", root):
-                training_diagnostics.plot_feature_importance({}, None, output)
+                training_diagnostics.plot_feature_importance(output)
         finally:
             logger.removeHandler(handler)
 
