@@ -33,6 +33,12 @@ from packages.ml.model.artifact_integrity import (
 from packages.ml.model.config import get_config
 from packages.ml.model.cross_validation import cross_validator
 from packages.ml.model.cross_validation.cv_utils import load_folds_metadata
+from packages.ml.model.evaluation.report import (
+	build_evaluation_summary,
+	loss_vector_frame,
+	write_evaluation_summary,
+	write_loss_vectors,
+)
 from packages.ml.model.evaluation.stats import (
 	AllFoldsInvalidError,
 	quarantine_record,
@@ -49,6 +55,7 @@ from packages.ml.model.training.har_benchmark import (
 	NO_HAC_NOTE,
 	REPORT_SCALE,
 	fit_har_benchmark,
+	har_forecast_log,
 	load_har_regressors,
 )
 from packages.ml.model.training.model_trainer import train_xgboost_model
@@ -638,14 +645,20 @@ def _train_fold_model(
 		y_train: Inner-fit log-target from fold_i_train
 		X_val: Purged inner-validation tail features (or None)
 		y_val: Purged inner-validation tail log-target (or None)
-		X_test: Floor-retained test features from fold_i_test
-		y_test: Floor-retained test log-target from fold_i_test
+		X_test: Test features from fold_i_test. With ``row_policy`` this is the
+			full test block (the one prediction call also covers the
+			floor-excluded rows the loss vectors persist); without it, the
+			caller passes the scored rows directly.
+		y_test: Test log-target aligned with ``X_test``; the retained subset is
+			selected by ``row_policy['test_floor_mask']``.
 		fold_data: Fold metadata (dates, counts)
 		row_policy: Per-fold floor mask, indices, counts, and headline declaration
 		inner_purge_count: Fit rows removed by the inner label-horizon purge
 
 	Returns:
-		(model, predictions_dict)
+		(model, predictions_dict); ``test_pred``/``test_true`` stay the
+		floor-retained headline set, while ``test_pred_all`` carries the full
+		test block's forecasts for the per-row loss vectors.
 	"""
 	model_start = time.time()
 	tail_note = (
@@ -653,9 +666,20 @@ def _train_fold_model(
 		if X_val is not None
 		else ""
 	)
+	test_floor_mask = None
+	if row_policy is not None and "test_floor_mask" in row_policy:
+		test_floor_mask = np.asarray(row_policy["test_floor_mask"], dtype=bool)
+		if test_floor_mask.shape != (len(X_test),):
+			raise ValueError(
+				f"Fold {fold_idx}: the floor mask holds {test_floor_mask.size} "
+				f"entries but the test block holds {len(X_test)} rows"
+			)
+	n_scored = int(len(X_test)) if test_floor_mask is None else int(
+		np.count_nonzero(test_floor_mask)
+	)
 	logger.info(
 		f"Fold {fold_idx}: Training model on {len(X_train):,} samples{tail_note}, "
-		f"testing on {len(X_test):,} samples"
+		f"testing on {n_scored:,} scored samples"
 	)
 	logger.info(f"  Date range: {fold_data['train_date_min']} to {fold_data['test_date_max']}")
 
@@ -688,10 +712,20 @@ def _train_fold_model(
 			)
 		eval_history = {"qlike": [float(score) for score in qlike_scores]}
 
-	# Generate predictions on fold_i_test data
+	# Generate predictions on the fold's test block in one call. The headline
+	# metrics consume the floor-retained subset selected below; the full-block
+	# forecasts are persisted in the loss vectors so the with/without-floor
+	# decomposition can quantify the excluded rows without a second prediction
+	# or a report-time refit.
 	inference_start = time.time()
-	y_pred = model.predict(X_test)
+	y_pred_all = model.predict(X_test)
 	inference_time = time.time() - inference_start
+	if test_floor_mask is not None:
+		y_pred = y_pred_all[test_floor_mask]
+		y_test_scored = np.asarray(y_test)[test_floor_mask]
+	else:
+		y_pred = y_pred_all
+		y_test_scored = np.asarray(y_test)
 
 	# Compute the fold's model metrics inside the quarantine boundary: any
 	# failure here — an R²/MAE/RMSE guard, the QLIKE guard, a degenerate test
@@ -711,10 +745,10 @@ def _train_fold_model(
 	# quarantine, and the global aggregation filters it with n_valid/n_total.
 	quarantine = None
 	try:
-		test_r2 = float(r2_score(y_test, y_pred))
-		test_mae = float(mean_absolute_error(y_test, y_pred))
-		test_rmse = float(np.sqrt(mean_squared_error(y_test, y_pred)))
-		test_qlike = float(qlike_loss(y_test, y_pred))
+		test_r2 = float(r2_score(y_test_scored, y_pred))
+		test_mae = float(mean_absolute_error(y_test_scored, y_pred))
+		test_rmse = float(np.sqrt(mean_squared_error(y_test_scored, y_pred)))
+		test_qlike = float(qlike_loss(y_test_scored, y_pred))
 	except Exception as exc:
 		quarantine = quarantine_record(exc)
 		logger.warning(
@@ -755,8 +789,12 @@ def _train_fold_model(
 	logger.info(f"  Saved fold {fold_idx} parameters to {params_path}")
 
 	predictions_dict = {
+		# The headline scored set (floor-retained rows) and its metrics.
 		"test_pred": y_pred,
-		"test_true": y_test,
+		"test_true": y_test_scored,
+		# The full test block's forecasts (retained + floor-excluded), the
+		# per-row loss-vector source; never consumed by the headline metrics.
+		"test_pred_all": y_pred_all,
 		"test_r2": test_r2,
 		"test_mae": test_mae,
 		"test_rmse": test_rmse,
@@ -766,7 +804,7 @@ def _train_fold_model(
 		"n_inner_purge_rows": int(inner_purge_count),
 		"best_iteration": best_iteration,
 		"eval_history": eval_history,
-		"n_test_samples": len(X_test),
+		"n_test_samples": len(y_pred),
 		"n_features": X_train.shape[1],
 		"train_time_seconds": train_time,
 		"inference_time_seconds": inference_time,
@@ -1171,6 +1209,12 @@ def phase_4_training(
 	fold_predictions_list = []
 	fold_model_paths = []
 	har_benchmark_results = {}
+	# Per-fold frames for the persisted per-row loss vectors: one row per
+	# fold-test-block row (the whole block, floor-excluded rows included).
+	loss_vector_frames = []
+	# The dataset-level floor census the evaluation report decomposes: rows at
+	# or below the floor anywhere in the input vs rows inside a test block.
+	total_floor_rows = int(y.size - np.count_nonzero(floor_retained))
 	# Fold key -> quarantine record ({"error": ...}) for every fold whose
 	# metric computation failed; recorded in the run manifest/record, never in
 	# the five-row fold summary.
@@ -1250,8 +1294,12 @@ def phase_4_training(
 		y_train = y_log[fit_indices]
 		X_val = X[inner_val_indices]
 		y_val = y_log[inner_val_indices]
-		X_test = X[test_indices_scored]
-		y_test = y_log[test_indices_scored]
+		# The model predicts the full test block in one call; its helper
+		# selects the floor-retained headline rows through the row policy and
+		# returns the full-block forecasts for the loss vectors.
+		X_test = X[test_indices]
+		y_test = y_log[test_indices]
+		y_test_scored = y_test[test_floor_mask]
 
 		# Train fold model (1 model per fold, only on fold_i_train data, no leakage)
 		model, predictions_dict = _train_fold_model(
@@ -1277,7 +1325,7 @@ def phase_4_training(
 			train_indices=train_indices,
 			test_indices=test_indices_scored,
 			target_log_train=y_train_full,
-			target_log_test=y_test,
+			target_log_test=y_test_scored,
 			regressors=har_regressors,
 			forecast_floor=RV_FLOOR,
 			warmup_mask=har_warmup_mask,
@@ -1306,7 +1354,7 @@ def phase_4_training(
 				"headline_row_set": HEADLINE_ROW_SET,
 			}
 		)
-		har_forecast_log = har_result.pop("forecast_log")
+		har_forecast_scored = har_result.pop("forecast_log")
 		# The HAR benchmark's metric layer runs inside the same fold-level
 		# quarantine boundary as the model metrics: a failure (a QLIKE guard on
 		# the benchmark forecasts, a degenerate OOS-R² input) records the fold's
@@ -1314,12 +1362,12 @@ def phase_4_training(
 		quarantine = predictions_dict["quarantine"]
 		if quarantine is None:
 			try:
-				har_qlike = float(qlike_loss(y_test, har_forecast_log))
+				har_qlike = float(qlike_loss(y_test_scored, har_forecast_scored))
 				oos_r2_prevailing = oos_r2_prevailing_mean(
-					y_test, predictions_dict["test_pred"]
+					y_test_scored, predictions_dict["test_pred"]
 				)
 				oos_r2_vs_har_value = oos_r2_vs_har(
-					y_test, predictions_dict["test_pred"], har_forecast_log
+					y_test_scored, predictions_dict["test_pred"], har_forecast_scored
 				)
 			except Exception as exc:
 				quarantine = quarantine_record(exc)
@@ -1346,12 +1394,55 @@ def phase_4_training(
 		# Persist the HAR per-row log forecasts and emit the dual OOS-R²
 		# conventions on the same floor-retained scored rows; the pooled block is
 		# computed after the fold loop and written into the HAR report.
-		predictions_dict["har_forecast_log"] = har_forecast_log
+		predictions_dict["har_forecast_log"] = har_forecast_scored
 		predictions_dict["oos_r2_prevailing_mean"] = oos_r2_prevailing
 		predictions_dict["oos_r2_vs_har"] = oos_r2_vs_har_value
 		predictions_dict["oos_r2_scale"] = OOS_R2_SCALE
 		predictions_dict["oos_r2_row_set"] = HEADLINE_ROW_SET
 		har_benchmark_results[fold_key] = har_result
+
+		# The floor-excluded test rows' forecasts for the with/without-floor
+		# decomposition: the model's full-block predictions above and the same
+		# fitted HAR coefficients through the one benchmark forecast path. They
+		# never enter the headline metrics; the loss vectors persist them so the
+		# report can quantify the rows the floor policy excludes.
+		floor_rows = ~test_floor_mask
+		if floor_rows.any():
+			har_forecast_floor, _floor_clip_count = har_forecast_log(
+				har_result["coefficients"],
+				har_regressors,
+				test_indices[floor_rows],
+				RV_FLOOR,
+			)
+		else:
+			har_forecast_floor = np.empty(0, dtype=np.float64)
+		y_pred_har_all = np.empty(n_test_total, dtype=np.float64)
+		y_pred_har_all[test_floor_mask] = har_forecast_scored
+		y_pred_har_all[floor_rows] = har_forecast_floor
+		try:
+			loss_vector_frames.append(
+				loss_vector_frame(
+					[
+						{
+							"fold": fold_key,
+							"row_idx": test_indices,
+							"date": metadata["date"][test_indices],
+							"ticker": metadata["ticker"][test_indices],
+							"y_true": y_test,
+							"y_pred_model": predictions_dict["test_pred_all"],
+							"y_pred_har": y_pred_har_all,
+							"is_floor": floor_rows,
+						}
+					]
+				)
+			)
+		except Exception as exc:
+			if quarantine is None:
+				raise
+			logger.warning(
+				f"  {fold_key}: per-row loss vector skipped for the quarantined "
+				f"fold: {type(exc).__name__}: {exc}"
+			)
 
 		logger.info(
 			f"    └─ HAR benchmark: R²={har_result['har_r2']:.4f}, "
@@ -1425,6 +1516,51 @@ def phase_4_training(
 		coefficient_interpretation=coefficient_interpretation,
 		pooled_oos_r2_report=pooled_oos_r2_report,
 	)
+
+	# The evaluation artifacts: the per-row loss vectors (one row per test-block
+	# row) and the summary built only from them. Both are written atomically,
+	# recorded in the artifact index, and named in the run manifest like every
+	# other primary output. A fold already quarantined for its metric block is
+	# excluded from the report deterministically rather than aborting the run
+	# through the vector path.
+	loss_vectors = pd.concat(loss_vector_frames, ignore_index=True)
+	# The per-fold frames are copies of the same rows; release them before the
+	# report aggregation so the run holds one vector copy, not two.
+	del loss_vector_frames
+	loss_vectors_path = ARTIFACTS_DIR / "results" / "per_row_losses.parquet"
+	write_loss_vectors(loss_vectors, loss_vectors_path)
+	record_artifact(loss_vectors_path, registry_path=ARTIFACTS_DIR / REGISTRY_FILENAME)
+
+	evaluation_summary = build_evaluation_summary(
+		loss_vectors,
+		dual_oos_r2={
+			"folds": {
+				fold_key: {
+					"oos_r2_prevailing_mean": record.get(
+						"oos_r2_prevailing_mean"
+					),
+					"oos_r2_vs_har": record.get("oos_r2_vs_har"),
+				}
+				for fold_key, record in validation_predictions.items()
+			},
+			"pooled": pooled_oos_r2_report,
+		},
+		regime=metadata["regime"],
+		headline_row_set=HEADLINE_ROW_SET,
+		total_floor_rows=total_floor_rows,
+		quarantined_folds=quarantined_folds,
+	)
+	evaluation_summary_path = ARTIFACTS_DIR / "results" / "evaluation_summary.json"
+	write_evaluation_summary(evaluation_summary, evaluation_summary_path)
+	record_artifact(
+		evaluation_summary_path, registry_path=ARTIFACTS_DIR / REGISTRY_FILENAME
+	)
+	logger.info(
+		f"Evaluation report saved: {len(loss_vectors):,} per-row loss vectors "
+		f"({evaluation_summary['n_valid_folds']}/"
+		f"{evaluation_summary['n_total_folds']} folds valid)"
+	)
+
 	# One checkpoint and one parameter sidecar per trained fold; the indices
 	# come from the folds this run actually trained.
 	fold_indices = sorted(
@@ -1438,6 +1574,8 @@ def phase_4_training(
 			ARTIFACTS_DIR / "results" / "validation_predictions.pkl",
 			ARTIFACTS_DIR / "results" / "fold_training_summary.json",
 			ARTIFACTS_DIR / "results" / "har_benchmark.json",
+			ARTIFACTS_DIR / "results" / "per_row_losses.parquet",
+			ARTIFACTS_DIR / "results" / "evaluation_summary.json",
 		],
 	)
 

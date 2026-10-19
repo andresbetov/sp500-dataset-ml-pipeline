@@ -379,6 +379,9 @@ def test_writer_sites_record_verifiable_entries() -> None:
             artifacts / "results" / "validation_predictions.pkl",
             artifacts / "results" / "fold_training_summary.json",
             artifacts / "results" / "har_benchmark.json",
+            # The evaluation report's per-row loss vectors and summary.
+            artifacts / "results" / "per_row_losses.parquet",
+            artifacts / "results" / "evaluation_summary.json",
         }
         expected |= {
             artifacts / "checkpoints" / run_id / f"fold_{fold_idx}.pkl"
