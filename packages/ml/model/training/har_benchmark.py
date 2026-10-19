@@ -163,7 +163,11 @@ def _yang_zhang_bar_quantities(
 def _trailing_window_average(
     values: np.ndarray, tickers: pd.Series, window: int
 ) -> np.ndarray:
-    """Trailing mean over ``window`` observations, ``min_periods=1``."""
+    """Trailing mean over ``window`` observations, ``min_periods=1``.
+
+    Shorter windows at a ticker's series start are intended; the benchmark's
+    warm-up mask excludes those rows from the fit.
+    """
     grouped = pd.Series(values).groupby(tickers, sort=False)
     return grouped.transform(
         lambda series: series.rolling(window, min_periods=1).mean()

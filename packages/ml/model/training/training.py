@@ -237,6 +237,11 @@ def pooled_oos_r2(fold_predictions: dict) -> dict:
 	summed model error by the summed HAR error. The block states the scale,
 	the row set, the pooled row count, and each convention's denominator, so a
 	reader never has to guess which mean or which benchmark produced a value.
+	A constant target is the documented degenerate case for the
+	prevailing-mean convention: 1.0 when the model reproduces the constant
+	exactly, 0.0 otherwise, never a division by zero (sklearn's ``r2_score``
+	rule). The vs-HAR convention still raises when the HAR squared error is
+	zero, because that ratio is undefined.
 	"""
 	fold_keys = sorted(fold_predictions)
 	if not fold_keys:

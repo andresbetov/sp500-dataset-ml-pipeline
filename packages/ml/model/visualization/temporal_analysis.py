@@ -74,7 +74,8 @@ def plot_temporal_fold_ranges(summary_df: pd.DataFrame, output_path: Path | None
     ax.grid(axis="x", alpha=0.3)
     ax.legend(loc="upper right")
 
-    # Format x-axis for better date display
+    # Format the x-axis for display. YearLocator only positions year ticks; it
+    # changes no date, fold boundary, or data. Intended no-fix.
     import matplotlib.dates as mdates
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
     ax.xaxis.set_major_locator(mdates.YearLocator())
