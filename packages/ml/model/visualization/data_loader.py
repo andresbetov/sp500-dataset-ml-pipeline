@@ -19,7 +19,7 @@ def load_fold_training_summary(summary_path: Path | None = None) -> pd.DataFrame
         summary_path: Path to fold_training_summary.json. If None, uses default location.
 
     Returns:
-        DataFrame with fold metrics (rows=5, cols=metrics)
+        DataFrame with fold metrics (one row per fold, cols=metrics)
     """
     if summary_path is None:
         # Use default location from model/artifacts/results/

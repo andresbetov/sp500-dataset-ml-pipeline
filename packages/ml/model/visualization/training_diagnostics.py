@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from pathlib import Path
 
 import matplotlib.patches as mpatches
@@ -13,6 +14,7 @@ import pandas as pd
 from scipy import stats
 
 from packages.ml.model.artifact_integrity import REGISTRY_FILENAME, load_verified
+from packages.ml.model.cross_validation import cross_validator
 from packages.ml.model.features.feature_engineering import INDICATORS
 from packages.ml.model.run_log import resolve_stored_path
 from packages.ml.model.utils import ARTIFACTS_DIR
@@ -20,8 +22,24 @@ from packages.ml.model.visualization.data_loader import load_fold_training_summa
 
 logger = logging.getLogger(__name__)
 
-FOLD_COLORS = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd"]
-FOLD_NAMES = [f"fold_{i}" for i in range(5)]
+# Base series palette. The per-fold colors cycle it so the color list always
+# matches the configured fold count, never a hardcoded five.
+_FOLD_PALETTE = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd"]
+FOLD_NAMES = [f"fold_{i}" for i in range(cross_validator.N_FOLDS)]
+FOLD_COLORS = [
+    _FOLD_PALETTE[i % len(_FOLD_PALETTE)] for i in range(len(FOLD_NAMES))
+]
+
+
+def _fold_panel_grid(fold_count: int) -> tuple[int, int]:
+    """(rows, columns) for the per-fold panels plus the combined panel.
+
+    Three columns, one row per three panels: the historical five folds plus
+    the combined panel keep the 2x3 layout, and a different configured count
+    grows the grid instead of indexing past it.
+    """
+    columns = 3
+    return math.ceil((fold_count + 1) / columns), columns
 
 
 def load_validation_predictions(predictions_path: Path | None = None) -> dict:
@@ -66,7 +84,8 @@ def plot_actual_vs_predicted(predictions_dict: dict, output_path: Path | None = 
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+    rows, columns = _fold_panel_grid(len(FOLD_NAMES))
+    fig, axes = plt.subplots(rows, columns, figsize=(18, 6 * rows))
     axes_flat = axes.flatten()
 
     all_true = []
@@ -105,8 +124,8 @@ def plot_actual_vs_predicted(predictions_dict: dict, output_path: Path | None = 
     all_pred = np.concatenate(all_pred)
     all_fold = np.array(all_fold)
 
-    ax_combined = axes_flat[5]
-    for i in range(5):
+    ax_combined = axes_flat[len(FOLD_NAMES)]
+    for i in range(len(FOLD_NAMES)):
         mask = all_fold == i
         ax_combined.scatter(all_true[mask], all_pred[mask], c=FOLD_COLORS[i],
                            alpha=0.4, s=8, edgecolors="none", label=f"Fold {i}")
@@ -151,7 +170,8 @@ def plot_residuals(predictions_dict: dict, output_path: Path | None = None) -> P
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+    rows, columns = _fold_panel_grid(len(FOLD_NAMES))
+    fig, axes = plt.subplots(rows, columns, figsize=(18, 6 * rows))
     axes_flat = axes.flatten()
 
     all_residuals = []
@@ -182,7 +202,7 @@ def plot_residuals(predictions_dict: dict, output_path: Path | None = None) -> P
         ax.legend(fontsize=9)
 
     # Combined histogram (last subplot)
-    ax_combined = axes_flat[5]
+    ax_combined = axes_flat[len(FOLD_NAMES)]
     all_residuals_concat = np.concatenate(all_residuals)
 
     for i, fold_residuals in enumerate(all_residuals):
@@ -270,7 +290,7 @@ def resolve_fold_checkpoint(
     filename (the old ``fold_<i>_model.pkl`` convention is gone).
 
     Args:
-        fold_idx: Fold index (0-4).
+        fold_idx: Fold index (0-based).
         summary_path: Path to fold_training_summary.json. If None, uses the
             artifacts results directory.
         manifest_path: Path to run_manifest.json. If None, uses the artifacts
@@ -329,7 +349,7 @@ def plot_feature_importance(predictions_dict: dict, summary_df: pd.DataFrame, ou
 
     all_importances = []
 
-    for i in range(5):
+    for i in range(len(FOLD_NAMES)):
         model_path = resolve_fold_checkpoint(i)
         if not model_path.exists():
             logger.warning("Model not found at %s, skipping fold %d", model_path, i)
@@ -345,10 +365,11 @@ def plot_feature_importance(predictions_dict: dict, summary_df: pd.DataFrame, ou
 
     all_importances = np.array(all_importances)
 
-    fig, axes = plt.subplots(2, 3, figsize=(22, 14))
+    rows, columns = _fold_panel_grid(len(FOLD_NAMES))
+    fig, axes = plt.subplots(rows, columns, figsize=(22, 7 * rows))
     axes_flat = axes.flatten()
 
-    for i in range(5):
+    for i in range(len(FOLD_NAMES)):
         ax = axes_flat[i]
         importances = all_importances[i]
 
@@ -366,7 +387,7 @@ def plot_feature_importance(predictions_dict: dict, summary_df: pd.DataFrame, ou
         ax.grid(axis="x", alpha=0.3)
 
     # Aggregate importance (last subplot)
-    ax_agg = axes_flat[5]
+    ax_agg = axes_flat[len(FOLD_NAMES)]
     avg_importances = all_importances.mean(axis=0)
     top_indices = np.argsort(avg_importances)[-15:][::-1]
     top_names = [INDICATORS[idx] for idx in top_indices]
