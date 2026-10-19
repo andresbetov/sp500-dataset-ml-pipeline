@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 
 import numpy as np
@@ -17,6 +18,102 @@ import pandas as pd
 from packages.ml.model.evaluation.stats import spread
 
 logger = logging.getLogger(__name__)
+
+# The summary is keyed by fold id. A key outside this namespace is a schema
+# error, not a plot input; required columns are the ones the visualizations
+# read. Columns outside the declared schema are warned about and retained.
+FOLD_KEY_RE = re.compile(r"^fold_(\d+)$")
+
+REQUIRED_COLUMNS = (
+    "train_date_min",
+    "train_date_max",
+    "test_date_min",
+    "test_date_max",
+    "n_train_samples",
+    "n_test_samples",
+    "test_r2",
+    "test_mae",
+    "test_rmse",
+    "train_time_seconds",
+    "inference_time_seconds",
+    "har_time_seconds",
+    "fold_time_seconds",
+    "n_features_indicators",
+    "n_features_ticker",
+)
+
+OPTIONAL_COLUMNS = frozenset(
+    {
+        "best_iteration",
+        "clip_count",
+        "clip_rate",
+        "eval_history",
+        "har_qlike",
+        "har_r2",
+        "headline_row_set",
+        "model_path",
+        "n_features",
+        "n_inner_purge_rows",
+        "n_inner_val_samples",
+        "n_test_floor_excluded",
+        "n_test_scored",
+        "n_test_total",
+        "n_train_floor_excluded",
+        "n_warmup_excluded",
+        "oos_r2_prevailing_mean",
+        "oos_r2_row_set",
+        "oos_r2_scale",
+        "oos_r2_vs_har",
+        "test_qlike",
+    }
+)
+
+KNOWN_COLUMNS = frozenset(REQUIRED_COLUMNS) | OPTIONAL_COLUMNS
+
+
+def _validate_fold_summary(data: object) -> dict[str, int]:
+    """Validate the summary's fold keys and required columns.
+
+    Returns the fold key -> index mapping used for deterministic ordering.
+    Malformed fold keys and missing required columns raise ``ValueError``
+    naming the offender. Unexpected metric keys are logged and retained.
+    """
+    if not isinstance(data, dict):
+        raise ValueError(
+            "Fold training summary must be a JSON object keyed by fold_<n>, "
+            f"got {type(data).__name__}"
+        )
+
+    fold_indices: dict[str, int] = {}
+    for fold_key, metrics in data.items():
+        match = FOLD_KEY_RE.fullmatch(fold_key)
+        if match is None:
+            raise ValueError(
+                f"Invalid fold key {fold_key!r}: expected a key matching fold_<n>"
+            )
+        if not isinstance(metrics, dict):
+            raise ValueError(
+                f"Fold {fold_key!r} must map to a JSON object, "
+                f"got {type(metrics).__name__}"
+            )
+
+        missing = [column for column in REQUIRED_COLUMNS if column not in metrics]
+        if missing:
+            raise ValueError(
+                f"Fold {fold_key!r} is missing required column(s): "
+                + ", ".join(missing)
+            )
+
+        unexpected = sorted(column for column in metrics if column not in KNOWN_COLUMNS)
+        if unexpected:
+            logger.warning(
+                "Fold %s carries unexpected key(s) retained as column(s): %s",
+                fold_key,
+                ", ".join(unexpected),
+            )
+        fold_indices[fold_key] = int(match.group(1))
+
+    return fold_indices
 
 
 def _sample_spread(values: pd.Series) -> float:
@@ -59,11 +156,17 @@ def load_fold_training_summary(summary_path: Path | None = None) -> pd.DataFrame
     with open(summary_path, "r") as f:
         data = json.load(f)
 
-    # Convert nested dict to flat DataFrame
+    fold_indices = _validate_fold_summary(data)
+
+    # Convert nested dict to flat DataFrame in deterministic fold order; the
+    # JSON key order must not change the rendered row order.
     rows = []
-    for fold_id, metrics in data.items():
+    for fold_id in sorted(data, key=lambda key: (fold_indices[key], key)):
         row = {"fold": fold_id}
-        row.update(metrics)
+        row.update(data[fold_id])
+        # The fold namespace key is authoritative even if a record carries a
+        # stray "fold" field (warned about above).
+        row["fold"] = fold_id
         rows.append(row)
 
     df = pd.DataFrame(rows)
@@ -79,7 +182,7 @@ def load_fold_training_summary(summary_path: Path | None = None) -> pd.DataFrame
 
     logger.info(f"Loaded {len(df)} fold summaries")
 
-    return df
+    return df.copy()
 
 
 def extract_training_time_stats(summary_df: pd.DataFrame) -> dict:

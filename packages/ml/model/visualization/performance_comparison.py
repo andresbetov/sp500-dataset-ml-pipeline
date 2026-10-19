@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 
 from packages.ml.model.visualization.data_loader import load_fold_training_summary
+from packages.ml.model.visualization.plotting import render_plot
 
 logger = logging.getLogger(__name__)
 
@@ -260,7 +261,10 @@ def plot_feature_count_summary(summary_df: pd.DataFrame, output_path: Path | Non
     return output_path
 
 
-def generate_performance_comparisons(summary_df: pd.DataFrame | None = None, output_dir: Path | None = None) -> list[Path]:
+def generate_performance_comparisons(
+    summary_df: pd.DataFrame | None = None,
+    output_dir: Path | None = None,
+) -> list[Path]:
     """
     Generate all performance comparison visualizations.
 
@@ -280,12 +284,23 @@ def generate_performance_comparisons(summary_df: pd.DataFrame | None = None, out
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    paths = [
-        plot_metrics_comparison(summary_df, output_dir / "metrics_comparison.png"),
-        plot_timing_breakdown(summary_df, output_dir / "timing_breakdown.png"),
-        plot_sample_distribution(summary_df, output_dir / "sample_distribution.png"),
-        plot_feature_count_summary(summary_df, output_dir / "feature_count_summary.png"),
+    plots = [
+        ("metrics_comparison", plot_metrics_comparison),
+        ("timing_breakdown", plot_timing_breakdown),
+        ("sample_distribution", plot_sample_distribution),
+        ("feature_count_summary", plot_feature_count_summary),
     ]
+
+    paths = []
+    for plot_name, plot_function in plots:
+        path = render_plot(
+            "performance",
+            plot_name,
+            lambda output_path, render=plot_function: render(summary_df, output_path),
+            output_dir,
+        )
+        if path is not None:
+            paths.append(path)
 
     logger.info(f"Generated {len(paths)} performance comparison visualizations")
     return paths

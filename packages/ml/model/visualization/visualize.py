@@ -7,6 +7,10 @@ from pathlib import Path
 
 from packages.ml.model.visualization.data_loader import load_fold_training_summary
 from packages.ml.model.visualization.metrics_visualizer import generate_metrics_visualizations
+from packages.ml.model.visualization.plotting import (
+    collect_plot_statuses,
+    write_plot_manifest,
+)
 from packages.ml.model.visualization.temporal_analysis import generate_temporal_visualizations
 from packages.ml.model.visualization.performance_comparison import generate_performance_comparisons
 from packages.ml.model.visualization.training_diagnostics import generate_training_diagnostics, load_validation_predictions
@@ -41,12 +45,48 @@ def generate_all_visualizations(
 
     logger.info("Generating all visualizations...")
 
-    results = {
-        "metrics": generate_metrics_visualizations(summary_df, output_dir),
-        "temporal": generate_temporal_visualizations(summary_df, output_dir),
-        "performance": generate_performance_comparisons(summary_df, output_dir),
-        "diagnostics": generate_training_diagnostics(predictions_dict, summary_df, output_dir),
-    }
+    # Per-plot failures are recorded by the generators; a category that fails
+    # before its plot loop still leaves the other categories running.
+    results: dict[str, list[Path]] = {}
+    categories = [
+        (
+            "metrics",
+            lambda: generate_metrics_visualizations(summary_df, output_dir),
+        ),
+        (
+            "temporal",
+            lambda: generate_temporal_visualizations(summary_df, output_dir),
+        ),
+        (
+            "performance",
+            lambda: generate_performance_comparisons(summary_df, output_dir),
+        ),
+        (
+            "diagnostics",
+            lambda: generate_training_diagnostics(
+                predictions_dict, summary_df, output_dir
+            ),
+        ),
+    ]
+
+    with collect_plot_statuses() as statuses:
+        for category, generate_category in categories:
+            try:
+                results[category] = generate_category()
+            except Exception as exc:
+                logger.exception("Visualization category %s failed: %s", category, exc)
+                statuses.append(
+                    {
+                        "category": category,
+                        "plot": "*",
+                        "status": "error",
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                )
+                results[category] = []
+
+    manifest_path = write_plot_manifest(output_dir, statuses)
+    logger.info("Wrote visualization manifest to %s", manifest_path)
 
     total = sum(len(paths) for paths in results.values())
     logger.info("Generated %d visualizations total across %d categories", total, len(results))
