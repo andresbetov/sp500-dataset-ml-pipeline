@@ -14,6 +14,10 @@ logger = logging.getLogger(__name__)
 
 RANDOM_STATE = get_config()["training"]["seed"]
 N_JOBS = get_config()["training"]["n_jobs"]
+# Early stopping on the inner-validation tail: stop after this many rounds
+# without a validation-QLIKE improvement. The configured n_estimators stays
+# the upper bound on the number of boosting rounds.
+EARLY_STOPPING_ROUNDS = 30
 
 
 def _map_labels_to_classes(y: np.ndarray) -> tuple[np.ndarray, dict]:
@@ -90,7 +94,7 @@ def train_xgboost_model(
 		y_val_reg = y_val.astype(np.float64)
 
 		logger.info(f"Using temporal early stopping set: {len(X_val):,} samples")
-		model.set_params(early_stopping_rounds=30)
+		model.set_params(early_stopping_rounds=EARLY_STOPPING_ROUNDS)
 		model.fit(
 			X_train,
 			y_train_reg,

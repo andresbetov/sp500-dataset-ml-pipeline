@@ -148,9 +148,11 @@ def test_metric_matches_loss() -> None:
     actual_log = np.array([-9.0, -8.5, -8.0, -7.5, -9.5])
     forecast_log = np.array([-8.8, -8.7, -8.2, -7.1, -9.9])
 
-    name, value = qlike_eval_metric(actual_log, forecast_log)
+    # The xgboost adapter returns the scalar metric; the history key comes from
+    # the function name, which the sklearn wrapper reads.
+    value = qlike_eval_metric(actual_log, forecast_log)
 
-    assert name == "qlike"
+    assert qlike_eval_metric.__name__ == "qlike_eval_metric"
     assert value == pytest.approx(
         training.qlike_loss(actual_log, forecast_log), rel=1e-12, abs=1e-12
     )

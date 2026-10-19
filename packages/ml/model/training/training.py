@@ -44,7 +44,7 @@ from packages.ml.model.training.har_benchmark import (
 	load_har_regressors,
 )
 from packages.ml.model.training.model_trainer import train_xgboost_model
-from packages.ml.model.training.qlike_objective import qlike_mean
+from packages.ml.model.training.qlike_objective import qlike_eval_metric, qlike_mean
 from packages.ml.model.run_log import (
 	environment_versions,
 	finish_run,
@@ -63,6 +63,16 @@ logger = logging.getLogger(__name__)
 # flat windows, where log(0) is undefined; 1e-12 only binds those rows, since the
 # smallest positive target in the frame is ~2.6e-10.
 RV_FLOOR = float(get_config()["rv_floor"])
+
+# The target of row t aggregates the forward window [t+1, t+5], so a row's label
+# window reaches LABEL_HORIZON_DAYS trading dates past its own date. The inner split
+# purges fit rows by the same horizon the outer train/test split uses.
+LABEL_HORIZON_DAYS = get_config()["folds"]["label_horizon_days"]
+
+# Fraction of each fold's floor-retained training rows held out as the purged
+# inner-validation tail that early stopping consumes (config-pinned). The tail
+# is withheld from the fit only, never from scoring.
+VALIDATION_TAIL_FRACTION = float(get_config()["training"]["validation_tail_fraction"])
 
 # The one declared headline row set. Fitting, model scoring, and the HAR benchmark
 # all consume this same floor-retained set; the downstream with/without decomposition
@@ -233,6 +243,84 @@ def _model_training_indices(fold_data: dict, y: np.ndarray) -> np.ndarray:
 	return train_indices[floor_retained_mask(y[train_indices])]
 
 
+def inner_validation_split(
+	fold_idx: int,
+	train_indices: np.ndarray,
+	date_pos: np.ndarray,
+	y: np.ndarray,
+	tail_fraction: float = VALIDATION_TAIL_FRACTION,
+) -> tuple[np.ndarray, np.ndarray, int]:
+	"""Split one fold's floor-retained training rows into fit and a purged tail.
+
+	The inner-validation tail is the temporally last ``tail_fraction`` of the
+	fold's floor-retained training rows: rows are ordered by their trading-date
+	position (ties keep row order, so the split never shuffles), and the tail
+	size is the nearest integer to the fraction, at least one row. Input rows
+	are stored ticker-major, so the date ordering is what makes the tail
+	temporal; the stored row order is not.
+
+	The fit set is the remainder after removing the tail and purging every fit
+	row whose label window reaches the tail: kept fit rows satisfy
+	``date_pos + LABEL_HORIZON_DAYS < first_tail_pos``, the same one-sided rule
+	as the outer train/test purge. The last kept fit date therefore sits at
+	least LABEL_HORIZON_DAYS trading dates before the tail start, and no fit
+	row's 5-day label window overlaps the tail. Both sides are floor-retained:
+	the split refuses at-or-below-floor input rows, and callers pass
+	``_model_training_indices`` output. The tail is strictly inside
+	fold-train, so it can never intersect the fold's test block or the
+	reserved holdout window beyond it.
+
+	Args:
+		fold_idx: Fold index (0-4), used in error messages.
+		train_indices: Floor-retained fold-train row indices.
+		date_pos: Per-row position in the sorted unique trading dates.
+		y: Raw target array (floor-retained rows are required on both sides).
+		tail_fraction: Tail fraction of the floor-retained fold-train rows.
+
+	Returns:
+		(fit_indices, tail_indices, purge_count), both index arrays ascending.
+	"""
+	retained = np.asarray(train_indices)
+	if retained.size == 0:
+		raise ValueError(
+			f"Fold {fold_idx}: no floor-retained training rows for an "
+			f"inner-validation tail"
+		)
+	if not 0.0 < tail_fraction < 1.0:
+		raise ValueError(
+			f"Fold {fold_idx}: validation tail fraction must be in (0, 1), "
+			f"got {tail_fraction}"
+		)
+	below_floor = int(np.count_nonzero(~floor_retained_mask(y[retained])))
+	if below_floor:
+		raise ValueError(
+			f"Fold {fold_idx}: inner-validation split requires floor-retained "
+			f"training rows; {below_floor} are at or below the floor {RV_FLOOR:g}"
+		)
+	n_tail = max(1, int(np.floor(retained.size * tail_fraction + 0.5)))
+	if n_tail >= retained.size:
+		raise ValueError(
+			f"Fold {fold_idx}: {retained.size} floor-retained training rows cannot "
+			f"hold a {tail_fraction:.0%} inner-validation tail of {n_tail} rows "
+			f"plus a fit set"
+		)
+
+	temporal = retained[np.lexsort((retained, date_pos[retained]))]
+	tail_indices = temporal[-n_tail:]
+	fit_candidates = temporal[:-n_tail]
+	tail_start_pos = int(date_pos[tail_indices].min())
+	purge_mask = date_pos[fit_candidates] + LABEL_HORIZON_DAYS >= tail_start_pos
+	fit_indices = fit_candidates[~purge_mask]
+	if fit_indices.size == 0:
+		raise ValueError(
+			f"Fold {fold_idx}: the {LABEL_HORIZON_DAYS}-date label-horizon purge "
+			f"leaves no fit rows before the inner-validation tail "
+			f"({int(purge_mask.sum())} of {fit_candidates.size} candidates purged); "
+			f"the fold is too short for a purged tail"
+		)
+	return np.sort(fit_indices), np.sort(tail_indices), int(purge_mask.sum())
+
+
 def fold_checkpoint_path(fold_idx: int, run_id: str) -> Path:
 	"""Run-scoped checkpoint location: ``checkpoints/<run_id>/fold_<i>.pkl``.
 
@@ -341,41 +429,81 @@ def _train_fold_model(
 	run_id: str,
 	X_train: np.ndarray,
 	y_train: np.ndarray,
+	X_val: np.ndarray | None,
+	y_val: np.ndarray | None,
 	X_test: np.ndarray,
 	y_test: np.ndarray,
 	fold_data: dict,
 	row_policy: dict | None = None,
+	inner_purge_count: int = 0,
 ) -> tuple:
 	"""
 	Train one XGBoost model per fold on the log target. No temporal leakage: model
 	trained only on fold_i_train, evaluated on the floor-retained fold_i_test rows
 	(which are strictly future to train dates).
 
+	``X_val``/``y_val`` are the fold's purged inner-validation tail when the
+	phase provides one: the trainer early-stops on validation QLIKE, and the
+	model's ``best_iteration`` plus per-round QLIKE history are persisted. With
+	``None`` (direct callers) the fit runs to the configured round count and
+	both persistence keys stay ``None``.
+
 	Args:
 		fold_idx: Fold index (0-4)
 		run_id: Run id of the owning run; scopes the checkpoint directory
-		X_train: Training features from fold_i_train
-		y_train: Training log-target from fold_i_train
+		X_train: Inner-fit features from fold_i_train
+		y_train: Inner-fit log-target from fold_i_train
+		X_val: Purged inner-validation tail features (or None)
+		y_val: Purged inner-validation tail log-target (or None)
 		X_test: Floor-retained test features from fold_i_test
 		y_test: Floor-retained test log-target from fold_i_test
 		fold_data: Fold metadata (dates, counts)
 		row_policy: Per-fold floor mask, indices, counts, and headline declaration
+		inner_purge_count: Fit rows removed by the inner label-horizon purge
 
 	Returns:
 		(model, predictions_dict)
 	"""
 	fold_start = time.time()
-	logger.info(f"Fold {fold_idx}: Training model on {len(X_train):,} samples, testing on {len(X_test):,} samples")
+	tail_note = (
+		f", early stopping on {len(X_val):,} inner-validation rows"
+		if X_val is not None
+		else ""
+	)
+	logger.info(
+		f"Fold {fold_idx}: Training model on {len(X_train):,} samples{tail_note}, "
+		f"testing on {len(X_test):,} samples"
+	)
 	logger.info(f"  Date range: {fold_data['train_date_min']} to {fold_data['test_date_max']}")
 
-	# Train model on fold_i_train data only (no leakage)
+	# Train model on the fold's inner-fit rows only (no leakage); the purged
+	# tail is the early-stopping set, never a fitting set.
 	try:
 		train_start = time.time()
-		model, label_mapping = train_xgboost_model(X_train, y_train, X_val=None, y_val=None)
+		model, label_mapping = train_xgboost_model(
+			X_train, y_train, X_val=X_val, y_val=y_val
+		)
 		train_time = time.time() - train_start
 	except Exception as e:
 		logger.error(f"Fold {fold_idx} model training failed: {e}")
 		raise
+
+	# Early stopping persists the best iteration and the per-round validation
+	# QLIKE history; both stay None when no tail was passed. The QLIKE key is
+	# the metric function's name, which xgboost derives from the callable.
+	best_iteration = getattr(model, "best_iteration", None)
+	eval_history = None
+	if best_iteration is not None:
+		best_iteration = int(best_iteration)
+		validation_history = model.evals_result().get("validation_0", {})
+		qlike_scores = validation_history.get(qlike_eval_metric.__name__)
+		if qlike_scores is None:
+			raise RuntimeError(
+				f"Fold {fold_idx}: model reports best_iteration={best_iteration} "
+				f"but no validation QLIKE history "
+				f"({qlike_eval_metric.__name__})"
+			)
+		eval_history = {"qlike": [float(score) for score in qlike_scores]}
 
 	# Generate predictions on fold_i_test data
 	inference_start = time.time()
@@ -401,6 +529,12 @@ def _train_fold_model(
 
 	fold_elapsed = time.time() - fold_start
 	logger.info(f"  Fold {fold_idx}: R²={test_r2:.4f}, MAE={test_mae:.6f}, RMSE={test_rmse:.6f}, QLIKE={test_qlike:.6f}")
+	if best_iteration is not None:
+		logger.info(
+			f"    └─ Early stopping: best_iteration={best_iteration} of "
+			f"{model.n_estimators} configured rounds "
+			f"({len(eval_history['qlike'])} rounds evaluated)"
+		)
 	logger.info(f"    └─ Timing: {train_time:.1f}s train + {inference_time:.1f}s inference = {fold_elapsed:.1f}s total")
 
 	# Save the model under the run-scoped checkpoint directory, atomically:
@@ -432,6 +566,10 @@ def _train_fold_model(
 		"test_rmse": test_rmse,
 		"test_qlike": test_qlike,
 		"n_train_samples": len(X_train),
+		"n_inner_val_samples": len(X_val) if X_val is not None else 0,
+		"n_inner_purge_rows": int(inner_purge_count),
+		"best_iteration": best_iteration,
+		"eval_history": eval_history,
 		"n_test_samples": len(X_test),
 		"n_features": X_train.shape[1],
 		"train_time_seconds": train_time,
@@ -467,6 +605,10 @@ def _aggregate_fold_results(fold_predictions_list: list) -> tuple[dict, dict]:
 			"test_date_min": pred_dict["test_date_range"][0],
 			"test_date_max": pred_dict["test_date_range"][1],
 			"n_train_samples": int(pred_dict["n_train_samples"]),
+			"n_inner_val_samples": int(pred_dict["n_inner_val_samples"]),
+			"n_inner_purge_rows": int(pred_dict["n_inner_purge_rows"]),
+			"best_iteration": pred_dict["best_iteration"],
+			"eval_history": pred_dict["eval_history"],
 			"n_test_samples": int(pred_dict["n_test_samples"]),
 			"n_test_total": int(pred_dict["n_test_total"]),
 			"n_test_floor_excluded": int(pred_dict["n_test_floor_excluded"]),
@@ -617,12 +759,16 @@ def phase_4_training(
 	"""
 	Orchestrate Phase 4: Train 5 fold-specific XGBoost models (1 per fold) with no temporal leakage.
 	Each fold_i_model trains exclusively on fold_i_train and is evaluated on fold_i_test.
-	The modeled target is log(RV) — the Yang-Zhang variance is closer to log-normal and
-	the fold models minimize QLIKE on that log target — and every fold also fits the
-	canonical HAR-RV benchmark on its training rows only, minus the per-ticker warm-up
-	(the first HAR_WARMUP_DAYS dates of each ticker's series, whose trailing windows
-	are incomplete). Degenerate at-or-below-floor target rows are flat-window artifacts
-	and are excluded from fitting and scoring under the single floor policy; the
+	Each fold also holds out the temporally last VALIDATION_TAIL_FRACTION of its
+	floor-retained training rows as a purged inner-validation tail; the model
+	early-stops on the tail's QLIKE and persists best_iteration plus the
+	per-round validation history. The modeled target is log(RV) — the Yang-Zhang
+	variance is closer to log-normal and the fold models minimize QLIKE on that
+	log target — and every fold also fits the canonical HAR-RV benchmark on its
+	training rows only, minus the per-ticker warm-up (the first HAR_WARMUP_DAYS
+	dates of each ticker's series, whose trailing windows are incomplete).
+	Degenerate at-or-below-floor target rows are flat-window artifacts and are
+	excluded from fitting and scoring under the single floor policy; the
 	retained row set is declared and counted.
 
 	``coefficient_interpretation`` defaults to False, the pipeline setting: the
@@ -677,6 +823,12 @@ def phase_4_training(
 	# HAR_WARMUP_DAYS dates (incomplete trailing windows) for fit exclusion only.
 	har_regressors, har_warmup_mask = load_har_regressors(metadata["date"], metadata["ticker"])
 
+	# Per-row position in the sorted unique trading dates. The input rows are
+	# stored ticker-major, so the inner-validation split orders fold-train rows
+	# by this position (and measures the label-horizon purge in trading dates)
+	# instead of by stored row order.
+	_, date_pos = np.unique(metadata["date"], return_inverse=True)
+
 	# Train 5 models (1 per fold) with strict temporal separation
 	fold_predictions_list = []
 	fold_model_paths = []
@@ -699,6 +851,14 @@ def phase_4_training(
 				f"Fold {fold_idx} ({fold_key}): all {int(fold_data['n_train'])} fold-train rows "
 				f"are at or below the floor {RV_FLOOR:g} (RV_FLOOR); no training rows remain"
 			)
+
+		# Inner-validation tail: the temporally last fraction of the
+		# floor-retained fold-train rows, purged from the fit side by the same
+		# label horizon the outer train/test split uses. Both sides stay
+		# floor-retained and strictly inside fold-train.
+		fit_indices, inner_val_indices, n_inner_purge_rows = inner_validation_split(
+			fold_idx, train_indices, date_pos, y
+		)
 
 		test_indices = np.array(fold_data["test_indices"])
 		test_floor_mask = floor_retained_mask(y[test_indices])
@@ -732,9 +892,21 @@ def phase_4_training(
 			f"at-or-below-floor rows from training; excluded {n_test_floor_excluded:,} "
 			f"of {n_test_total:,} test rows from scoring"
 		)
+		logger.info(
+			f"  Fold {fold_idx}: inner-validation tail {len(inner_val_indices):,} rows "
+			f"({metadata['date'][inner_val_indices].min()} to "
+			f"{metadata['date'][inner_val_indices].max()}); purged "
+			f"{n_inner_purge_rows:,} fit rows within the {LABEL_HORIZON_DAYS}-date "
+			f"label horizon; fit on {len(fit_indices):,} rows"
+		)
 
-		X_train = X[train_indices]
-		y_train = y_log[train_indices]
+		# The model fits the inner-fit rows and early-stops on the tail; the HAR
+		# benchmark keeps the full floor-retained fold-train (unchanged path).
+		y_train_full = y_log[train_indices]
+		X_train = X[fit_indices]
+		y_train = y_log[fit_indices]
+		X_val = X[inner_val_indices]
+		y_val = y_log[inner_val_indices]
 		X_test = X[test_indices_scored]
 		y_test = y_log[test_indices_scored]
 
@@ -744,10 +916,13 @@ def phase_4_training(
 			run_id=run_id,
 			X_train=X_train,
 			y_train=y_train,
+			X_val=X_val,
+			y_val=y_val,
 			X_test=X_test,
 			y_test=y_test,
 			fold_data=fold_data,
 			row_policy=row_policy,
+			inner_purge_count=n_inner_purge_rows,
 		)
 
 		# Canonical HAR-RV benchmark on the same floor-retained rows, fitted on the
@@ -757,7 +932,7 @@ def phase_4_training(
 		har_result = fit_har_benchmark(
 			train_indices=train_indices,
 			test_indices=test_indices_scored,
-			target_log_train=y_train,
+			target_log_train=y_train_full,
 			target_log_test=y_test,
 			regressors=har_regressors,
 			forecast_floor=RV_FLOOR,
