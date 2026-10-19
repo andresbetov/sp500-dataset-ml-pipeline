@@ -5,6 +5,11 @@ import logging
 import joblib
 import numpy as np
 import pandas as pd
+from packages.ml.model.artifact_integrity import (
+    REGISTRY_FILENAME,
+    load_verified,
+    record_artifact,
+)
 from packages.ml.model.config import get_config
 from packages.ml.model.features.feature_engineering import INDICATORS
 from packages.ml.model.utils import ARTIFACTS_DIR
@@ -158,7 +163,10 @@ def phase_3_cross_validation() -> dict:
     logger.info("Loading Phase 2 outputs...")
     X = np.load(ARTIFACTS_DIR / "inputs" / "X.npy", mmap_mode="r")
     y = np.load(ARTIFACTS_DIR / "inputs" / "Y.npy", mmap_mode="r")
-    metadata = joblib.load(ARTIFACTS_DIR / "inputs" / "metadata.pkl")
+    metadata = load_verified(
+        ARTIFACTS_DIR / "inputs" / "metadata.pkl",
+        registry_path=ARTIFACTS_DIR / REGISTRY_FILENAME,
+    )
 
     logger.info(f"Loaded X: {X.shape}, y: {y.shape}")
 
@@ -303,6 +311,11 @@ def phase_3_cross_validation() -> dict:
         **folds,
     }
     joblib.dump(payload, folds_metadata_path)
+    # Record the hash at write time so the Phase 4 reader (and any later
+    # reader) can verify this artifact before loading it.
+    record_artifact(
+        folds_metadata_path, registry_path=ARTIFACTS_DIR / REGISTRY_FILENAME
+    )
 
     logger.info(f"Saved fold metadata to {folds_metadata_path}")
     logger.info(

@@ -6,13 +6,13 @@ import json
 import logging
 from pathlib import Path
 
-import joblib
 import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from scipy import stats
 
+from packages.ml.model.artifact_integrity import REGISTRY_FILENAME, load_verified
 from packages.ml.model.features.feature_engineering import INDICATORS
 from packages.ml.model.run_log import resolve_stored_path
 from packages.ml.model.utils import ARTIFACTS_DIR
@@ -25,7 +25,7 @@ FOLD_NAMES = [f"fold_{i}" for i in range(5)]
 
 
 def load_validation_predictions(predictions_path: Path | None = None) -> dict:
-    """Load validation predictions from pickle file.
+    """Load validation predictions from pickle file (size- and sha256-verified).
 
     Args:
         predictions_path: Path to validation_predictions.pkl. If None, uses default location.
@@ -41,7 +41,10 @@ def load_validation_predictions(predictions_path: Path | None = None) -> dict:
 
     logger.info("Loading validation predictions from %s", predictions_path)
 
-    data: dict = joblib.load(predictions_path)
+    data: dict = load_verified(
+        predictions_path,
+        registry_path=ARTIFACTS_DIR / REGISTRY_FILENAME,
+    )
     logger.info("Loaded predictions for %d folds: %s", len(data), list(data.keys()))
 
     return data
@@ -303,11 +306,12 @@ def plot_feature_importance(predictions_dict: dict, summary_df: pd.DataFrame, ou
     Checkpoint locations come from the run's recorded artifact paths
     (``resolve_fold_checkpoint``): the fold summary first, then the run
     manifest. A fold whose checkpoint is not named by either record raises
-    ``CheckpointResolutionError`` — the plot never guesses a filename. A
-    recorded path whose file is absent is the intentional partial-checkout
-    case (checkpoints pruned after a run): that fold contributes zeros with a
-    warning, preserving the pre-existing behavior so the remaining folds still
-    render.
+    ``CheckpointResolutionError`` — the plot never guesses a filename. Each
+    resolved checkpoint is size- and sha256-verified before loading
+    (``load_verified``). A recorded path whose file is absent is the
+    intentional partial-checkout case (checkpoints pruned after a run): that
+    fold contributes zeros with a warning, preserving the pre-existing behavior
+    so the remaining folds still render.
 
     Args:
         predictions_dict: Dict of fold predictions from load_validation_predictions()
@@ -332,7 +336,10 @@ def plot_feature_importance(predictions_dict: dict, summary_df: pd.DataFrame, ou
             all_importances.append(np.zeros(len(INDICATORS)))
             continue
 
-        model = joblib.load(model_path)
+        model = load_verified(
+            model_path,
+            registry_path=ARTIFACTS_DIR / REGISTRY_FILENAME,
+        )
         importances = model.feature_importances_
         all_importances.append(importances)
 
