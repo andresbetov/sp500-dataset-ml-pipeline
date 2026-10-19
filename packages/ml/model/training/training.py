@@ -33,6 +33,12 @@ from packages.ml.model.artifact_integrity import (
 from packages.ml.model.config import get_config
 from packages.ml.model.cross_validation import cross_validator
 from packages.ml.model.cross_validation.cv_utils import load_folds_metadata
+from packages.ml.model.evaluation.stats import (
+	AllFoldsInvalidError,
+	quarantine_record,
+	sanitize_json,
+	spread,
+)
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from packages.ml.model.training.har_benchmark import (
 	COMPARISON_NOTE,
@@ -687,28 +693,35 @@ def _train_fold_model(
 	y_pred = model.predict(X_test)
 	inference_time = time.time() - inference_start
 
-	# Compute metrics on the log target. ``test_r2`` is sklearn's fold-own-mean R²
-	# (1 - SSE_model/SSE_fold_mean); the dual OOS-R² keys are emitted after the HAR
-	# fit, where the fold's per-row HAR forecasts exist: ``oos_r2_prevailing_mean``
-	# states the same fold-own-mean convention under its honest name (pooled, it
-	# demeans by the pooled mean instead), and ``oos_r2_vs_har`` is
-	# 1 - SSE_model/SSE_HAR on the same floor-retained scored rows. The fold-own-mean
-	# value is not comparable to the pooled value or to a non-demeaned R²_oos. The
-	# block below swallows failures into NaN metrics; r2_score on a constant target
-	# returns 1.0/0.0, not NaN.
+	# Compute the fold's model metrics inside the quarantine boundary: any
+	# failure here — an R²/MAE/RMSE guard, the QLIKE guard, a degenerate test
+	# block — records ``{"error": ...}`` for the fold and leaves every metric
+	# value invalid (NaN in memory, ``null`` in the written summary) instead of
+	# aborting the run. The loss functions themselves stay fail-loud:
+	# ``qlike_loss`` still raises on non-finite input, and this boundary is the
+	# only place that catches it. ``test_r2`` is sklearn's fold-own-mean R²
+	# (1 - SSE_model/SSE_fold_mean); the dual OOS-R² keys are emitted after the
+	# HAR fit, where the fold's per-row HAR forecasts exist:
+	# ``oos_r2_prevailing_mean`` states the same fold-own-mean convention under
+	# its honest name (pooled, it demeans by the pooled mean instead), and
+	# ``oos_r2_vs_har`` is 1 - SSE_model/SSE_HAR on the same floor-retained
+	# scored rows. The fold-own-mean value is not comparable to the pooled
+	# value or to a non-demeaned R²_oos. r2_score on a constant target returns
+	# 1.0/0.0, not NaN; a NaN it does return is an invalid metric value, not a
+	# quarantine, and the global aggregation filters it with n_valid/n_total.
+	quarantine = None
 	try:
-		test_r2 = r2_score(y_test, y_pred)
-		test_mae = mean_absolute_error(y_test, y_pred)
-		test_rmse = np.sqrt(mean_squared_error(y_test, y_pred))
-	except Exception as e:
-		logger.error(f"Fold {fold_idx} metric computation failed: {e}")
-		test_r2 = float('nan')
-		test_mae = float('nan')
-		test_rmse = float('nan')
-
-	# QLIKE is computed outside the block above on purpose: it must fail loudly rather
-	# than write a NaN metric.
-	test_qlike = qlike_loss(y_test, y_pred)
+		test_r2 = float(r2_score(y_test, y_pred))
+		test_mae = float(mean_absolute_error(y_test, y_pred))
+		test_rmse = float(np.sqrt(mean_squared_error(y_test, y_pred)))
+		test_qlike = float(qlike_loss(y_test, y_pred))
+	except Exception as exc:
+		quarantine = quarantine_record(exc)
+		logger.warning(
+			f"Fold {fold_idx} metric computation failed; quarantining the fold: "
+			f"{quarantine['error']}"
+		)
+		test_r2 = test_mae = test_rmse = test_qlike = float("nan")
 
 	model_elapsed = time.time() - model_start
 	logger.info(f"  Fold {fold_idx}: R²={test_r2:.4f}, MAE={test_mae:.6f}, RMSE={test_rmse:.6f}, QLIKE={test_qlike:.6f}")
@@ -762,6 +775,10 @@ def _train_fold_model(
 		"fold_model_path": to_repo_relative(model_path),
 		"train_date_range": (fold_data["train_date_min"], fold_data["train_date_max"]),
 		"test_date_range": (fold_data["test_date_min"], fold_data["test_date_max"]),
+		# The fold's quarantine record (None when its metric computation
+		# succeeded); the phase records it outside the five-row fold summary,
+		# in the run record.
+		"quarantine": quarantine,
 	}
 	if row_policy is not None:
 		predictions_dict.update(row_policy)
@@ -823,6 +840,89 @@ def _aggregate_fold_results(fold_predictions_list: list) -> tuple[dict, dict]:
 	return validation_predictions, fold_training_summary
 
 
+# The metric keys the global block aggregates. Each is filtered to the folds
+# that contributed a finite value; the headline key is the loss the fold models
+# are trained on and the one the run cannot proceed without.
+GLOBAL_METRIC_KEYS = (
+	"test_r2",
+	"test_mae",
+	"test_rmse",
+	"test_qlike",
+	"har_qlike",
+	"har_r2",
+)
+HEADLINE_METRIC_KEY = "test_qlike"
+
+
+def _finite_metric(value: object) -> float | None:
+	"""The finite float behind a metric value; ``None`` for NaN/inf/non-numbers."""
+	if isinstance(value, bool) or not isinstance(
+		value, (int, float, np.integer, np.floating)
+	):
+		return None
+	number = float(value)
+	return number if math.isfinite(number) else None
+
+
+def _global_metrics(fold_training_summary: dict) -> dict:
+	"""Aggregate the fold metrics over their finite values, with counts.
+
+	Each metric is filtered independently: its mean and spread are computed
+	over the folds that contributed a finite value, and its ``n_valid`` /
+	``n_total`` counts record how many did. A fold with an invalid R² but a
+	valid QLIKE therefore still contributes its QLIKE — the QLIKE summary is
+	decoupled from R² validity. A warning names every metric that lost folds;
+	the run raises ``AllFoldsInvalidError`` only when the headline QLIKE has
+	``n_valid == 0``, since a diagnostic metric may be entirely invalid while
+	the run still has a headline result.
+	"""
+	n_total = len(fold_training_summary)
+	metrics = {}
+	for key in GLOBAL_METRIC_KEYS:
+		finite = [
+			value
+			for summary in fold_training_summary.values()
+			if (value := _finite_metric(summary.get(key))) is not None
+		]
+		metrics[key] = {
+			"mean": float(np.mean(finite)) if finite else None,
+			"std": spread(finite, ddof=0) if finite else None,
+			"n_valid": len(finite),
+			"n_total": n_total,
+		}
+
+	headline = metrics[HEADLINE_METRIC_KEY]
+	if headline["n_valid"] == 0:
+		raise AllFoldsInvalidError(
+			f"no fold contributed a finite {HEADLINE_METRIC_KEY} "
+			f"(0/{n_total} valid): every fold's metric computation is "
+			"quarantined or invalid"
+		)
+	invalid = [
+		f"{key} {metrics[key]['n_valid']}/{n_total}"
+		for key in GLOBAL_METRIC_KEYS
+		if metrics[key]["n_valid"] < n_total
+	]
+	if invalid:
+		logger.warning(
+			f"Global metrics: {headline['n_valid']}/{n_total} folds contribute "
+			f"a finite headline QLIKE; invalid metrics filtered per key: "
+			+ ", ".join(invalid)
+		)
+	return {
+		"n_valid_folds": headline["n_valid"],
+		"n_total_folds": n_total,
+		"metrics": metrics,
+	}
+
+
+def _format_metric(block: dict, fmt: str = ".4f") -> str:
+	"""One global metric as ``mean±spread``, or ``n/a`` when no fold is valid."""
+	if block["mean"] is None:
+		return "n/a"
+	return f"{block['mean']:{fmt}}±{block['std']:{fmt}}"
+
+
 def _save_training_results(
 	validation_predictions: dict,
 	fold_training_summary: dict,
@@ -845,7 +945,11 @@ def _save_training_results(
 	Every artifact is written through the shared atomic writer: the results
 	directory is created if absent (a dir-less target cannot fail with
 	``FileNotFoundError``), the final path appears only through the rename, and
-	a torn write leaves no partial final file and no ``*.tmp`` residue.
+	a torn write leaves no partial final file and no ``*.tmp`` residue. The two
+	JSON documents are projected through the shared strict sanitizer and
+	written with ``allow_nan=False``: non-finite metric values (invalid folds)
+	become ``null`` and an unencodable object fails the write instead of being
+	masked by ``str()``.
 	"""
 	val_pred_path = ARTIFACTS_DIR / "results" / "validation_predictions.pkl"
 	summary_path = ARTIFACTS_DIR / "results" / "fold_training_summary.json"
@@ -857,21 +961,23 @@ def _save_training_results(
 	)
 	record_artifact(val_pred_path, registry_path=ARTIFACTS_DIR / REGISTRY_FILENAME)
 
-	# Convert fold_training_summary to JSON-serializable format. Persisted paths
-	# stay repo-relative: to_repo_relative passes already-relative strings through
-	# and converts any absolute path built outside _train_fold_model.
+	# Project the fold summary onto strict JSON through the shared sanitizer:
+	# non-finite metric values (a quarantined/invalid fold) become null, numpy
+	# scalars become JSON-native values, and any object the sanitizer cannot
+	# encode fails the write instead of being masked by ``str()``. Persisted
+	# paths stay repo-relative: to_repo_relative passes already-relative
+	# strings through and converts any absolute path built outside
+	# _train_fold_model.
 	summary_json = {}
 	for fold_key, summary in fold_training_summary.items():
-		summary_json[fold_key] = {
-			k: v if not isinstance(v, (np.floating, np.integer)) else float(v)
-			for k, v in summary.items()
-		}
-		if "model_path" in summary_json[fold_key]:
-			summary_json[fold_key]["model_path"] = to_repo_relative(
-				summary_json[fold_key]["model_path"]
-			)
+		row = dict(summary)
+		if "model_path" in row:
+			row["model_path"] = to_repo_relative(row["model_path"])
+		summary_json[fold_key] = sanitize_json(row)
 
-	write_json_atomically(summary_path, summary_json, indent=2, default=str)
+	# ``allow_nan=False`` pairs with the sanitizer: even if a non-finite value
+	# slipped past it, the write fails instead of emitting a NaN token.
+	write_json_atomically(summary_path, summary_json, indent=2, allow_nan=False)
 	record_artifact(summary_path, registry_path=ARTIFACTS_DIR / REGISTRY_FILENAME)
 
 	# HAR benchmark report: per-fold coefficients and metrics next to the fold model's,
@@ -950,7 +1056,11 @@ def _save_training_results(
 	# callers of this writer (tests, sidecar tools) keep their minimal payloads.
 	if pooled_oos_r2_report is not None:
 		har_report["pooled_oos_r2"] = pooled_oos_r2_report
-	write_json_atomically(har_report_path, har_report, indent=2, default=str)
+	# Same strict projection as the fold summary: the per-fold model metrics
+	# copied into the report can be invalid (null) for a quarantined fold.
+	write_json_atomically(
+		har_report_path, sanitize_json(har_report), indent=2, allow_nan=False
+	)
 	record_artifact(har_report_path, registry_path=ARTIFACTS_DIR / REGISTRY_FILENAME)
 
 	logger.info(f"Training outputs saved (HAR benchmark report: {har_report_path})")
@@ -986,6 +1096,15 @@ def phase_4_training(
 	written report says so. When True, every fold also reports ordinary and
 	Newey-West HAC (lag 4, the 5-day label overlap) standard errors, persisted with
 	the flag so the errors stay interpretable.
+
+	One error policy covers the metric layer: a fold whose metric computation
+	raises is quarantined — its record is ``{"error": ...}`` under
+	``quarantined_folds`` in the run record (never a sixth row in the five-row
+	fold summary), its metric values are invalid, and the loop continues. The
+	global metrics filter invalid values with ``n_valid``/``n_total``, warn
+	when a metric lost folds, and raise only when no fold contributes a finite
+	headline QLIKE. The QLIKE summary is decoupled from R² validity: a fold
+	with NaN R² but a valid QLIKE still contributes its QLIKE.
 
 	Returns:
 		validation_predictions, fold_training_summary, fold_model_paths
@@ -1052,6 +1171,10 @@ def phase_4_training(
 	fold_predictions_list = []
 	fold_model_paths = []
 	har_benchmark_results = {}
+	# Fold key -> quarantine record ({"error": ...}) for every fold whose
+	# metric computation failed; recorded in the run manifest/record, never in
+	# the five-row fold summary.
+	quarantined_folds = {}
 
 	for fold_key in fold_key_list:
 		fold_started = time.time()
@@ -1184,9 +1307,39 @@ def phase_4_training(
 			}
 		)
 		har_forecast_log = har_result.pop("forecast_log")
-		har_result["har_qlike"] = qlike_loss(y_test, har_forecast_log)
+		# The HAR benchmark's metric layer runs inside the same fold-level
+		# quarantine boundary as the model metrics: a failure (a QLIKE guard on
+		# the benchmark forecasts, a degenerate OOS-R² input) records the fold's
+		# error and leaves every metric invalid instead of aborting the run.
+		quarantine = predictions_dict["quarantine"]
+		if quarantine is None:
+			try:
+				har_qlike = float(qlike_loss(y_test, har_forecast_log))
+				oos_r2_prevailing = oos_r2_prevailing_mean(
+					y_test, predictions_dict["test_pred"]
+				)
+				oos_r2_vs_har_value = oos_r2_vs_har(
+					y_test, predictions_dict["test_pred"], har_forecast_log
+				)
+			except Exception as exc:
+				quarantine = quarantine_record(exc)
+				logger.warning(
+					f"Fold {fold_idx} HAR/OOS metric computation failed; "
+					f"quarantining the fold: {quarantine['error']}"
+				)
+				har_qlike = oos_r2_prevailing = oos_r2_vs_har_value = float("nan")
+		else:
+			har_qlike = oos_r2_prevailing = oos_r2_vs_har_value = float("nan")
+		if quarantine is not None:
+			# A quarantined fold contributes no metric value anywhere: its
+			# model metrics and the benchmark's are all invalid.
+			predictions_dict["quarantine"] = quarantine
+			har_result["har_r2"] = float("nan")
+			for metric_key in ("test_r2", "test_mae", "test_rmse", "test_qlike"):
+				predictions_dict[metric_key] = float("nan")
+		har_result["har_qlike"] = har_qlike
 		predictions_dict["har_r2"] = har_result["har_r2"]
-		predictions_dict["har_qlike"] = har_result["har_qlike"]
+		predictions_dict["har_qlike"] = har_qlike
 		predictions_dict["n_warmup_excluded"] = har_result["n_warmup_excluded"]
 		predictions_dict["clip_count"] = har_result["clip_count"]
 		predictions_dict["clip_rate"] = har_result["clip_rate"]
@@ -1194,12 +1347,8 @@ def phase_4_training(
 		# conventions on the same floor-retained scored rows; the pooled block is
 		# computed after the fold loop and written into the HAR report.
 		predictions_dict["har_forecast_log"] = har_forecast_log
-		predictions_dict["oos_r2_prevailing_mean"] = oos_r2_prevailing_mean(
-			y_test, predictions_dict["test_pred"]
-		)
-		predictions_dict["oos_r2_vs_har"] = oos_r2_vs_har(
-			y_test, predictions_dict["test_pred"], har_forecast_log
-		)
+		predictions_dict["oos_r2_prevailing_mean"] = oos_r2_prevailing
+		predictions_dict["oos_r2_vs_har"] = oos_r2_vs_har_value
 		predictions_dict["oos_r2_scale"] = OOS_R2_SCALE
 		predictions_dict["oos_r2_row_set"] = HEADLINE_ROW_SET
 		har_benchmark_results[fold_key] = har_result
@@ -1227,7 +1376,15 @@ def phase_4_training(
 		predictions_dict["har_time_seconds"] = har_time_seconds
 		predictions_dict["fold_time_seconds"] = time.time() - fold_started
 
-		record_fold(run, fold_key, "completed", predictions_dict["fold_time_seconds"])
+		if quarantine is not None:
+			quarantined_folds[fold_key] = quarantine
+			record_fold(
+				run, fold_key, "quarantined", predictions_dict["fold_time_seconds"]
+			)
+		else:
+			record_fold(
+				run, fold_key, "completed", predictions_dict["fold_time_seconds"]
+			)
 		fold_predictions_list.append(predictions_dict)
 		fold_model_paths.append(predictions_dict["fold_model_path"])
 
@@ -1238,6 +1395,17 @@ def phase_4_training(
 	for fold_key in fold_training_summary:
 		fold_training_summary[fold_key]["n_features_indicators"] = int(metadata["n_indicators"])
 		fold_training_summary[fold_key]["n_features_ticker"] = int(metadata["n_ticker_features"])
+
+	# The global metric block: every metric aggregated over the folds that
+	# contributed a finite value, each with its n_valid/n_total count. The
+	# aggregation warns when a metric lost folds and raises
+	# AllFoldsInvalidError only when the headline QLIKE has no valid fold. The
+	# block and the quarantine records live in the run record (manifest) —
+	# never in the five-row fold summary.
+	run["quarantined_folds"] = quarantined_folds
+	global_metrics = _global_metrics(fold_training_summary)
+	run["global_metrics"] = global_metrics
+	metrics = global_metrics["metrics"]
 
 	# The pooled dual OOS-R² block over every fold's floor-retained scored rows,
 	# from the persisted per-fold predictions; written into the HAR report.
@@ -1276,62 +1444,55 @@ def phase_4_training(
 	# Final summary with metrics
 	total_time = time.time() - overall_start_time
 
-	# Aggregate metrics across folds
-	fold_r2_scores = [s.get("test_r2", float('nan')) for s in fold_training_summary.values()]
-	fold_mae_scores = [s.get("test_mae", float('nan')) for s in fold_training_summary.values()]
-	fold_rmse_scores = [s.get("test_rmse", float('nan')) for s in fold_training_summary.values()]
+	# Aggregate timing over the folds' rows (the per-fold log lines below).
+	total_train_time = sum(s.get("train_time_seconds", 0) for s in fold_training_summary.values())
+	total_inference_time = sum(s.get("inference_time_seconds", 0) for s in fold_training_summary.values())
+	total_har_time = sum(s.get("har_time_seconds", 0) for s in fold_training_summary.values())
+	total_test_samples = sum(len(p["test_pred"]) for p in fold_predictions_list)
 
-	valid_r2 = [r for r in fold_r2_scores if not np.isnan(r)]
-	valid_mae = [m for m in fold_mae_scores if not np.isnan(m)]
-	valid_rmse = [r for r in fold_rmse_scores if not np.isnan(r)]
+	logger.info(f"Phase 4 complete: {len(fold_training_summary)} fold model(s), {total_test_samples:,} test samples total, {total_time:.1f}s ({total_train_time:.1f}s train + {total_inference_time:.1f}s inference + {total_har_time:.1f}s HAR)")
+	logger.info(
+		f"Cross-validation results (GLOBAL, "
+		f"{metrics['test_r2']['n_valid']}/{metrics['test_r2']['n_total']} folds valid): "
+		f"R²={_format_metric(metrics['test_r2'])}, "
+		f"MAE={_format_metric(metrics['test_mae'], '.6f')}, "
+		f"RMSE={_format_metric(metrics['test_rmse'], '.6f')}"
+	)
+	logger.info(
+		f"QLIKE (GLOBAL, log-target, "
+		f"{metrics['test_qlike']['n_valid']}/{metrics['test_qlike']['n_total']} folds valid): "
+		f"model={_format_metric(metrics['test_qlike'], '.6f')} | "
+		f"HAR benchmark={_format_metric(metrics['har_qlike'], '.6f')} "
+		f"(R²={_format_metric(metrics['har_r2'])})"
+	)
 
-	if valid_r2:
-		mean_r2 = np.mean(valid_r2)
-		std_r2 = np.std(valid_r2)
-		mean_mae = np.mean(valid_mae)
-		std_mae = np.std(valid_mae)
-		mean_rmse = np.mean(valid_rmse)
-		std_rmse = np.std(valid_rmse)
+	# Log per-fold metrics; a quarantined fold is named with its error instead
+	# of formatting its invalid metric values.
+	for fold_key in sorted(fold_training_summary.keys()):
+		if fold_key in quarantined_folds:
+			logger.warning(
+				f"  {fold_key}: QUARANTINED — {quarantined_folds[fold_key]['error']}"
+			)
+			continue
+		fold_r2 = fold_training_summary[fold_key].get("test_r2", float('nan'))
+		fold_mae = fold_training_summary[fold_key].get("test_mae", float('nan'))
+		fold_rmse = fold_training_summary[fold_key].get("test_rmse", float('nan'))
+		fold_qlike = fold_training_summary[fold_key].get("test_qlike", float('nan'))
+		fold_har_qlike = fold_training_summary[fold_key].get("har_qlike", float('nan'))
+		fold_har_r2 = fold_training_summary[fold_key].get("har_r2", float('nan'))
+		train_time = fold_training_summary[fold_key].get("train_time_seconds", 0)
+		inference_time = fold_training_summary[fold_key].get("inference_time_seconds", 0)
+		har_time = fold_training_summary[fold_key].get("har_time_seconds", 0)
+		fold_time = fold_training_summary[fold_key].get("fold_time_seconds", 0)
+		train_date_min = fold_training_summary[fold_key].get("train_date_min", "?")
+		train_date_max = fold_training_summary[fold_key].get("train_date_max", "?")
+		test_date_min = fold_training_summary[fold_key].get("test_date_min", "?")
+		test_date_max = fold_training_summary[fold_key].get("test_date_max", "?")
 
-		# Aggregate timing
-		total_train_time = sum(s.get("train_time_seconds", 0) for s in fold_training_summary.values())
-		total_inference_time = sum(s.get("inference_time_seconds", 0) for s in fold_training_summary.values())
-		total_har_time = sum(s.get("har_time_seconds", 0) for s in fold_training_summary.values())
-		total_test_samples = sum(len(p["test_pred"]) for p in fold_predictions_list)
-
-		mean_qlike = np.mean([s["test_qlike"] for s in fold_training_summary.values()])
-		std_qlike = np.std([s["test_qlike"] for s in fold_training_summary.values()])
-		mean_har_qlike = np.mean([s["har_qlike"] for s in fold_training_summary.values()])
-		std_har_qlike = np.std([s["har_qlike"] for s in fold_training_summary.values()])
-		mean_har_r2 = np.mean([s["har_r2"] for s in fold_training_summary.values()])
-
-		logger.info(f"Phase 4 complete: {len(fold_training_summary)} fold model(s), {total_test_samples:,} test samples total, {total_time:.1f}s ({total_train_time:.1f}s train + {total_inference_time:.1f}s inference + {total_har_time:.1f}s HAR)")
-		logger.info(f"Cross-validation results (GLOBAL): R²={mean_r2:.4f}±{std_r2:.4f}, MAE={mean_mae:.6f}±{std_mae:.6f}, RMSE={mean_rmse:.6f}±{std_rmse:.6f}")
-		logger.info(f"QLIKE (GLOBAL, log-target): model={mean_qlike:.6f}±{std_qlike:.6f} | HAR benchmark={mean_har_qlike:.6f}±{std_har_qlike:.6f} (R²={mean_har_r2:.4f})")
-
-		# Log per-fold metrics
-		for fold_key in sorted(fold_training_summary.keys()):
-			fold_r2 = fold_training_summary[fold_key].get("test_r2", float('nan'))
-			fold_mae = fold_training_summary[fold_key].get("test_mae", float('nan'))
-			fold_rmse = fold_training_summary[fold_key].get("test_rmse", float('nan'))
-			fold_qlike = fold_training_summary[fold_key].get("test_qlike", float('nan'))
-			fold_har_qlike = fold_training_summary[fold_key].get("har_qlike", float('nan'))
-			fold_har_r2 = fold_training_summary[fold_key].get("har_r2", float('nan'))
-			train_time = fold_training_summary[fold_key].get("train_time_seconds", 0)
-			inference_time = fold_training_summary[fold_key].get("inference_time_seconds", 0)
-			har_time = fold_training_summary[fold_key].get("har_time_seconds", 0)
-			fold_time = fold_training_summary[fold_key].get("fold_time_seconds", 0)
-			train_date_min = fold_training_summary[fold_key].get("train_date_min", "?")
-			train_date_max = fold_training_summary[fold_key].get("train_date_max", "?")
-			test_date_min = fold_training_summary[fold_key].get("test_date_min", "?")
-			test_date_max = fold_training_summary[fold_key].get("test_date_max", "?")
-
-			logger.info(f"  {fold_key}: R²={fold_r2:.4f}, MAE={fold_mae:.6f}, RMSE={fold_rmse:.6f}, QLIKE={fold_qlike:.6f}")
-			logger.info(f"    └─ HAR benchmark: R²={fold_har_r2:.4f}, QLIKE={fold_har_qlike:.6f}")
-			logger.info(f"    └─ Train: {train_date_min} to {train_date_max} | Test: {test_date_min} to {test_date_max}")
-			logger.info(f"    └─ Timing: {train_time:.1f}s train + {inference_time:.1f}s inference + {har_time:.1f}s HAR = {fold_time:.1f}s fold total")
-	else:
-		logger.info(f"Phase 4 complete: {len(fold_training_summary)} fold model(s), {total_time:.1f}s (no valid metrics)")
+		logger.info(f"  {fold_key}: R²={fold_r2:.4f}, MAE={fold_mae:.6f}, RMSE={fold_rmse:.6f}, QLIKE={fold_qlike:.6f}")
+		logger.info(f"    └─ HAR benchmark: R²={fold_har_r2:.4f}, QLIKE={fold_har_qlike:.6f}")
+		logger.info(f"    └─ Train: {train_date_min} to {train_date_max} | Test: {test_date_min} to {test_date_max}")
+		logger.info(f"    └─ Timing: {train_time:.1f}s train + {inference_time:.1f}s inference + {har_time:.1f}s HAR = {fold_time:.1f}s fold total")
 
 	if standalone:
 		record_phase(

@@ -49,8 +49,8 @@ Run both phases from the repository root. The dataset entry takes no arguments; 
 
 - Use the `logging` module (`logger = logging.getLogger(__name__)`), not `print`. The handler format is identical in `dataset/utils.py` and `model/utils.py`.
 - Match each file's local indentation. These files are tab-indented: `model/features/feature_engineering.py`, `model/training/model_trainer.py`, `model/training/training.py`. In `feature_engineering.py` only the `INDICATORS` list uses tabs — its function bodies use 4 spaces. Everything else uses 4 spaces.
-- There are no classes; use module-level functions with type hints. `from __future__ import annotations` leads every module; all six `model/` package `__init__.py` files carry it, the two `dataset/` ones do not.
-- Errors fail fast: `raise ValueError` / `FileNotFoundError` with a message. Log-and-re-raise appears in `model/main.py` and in `training/_train_fold_model`; one block swallows instead — `training.py`'s metric computation, which writes NaN metrics.
+- There are no classes; use module-level functions with type hints. `from __future__ import annotations` leads every module; every `model/` package `__init__.py` carries it, the two `dataset/` ones do not.
+- Errors fail fast: `raise ValueError` / `FileNotFoundError` with a message. Log-and-re-raise appears in `model/main.py` and in `training/_train_fold_model`; one boundary quarantines instead — `training.py`'s per-fold metric computation records `{"error": ...}` for a failing fold (outside the five-row summary) and continues, filtering invalid metrics with `n_valid`/`n_total` and raising only when the headline QLIKE has none.
 
 ## Verification workflow
 
