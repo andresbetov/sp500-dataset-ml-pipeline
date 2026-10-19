@@ -14,6 +14,9 @@ The policy under test:
 - results writers serialize strictly through the evaluation sanitizer
   (``NaN``/``inf`` → ``null``, unencodable objects raise) with
   ``allow_nan=False``;
+- the run completion does not recompute or re-log the fold-mean QLIKE: the
+  report layer owns the single aggregate, and a quarantined fold cannot stop
+  the orchestration from completing;
 - ``qlike_loss`` itself stays fail-loud on non-finite input.
 
 Every phase check drives a real ``phase_4_training`` against synthetic
@@ -35,6 +38,7 @@ This file also runs standalone:
 
 from __future__ import annotations
 
+import ast
 import contextlib
 import json
 import logging
@@ -68,6 +72,9 @@ QUARANTINED_FOLD = 2
 QUARANTINED_FOLD_KEY = f"fold_{QUARANTINED_FOLD}"
 QUARANTINED_TEST_SIZE = FOLD_TEST_SIZES[QUARANTINED_FOLD]
 
+# The pipeline entry point whose completion path must not aggregate QLIKE.
+MAIN_PATH = REPO_ROOT / "packages" / "ml" / "model" / "main.py"
+
 # The per-fold metric keys the policy filters and a quarantine invalidates.
 METRIC_KEYS = (
     "test_r2",
@@ -93,6 +100,17 @@ class _WarningRecorder(logging.Handler):
 
     def __init__(self) -> None:
         super().__init__(level=logging.WARNING)
+        self.messages: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.messages.append(record.getMessage())
+
+
+class _InfoRecorder(logging.Handler):
+    """Collect formatted INFO messages without pytest's caplog fixture."""
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.INFO)
         self.messages: list[str] = []
 
     def emit(self, record: logging.LogRecord) -> None:
@@ -249,6 +267,77 @@ def _run_phase(root: Path, **injections) -> tuple:
     return validation, summary, model_paths, summary_json, manifest
 
 
+@contextlib.contextmanager
+def _captured_package_logs():
+    """Capture the package's INFO lines; the standalone runner has no caplog."""
+    logger = logging.getLogger("packages.ml.model")
+    handler = _InfoRecorder()
+    previous_level = logger.level
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+    try:
+        yield handler.messages
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(previous_level)
+
+
+def _main_function() -> ast.FunctionDef:
+    """The parsed ``main`` function of the pipeline entry point."""
+    module = ast.parse(
+        MAIN_PATH.read_text(encoding="utf-8"), filename=str(MAIN_PATH)
+    )
+    return next(
+        node
+        for node in module.body
+        if isinstance(node, ast.FunctionDef) and node.name == "main"
+    )
+
+
+def _references_name(node: ast.AST, name: str) -> bool:
+    """Whether any descendant of ``node`` loads the plain name ``name``."""
+    return any(
+        isinstance(child, ast.Name) and child.id == name for child in ast.walk(node)
+    )
+
+
+def _run_main_with_stubbed_phases(root: Path, summary: dict) -> None:
+    """Drive ``main`` with lightweight phase doubles under ``root``."""
+    from packages.ml.model import main as main_module
+
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(mock.patch.object(main_module, "ARTIFACTS_DIR", root))
+        stack.enter_context(
+            mock.patch.object(
+                main_module,
+                "phase_2_feature_selection",
+                return_value=(np.zeros((2, 2)), np.zeros(2), {}, None),
+            )
+        )
+        stack.enter_context(
+            mock.patch.object(
+                main_module, "phase_3_cross_validation", return_value=[{}] * 5
+            )
+        )
+        stack.enter_context(
+            mock.patch.object(
+                main_module,
+                "phase_4_training",
+                return_value=(
+                    {},
+                    summary,
+                    [f"model_{fold_idx}" for fold_idx in range(5)],
+                ),
+            )
+        )
+        stack.enter_context(
+            mock.patch.object(
+                main_module, "generate_all_visualizations", return_value={}
+            )
+        )
+        main_module.main()
+
+
 def test_fold_metric_failure_is_quarantined_not_fatal() -> None:
     """An injected per-fold metric failure quarantines that fold; the rest run."""
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -396,6 +485,127 @@ def test_five_row_summary_keeps_quarantine_outside() -> None:
     # metrics are null, never a NaN token.
     assert "NaN" not in text and "Infinity" not in text
     assert _parse_strict(text) == summary_json
+
+
+def test_main_has_no_duplicate_fold_qlike_mean() -> None:
+    """The report layer is the only QLIKE aggregator; main must not repeat it."""
+    main_function = _main_function()
+    duplicate_means = []
+    for node in ast.walk(main_function):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Attribute):
+            name = func.attr
+        elif isinstance(func, ast.Name):
+            name = func.id
+        else:
+            continue
+        if name not in {"mean", "nanmean", "average"}:
+            continue
+        if any(
+            _references_name(argument, "fold_training_summary")
+            for argument in node.args
+        ):
+            duplicate_means.append(node.lineno)
+
+    assert not duplicate_means, (
+        "main.py recomputes the fold-mean QLIKE, duplicating the report-layer "
+        f"aggregate at line(s) {duplicate_means}"
+    )
+
+
+def test_main_completion_is_safe_with_a_quarantined_fold() -> None:
+    """A NaN/quarantined fold still reaches the orchestration's completion."""
+    summary = {
+        f"fold_{fold_idx}": {
+            "test_qlike": (
+                float("nan")
+                if fold_idx == QUARANTINED_FOLD
+                else 0.1 + fold_idx
+            ),
+            "har_qlike": (
+                float("nan")
+                if fold_idx == QUARANTINED_FOLD
+                else 0.2 + fold_idx
+            ),
+        }
+        for fold_idx in range(5)
+    }
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir) / "artifacts"
+        _run_main_with_stubbed_phases(root, summary)
+        manifest = _parse_strict(
+            (root / "run_manifest.json").read_text(encoding="utf-8")
+        )
+
+    assert manifest["status"] == "completed"
+    assert [phase["phase"] for phase in manifest["phases"]] == [
+        "phase_2_feature_selection",
+        "phase_3_cross_validation",
+        "phase_4_training",
+        "phase_5_visualization",
+    ]
+
+
+def test_pipeline_reports_the_aggregate_qlike_exactly_once() -> None:
+    """The report-layer aggregate is logged once, never by ``main`` as well."""
+    from packages.ml.model import main as main_module
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = _prepared_root(tmpdir)
+        with _captured_package_logs() as messages:
+            with _phase_environment(
+                root, failing_qlike_sizes=(QUARANTINED_TEST_SIZE,)
+            ):
+                with contextlib.ExitStack() as stack:
+                    stack.enter_context(
+                        mock.patch.object(main_module, "ARTIFACTS_DIR", root)
+                    )
+                    stack.enter_context(
+                        mock.patch.object(
+                            main_module,
+                            "phase_2_feature_selection",
+                            return_value=(
+                                np.zeros((2, 2)),
+                                np.zeros(2),
+                                {},
+                                None,
+                            ),
+                        )
+                    )
+                    stack.enter_context(
+                        mock.patch.object(
+                            main_module,
+                            "phase_3_cross_validation",
+                            return_value=[{}] * 5,
+                        )
+                    )
+                    stack.enter_context(
+                        mock.patch.object(
+                            main_module,
+                            "generate_all_visualizations",
+                            return_value={},
+                        )
+                    )
+                    main_module.main()
+
+        manifest = _parse_strict(
+            (root / "run_manifest.json").read_text(encoding="utf-8")
+        )
+
+    assert manifest["status"] == "completed"
+    assert set(manifest["quarantined_folds"]) == {QUARANTINED_FOLD_KEY}
+
+    aggregate_lines = [
+        message
+        for message in messages
+        if "mean QLIKE" in message or "aggregate QLIKE" in message
+    ]
+    assert len(aggregate_lines) == 1, aggregate_lines
+    assert aggregate_lines[0].startswith("Headline aggregate QLIKE"), (
+        aggregate_lines
+    )
 
 
 def test_results_writers_serialize_strictly() -> None:

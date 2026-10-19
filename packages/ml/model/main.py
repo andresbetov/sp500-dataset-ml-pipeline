@@ -12,8 +12,6 @@ if __name__ == "__main__" and __package__ is None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
     __package__ = "packages.ml.model"
 
-import numpy as np
-
 from packages.ml.model.features.feature_engineering import phase_2_feature_selection
 from packages.ml.model.cross_validation.cross_validator import phase_3_cross_validation
 from packages.ml.model.training.training import phase_4_training
@@ -89,13 +87,6 @@ def main(dry_run: bool = False) -> None:
         logger.info("Phase 4: Model Training")
         validation_predictions, fold_training_summary, fold_model_paths = phase_4_training(run=run)
         logger.info(f"Phase 4 complete: {len(fold_model_paths)} models trained")
-        # Quarantined folds carry NaN metrics; the global means filter them.
-        # The phase's run record holds the n_valid/n_total counts and the
-        # quarantine records, and it raises before returning when no fold is
-        # valid.
-        mean_qlike = np.nanmean([summary["test_qlike"] for summary in fold_training_summary.values()])
-        mean_har_qlike = np.nanmean([summary["har_qlike"] for summary in fold_training_summary.values()])
-        logger.info(f"Evaluation: mean QLIKE {mean_qlike:.6f} (HAR benchmark {mean_har_qlike:.6f})")
         record_phase(
             run,
             "phase_4_training",
