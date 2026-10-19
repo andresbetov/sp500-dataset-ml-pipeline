@@ -5,7 +5,15 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from packages.ml.model.visualization.data_loader import load_fold_training_summary
+import pandas as pd
+
+from packages.ml.model.visualization.data_loader import (
+    extract_metric_stats,
+    extract_qlike_stats,
+    extract_sample_stats,
+    extract_training_time_stats,
+    load_fold_training_summary,
+)
 from packages.ml.model.visualization.metrics_visualizer import generate_metrics_visualizations
 from packages.ml.model.visualization.plotting import (
     collect_plot_statuses,
@@ -16,6 +24,22 @@ from packages.ml.model.visualization.performance_comparison import generate_perf
 from packages.ml.model.visualization.training_diagnostics import generate_training_diagnostics, load_validation_predictions
 
 logger = logging.getLogger(__name__)
+
+
+def extract_summary_stats(summary_df: pd.DataFrame) -> dict:
+    """Build the manifest stats block from the loaded fold summary.
+
+    The QLIKE block is the live consumer of the per-fold extractor; the other
+    three extractors contribute the run-level metric, timing, and sample
+    aggregates. All values are plain Python numbers (non-finite cells become
+    ``null`` when the manifest is written).
+    """
+    return {
+        "qlike": extract_qlike_stats(summary_df),
+        "metrics": extract_metric_stats(summary_df),
+        "training_time": extract_training_time_stats(summary_df),
+        "samples": extract_sample_stats(summary_df),
+    }
 
 
 def generate_all_visualizations(
@@ -35,6 +59,7 @@ def generate_all_visualizations(
         Dict mapping category names to lists of generated figure paths.
     """
     summary_df = load_fold_training_summary(summary_path)
+    stats = extract_summary_stats(summary_df)
     predictions_dict = load_validation_predictions(predictions_path)
 
     if output_dir is None:
@@ -85,7 +110,7 @@ def generate_all_visualizations(
                 )
                 results[category] = []
 
-    manifest_path = write_plot_manifest(output_dir, statuses)
+    manifest_path = write_plot_manifest(output_dir, statuses, stats=stats)
     logger.info("Wrote visualization manifest to %s", manifest_path)
 
     total = sum(len(paths) for paths in results.values())

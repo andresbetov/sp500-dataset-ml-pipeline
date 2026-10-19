@@ -19,6 +19,8 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 
+from packages.ml.model.evaluation.stats import sanitize_json
+
 logger = logging.getLogger(__name__)
 
 MANIFEST_FILENAME = "manifest.json"
@@ -80,14 +82,26 @@ def render_plot(
     return path
 
 
-def write_plot_manifest(output_dir: Path, statuses: list[dict]) -> Path:
-    """Write the per-plot manifest atomically and return its path."""
+def write_plot_manifest(
+    output_dir: Path,
+    statuses: list[dict],
+    stats: dict | None = None,
+) -> Path:
+    """Write the per-plot manifest (and optional run stats) atomically.
+
+    ``stats`` is sanitized with the shared strict-JSON policy before the
+    write, so non-finite values become ``null`` instead of an invalid
+    ``NaN``/``Infinity`` token.
+    """
     manifest_path = output_dir / MANIFEST_FILENAME
     tmp_path = manifest_path.with_name(manifest_path.name + ".tmp")
+    payload: dict[str, object] = {"plots": statuses}
+    if stats is not None:
+        payload["stats"] = sanitize_json(stats)
     try:
         with open(tmp_path, "w", encoding="utf-8") as handle:
             json.dump(
-                {"plots": statuses},
+                payload,
                 handle,
                 indent=2,
                 allow_nan=False,
