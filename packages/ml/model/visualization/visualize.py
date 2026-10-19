@@ -89,7 +89,7 @@ def generate_all_visualizations(
         (
             "diagnostics",
             lambda: generate_training_diagnostics(
-                predictions_dict, summary_df, output_dir
+                predictions_dict, summary_df, output_dir, stats
             ),
         ),
     ]

@@ -247,6 +247,11 @@ def _stub_checkpoint_loads(
     monkeypatch.setattr(
         training_diagnostics, "load_verified", lambda *args, **kwargs: model
     )
+    # Persisted-name checks are covered by test_importance_guards.py; keep this
+    # stub independent of the live fold schema.
+    monkeypatch.setattr(
+        training_diagnostics, "_load_persisted_feature_names", lambda: None
+    )
 
 
 def test_log_axes_declare_log_sigma_and_log_points(

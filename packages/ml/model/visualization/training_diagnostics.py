@@ -5,6 +5,9 @@ from __future__ import annotations
 import json
 import logging
 import math
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 
 import matplotlib.patches as mpatches
@@ -37,6 +40,37 @@ FOLD_NAMES = [f"fold_{i}" for i in range(cross_validator.N_FOLDS)]
 FOLD_COLORS = [
     _FOLD_PALETTE[i % len(_FOLD_PALETTE)] for i in range(len(FOLD_NAMES))
 ]
+
+# The plot records how many checkpoint models it loaded so the orchestrator can
+# carry that count into the visualization manifest. A context-local collector
+# keeps the public plot signature source-only (the output path is its only
+# argument) and avoids module-global state shared between concurrent renders.
+_FEATURE_IMPORTANCE_STATS: ContextVar[dict | None] = ContextVar(
+    "feature_importance_stats", default=None
+)
+
+
+@contextmanager
+def collect_feature_importance_stats() -> Iterator[dict]:
+    """Collect the feature-importance load counts of plots in the context."""
+    stats: dict = {}
+    token = _FEATURE_IMPORTANCE_STATS.set(stats)
+    try:
+        yield stats
+    finally:
+        _FEATURE_IMPORTANCE_STATS.reset(token)
+
+
+def _record_feature_importance_stats(*, n_models_loaded: int) -> None:
+    """Publish the load count to the active collector, when one is open."""
+    stats = _FEATURE_IMPORTANCE_STATS.get()
+    if stats is None:
+        return
+    stats.update(
+        n_models_loaded=n_models_loaded,
+        n_folds=len(FOLD_NAMES),
+        n_features=len(INDICATORS),
+    )
 
 
 def _fold_panel_grid(fold_count: int) -> tuple[int, int]:
@@ -353,12 +387,63 @@ def resolve_fold_checkpoint(
     )
 
 
-def plot_feature_importance(predictions_dict: dict, summary_df: pd.DataFrame, output_path: Path | None = None) -> Path:
+def _load_persisted_feature_names() -> list[str] | None:
+    """The fold schema's persisted feature names, or None when not recorded.
+
+    ``folds_metadata.pkl`` is a verified artifact; when it carries
+    ``feature_names`` the plot compares that order with ``INDICATORS`` before
+    mapping any importance by position. A checkout without the folds artifact
+    (or a schema that predates the names) has nothing to compare.
+    """
+    folds_path = ARTIFACTS_DIR / "folds" / "folds_metadata.pkl"
+    if not folds_path.is_file():
+        return None
+    payload = load_verified(
+        folds_path,
+        registry_path=ARTIFACTS_DIR / REGISTRY_FILENAME,
+    )
+    if not isinstance(payload, dict):
+        raise ValueError(f"fold metadata at {folds_path} is not a mapping")
+    names = payload.get("feature_names")
+    if names is None:
+        return None
+    if not isinstance(names, (list, tuple)):
+        raise ValueError(
+            f"persisted feature_names in {folds_path} is not a sequence: {names!r}"
+        )
+    return [str(name) for name in names]
+
+
+def _assert_feature_name_order(persisted_names: list[str] | None) -> None:
+    """Refuse to map importances onto a different persisted column order."""
+    if persisted_names is None:
+        return
+    expected = list(INDICATORS)
+    if list(persisted_names) != expected:
+        raise ValueError(
+            "persisted feature names do not match INDICATORS order: "
+            f"expected {expected!r}, actual {list(persisted_names)!r}"
+        )
+
+
+def _assert_importance_width(importances: np.ndarray, model_path: Path) -> None:
+    """Require the model's importance vector to match the pinned feature list."""
+    actual_width = len(importances)
+    if importances.ndim != 1 or actual_width != len(INDICATORS):
+        raise ValueError(
+            "feature-importance width mismatch: "
+            f"expected {len(INDICATORS)} features (INDICATORS), actual "
+            f"{actual_width} for {model_path}"
+        )
+
+
+def plot_feature_importance(output_path: Path | None = None) -> Path:
     """Create horizontal bar charts of top 15 feature importances per fold and aggregate.
 
-    Checkpoint locations come from the run's recorded artifact paths
-    (``resolve_fold_checkpoint``): the fold summary first, then the run
-    manifest. A fold whose checkpoint is not named by either record raises
+    The plot is source-only: every checkpoint comes from the run's recorded
+    artifact paths (``resolve_fold_checkpoint``), so it takes no predictions or
+    summary frame. The fold summary is the first record, then the run manifest.
+    A fold whose checkpoint is not named by either record raises
     ``CheckpointResolutionError`` — the plot never guesses a filename. Each
     resolved checkpoint is size- and sha256-verified before loading
     (``load_verified``). A recorded path whose file is absent is the
@@ -366,9 +451,32 @@ def plot_feature_importance(predictions_dict: dict, summary_df: pd.DataFrame, ou
     fold contributes zeros with a warning, preserving the pre-existing behavior
     so the remaining folds still render.
 
+    Guards:
+        Before any positional mapping, the model's importance width must equal
+        ``len(INDICATORS)`` — the pinned 37 features. Both a narrower and a
+        wider model raise ``ValueError`` naming the expected and actual widths;
+        a wider model can no longer surface a bare ``IndexError`` while
+        rendering. When the fold schema persists ``feature_names``, that list
+        must equal ``INDICATORS`` in order or the plot raises ``ValueError``
+        instead of mislabelling columns.
+
+    Visibility:
+        The log and the visualization manifest record ``n_models_loaded``.
+        Missing checkpoints keep the existing arithmetic — each contributes a
+        zero vector, so four of five loaded folds leave the aggregate at
+        ``4/5 = 0.8x`` the loaded-fold mean — and the aggregate panel states
+        the loaded count and the 37-feature contract instead of hiding the
+        dilution.
+
+    Limits:
+        The values are XGBoost's default ``gain`` importances (the sklearn
+        wrapper's default importance type), not causal effects or independent
+        contributions: gain is within-fold, in-sample split improvement, and
+        correlated features split credit (a lag correlated with another can
+        look small even when the pair matters jointly). Treat the ranking as a
+        diagnostic, not as feature-selection evidence.
+
     Args:
-        predictions_dict: Dict of fold predictions from load_validation_predictions()
-        summary_df: DataFrame from load_fold_training_summary()
         output_path: Where to save the figure. If None, uses default outputs_dir.
 
     Returns:
@@ -381,20 +489,43 @@ def plot_feature_importance(predictions_dict: dict, summary_df: pd.DataFrame, ou
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     all_importances = []
+    n_models_loaded = 0
 
-    for i in range(len(FOLD_NAMES)):
-        model_path = resolve_fold_checkpoint(i)
-        if not model_path.exists():
-            logger.warning("Model not found at %s, skipping fold %d", model_path, i)
-            all_importances.append(np.zeros(len(INDICATORS)))
-            continue
+    try:
+        _assert_feature_name_order(_load_persisted_feature_names())
 
-        model = load_verified(
-            model_path,
-            registry_path=ARTIFACTS_DIR / REGISTRY_FILENAME,
+        for i in range(len(FOLD_NAMES)):
+            model_path = resolve_fold_checkpoint(i)
+            if not model_path.exists():
+                logger.warning("Model not found at %s, skipping fold %d", model_path, i)
+                all_importances.append(np.zeros(len(INDICATORS)))
+                continue
+
+            model = load_verified(
+                model_path,
+                registry_path=ARTIFACTS_DIR / REGISTRY_FILENAME,
+            )
+            importances = np.asarray(model.feature_importances_, dtype=float)
+            _assert_importance_width(importances, model_path)
+            all_importances.append(importances)
+            n_models_loaded += 1
+    finally:
+        _record_feature_importance_stats(n_models_loaded=n_models_loaded)
+
+    if n_models_loaded < len(FOLD_NAMES):
+        logger.warning(
+            "Feature importance loaded n_models_loaded=%d of %d checkpoints; "
+            "missing checkpoints contribute zeros (aggregate scaled by %.2f)",
+            n_models_loaded,
+            len(FOLD_NAMES),
+            n_models_loaded / len(FOLD_NAMES),
         )
-        importances = model.feature_importances_
-        all_importances.append(importances)
+    else:
+        logger.info(
+            "Feature importance loaded n_models_loaded=%d of %d checkpoints",
+            n_models_loaded,
+            len(FOLD_NAMES),
+        )
 
     all_importances = np.array(all_importances)
 
@@ -416,7 +547,11 @@ def plot_feature_importance(predictions_dict: dict, summary_df: pd.DataFrame, ou
         ax.set_yticklabels(top_names, fontsize=9)
         ax.invert_yaxis()
         ax.set_xlabel("Importance", fontsize=11, fontweight="bold")
-        ax.set_title(f"Fold {i} — Top 15 Features", fontsize=13, fontweight="bold")
+        ax.set_title(
+            f"Fold {i} — Top 15 of {len(INDICATORS)} Features",
+            fontsize=13,
+            fontweight="bold",
+        )
         ax.grid(axis="x", alpha=0.3)
 
     # Aggregate importance (last subplot)
@@ -434,7 +569,25 @@ def plot_feature_importance(predictions_dict: dict, summary_df: pd.DataFrame, ou
     ax_agg.set_yticklabels(top_names, fontsize=9)
     ax_agg.invert_yaxis()
     ax_agg.set_xlabel("Average Importance", fontsize=11, fontweight="bold")
-    ax_agg.set_title("Aggregate (Across Folds) — Top 15 Features", fontsize=13, fontweight="bold")
+    ax_agg.set_title(
+        f"Aggregate (Across Folds) — Top 15 of {len(INDICATORS)} Features",
+        fontsize=13,
+        fontweight="bold",
+    )
+    # Name the dilution instead of hiding it: a missing checkpoint contributes
+    # zeros, so the aggregate is scaled by n_models_loaded / n_folds (0.8x for
+    # four of five). The count and the 37-feature contract stay in the figure.
+    ax_agg.text(
+        0.99,
+        0.02,
+        f"Loaded {n_models_loaded}/{len(FOLD_NAMES)} checkpoints "
+        f"({n_models_loaded / len(FOLD_NAMES):.1f}× aggregate); "
+        f"{len(INDICATORS)} features",
+        transform=ax_agg.transAxes,
+        ha="right",
+        va="bottom",
+        fontsize=9,
+    )
     ax_agg.grid(axis="x", alpha=0.3)
 
     plt.tight_layout()
@@ -690,6 +843,7 @@ def generate_training_diagnostics(
     predictions_dict: dict | None = None,
     summary_df: pd.DataFrame | None = None,
     output_dir: Path | None = None,
+    stats: dict | None = None,
 ) -> list[Path]:
     """Generate all training diagnostic visualizations.
 
@@ -697,6 +851,9 @@ def generate_training_diagnostics(
         predictions_dict: Dict of fold predictions. If None, loads from default path.
         summary_df: DataFrame from load_fold_training_summary(). If None, loads from default path.
         output_dir: Directory to save figures. If None, uses default outputs_dir.
+        stats: Optional manifest stats block. When provided, the
+            feature-importance load count is recorded under
+            ``feature_importance``.
 
     Returns:
         List of paths to generated figures.
@@ -726,9 +883,7 @@ def generate_training_diagnostics(
         ),
         (
             "feature_importance",
-            lambda output_path: plot_feature_importance(
-                predictions_dict, summary_df, output_path
-            ),
+            lambda output_path: plot_feature_importance(output_path),
         ),
         (
             "error_by_volatility_bin",
@@ -739,10 +894,13 @@ def generate_training_diagnostics(
     ]
 
     paths = []
-    for plot_name, plot_function in plots:
-        path = render_plot("diagnostics", plot_name, plot_function, output_dir)
-        if path is not None:
-            paths.append(path)
+    with collect_feature_importance_stats() as importance_stats:
+        for plot_name, plot_function in plots:
+            path = render_plot("diagnostics", plot_name, plot_function, output_dir)
+            if path is not None:
+                paths.append(path)
+    if stats is not None and importance_stats:
+        stats["feature_importance"] = dict(importance_stats)
 
     logger.info("Generated %d training diagnostic visualizations", len(paths))
     return paths

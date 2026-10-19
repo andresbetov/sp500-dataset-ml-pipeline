@@ -123,6 +123,11 @@ def _stub_checkpoint_loads(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> N
     monkeypatch.setattr(
         training_diagnostics, "load_verified", lambda *args, **kwargs: model
     )
+    # Persisted-name checks are covered by test_importance_guards.py; keep this
+    # stub independent of the live fold schema.
+    monkeypatch.setattr(
+        training_diagnostics, "_load_persisted_feature_names", lambda: None
+    )
 
 
 def _manifest(output_dir: Path) -> list[dict]:

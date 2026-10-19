@@ -303,7 +303,7 @@ def _run_full_pipeline(root: Path, spies: dict | None = None) -> dict:
 
         predictions = training_diagnostics.load_validation_predictions()
         plot_path = root / "feature_importance.png"
-        training_diagnostics.plot_feature_importance(validation, None, plot_path)
+        training_diagnostics.plot_feature_importance(plot_path)
 
     return {
         "artifacts": artifacts,
