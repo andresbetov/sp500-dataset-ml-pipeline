@@ -905,14 +905,16 @@ def _finite_metric(value: object) -> float | None:
 def _global_metrics(fold_training_summary: dict) -> dict:
 	"""Aggregate the fold metrics over their finite values, with counts.
 
-	Each metric is filtered independently: its mean and spread are computed
+	Each metric is filtered independently: its mean and **sample standard
+	deviation** (``ddof=1``, through the shared ``spread`` helper) are computed
 	over the folds that contributed a finite value, and its ``n_valid`` /
-	``n_total`` counts record how many did. A fold with an invalid R² but a
-	valid QLIKE therefore still contributes its QLIKE — the QLIKE summary is
-	decoupled from R² validity. A warning names every metric that lost folds;
-	the run raises ``AllFoldsInvalidError`` only when the headline QLIKE has
-	``n_valid == 0``, since a diagnostic metric may be entirely invalid while
-	the run still has a headline result.
+	``n_total`` counts record how many did. A single finite value has no
+	sample spread and is reported with ``std: null``. A fold with an invalid R²
+	but a valid QLIKE therefore still contributes its QLIKE — the QLIKE
+	summary is decoupled from R² validity. A warning names every metric that
+	lost folds; the run raises ``AllFoldsInvalidError`` only when the headline
+	QLIKE has ``n_valid == 0``, since a diagnostic metric may be entirely
+	invalid while the run still has a headline result.
 	"""
 	n_total = len(fold_training_summary)
 	metrics = {}
@@ -924,7 +926,7 @@ def _global_metrics(fold_training_summary: dict) -> dict:
 		]
 		metrics[key] = {
 			"mean": float(np.mean(finite)) if finite else None,
-			"std": spread(finite, ddof=0) if finite else None,
+			"std": spread(finite) if len(finite) > 1 else None,
 			"n_valid": len(finite),
 			"n_total": n_total,
 		}
@@ -955,9 +957,15 @@ def _global_metrics(fold_training_summary: dict) -> dict:
 
 
 def _format_metric(block: dict, fmt: str = ".4f") -> str:
-	"""One global metric as ``mean±spread``, or ``n/a`` when no fold is valid."""
+	"""One global metric as ``mean±sample std`` (``ddof=1``).
+
+	``n/a`` when no fold is valid; the mean alone when only one finite fold
+	leaves the sample spread undefined.
+	"""
 	if block["mean"] is None:
 		return "n/a"
+	if block["std"] is None:
+		return f"{block['mean']:{fmt}}"
 	return f"{block['mean']:{fmt}}±{block['std']:{fmt}}"
 
 
