@@ -53,6 +53,7 @@ def test_defaults() -> None:
     }
     assert cfg["training"]["seed"] == 42
     assert cfg["training"]["n_jobs"] == -1
+    assert cfg["training"]["validation_tail_fraction"] == 0.15
     assert cfg["tuning"]["select_on"] == "validation_qlike"
     assert cfg["holdout"]["n_dates"] == 500
     assert cfg["paths"]["dataset"] == "data/processed/dataset.parquet"
@@ -75,6 +76,7 @@ def test_propagation() -> None:
     changed["folds"]["n_folds"] = 7
     changed["training"]["seed"] = 7
     changed["training"]["n_jobs"] = 2
+    changed["training"]["validation_tail_fraction"] = 0.2
 
     previous_env = os.environ.get("MODEL_CONFIG_PATH")
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -92,6 +94,7 @@ def test_propagation() -> None:
             assert cross_validator.SEPARATION_MIN == 6
             assert model_trainer.RANDOM_STATE == 7
             assert model_trainer.N_JOBS == 2
+            assert training.VALIDATION_TAIL_FRACTION == 0.2
         finally:
             if previous_env is None:
                 os.environ.pop("MODEL_CONFIG_PATH", None)

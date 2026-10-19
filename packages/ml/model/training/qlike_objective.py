@@ -87,6 +87,12 @@ def qlike_objective(y_true, y_pred) -> tuple[np.ndarray, np.ndarray]:
     return qlike_grad_hess(y_true, y_pred)
 
 
-def qlike_eval_metric(y_true, y_pred) -> tuple[str, float]:
-    """XGBoost custom evaluation metric adapter returning ``("qlike", value)``."""
-    return "qlike", qlike_mean(_log_delta(y_true, y_pred))
+def qlike_eval_metric(y_true, y_pred) -> float:
+    """XGBoost evaluation-metric adapter returning the scalar mean QLIKE.
+
+    XGBoost's sklearn wrapper wraps a callable ``eval_metric`` and takes the
+    history key from the function's ``__name__``; the pre-2.0 ``(name,
+    value)`` tuple return raises inside the training callback, so the metric
+    name lives in this function's name, not in the return value.
+    """
+    return qlike_mean(_log_delta(y_true, y_pred))

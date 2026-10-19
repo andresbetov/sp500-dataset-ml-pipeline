@@ -412,11 +412,13 @@ def test_warmup_mask_covers_first_21_dates_per_ticker() -> None:
 
 
 def test_fold_path_excludes_warmup_rows_and_reconciles_counts() -> None:
-    from packages.ml.model.training import har_benchmark
+    from packages.ml.model.training import har_benchmark, training
 
     evidence = _run_synthetic_fold_path()
     tickers = evidence["tickers"]
     date_indices = evidence["date_indices"]
+    dates = np.datetime64("2020-01-02") + date_indices
+    date_pos = np.unique(dates, return_inverse=True)[1]
     warmup_mask = np.array(
         [
             date_index < (FOLD_PATH_ENTRANT_START + har_benchmark.HAR_WARMUP_DAYS)
@@ -464,7 +466,13 @@ def test_fold_path_excludes_warmup_rows_and_reconciles_counts() -> None:
         assert np.array_equal(call["test_indices"], test_indices)
         assert result["n_warmup_test_rows"] == expected_warmup_test_rows
         assert result["n_test"] == len(test_indices)
-        assert np.array_equal(evidence["train_rows"][fold_idx], train_indices)
+
+        # The fold model fits the inner-fit rows (fold-train minus the purged
+        # inner-validation tail), still a subset of the floor-retained train.
+        expected_inner_fit, _, _ = training.inner_validation_split(
+            fold_idx, train_indices, date_pos, evidence["targets"]
+        )
+        assert np.array_equal(evidence["train_rows"][fold_idx], expected_inner_fit)
 
         # The fold summary carries the count next to the floor counts.
         assert evidence["summary"][fold_key]["n_warmup_excluded"] == expected_excluded

@@ -41,7 +41,9 @@ BLOCK_ROWS = 10
 N_INDICATORS = 3
 N_TICKER_FEATURES = 1
 ALL_FLOORED_TRAIN_SIZE = BLOCK_ROWS
-POLICY_FLOORED_TRAIN_SIZE = 4
+# Fold 0 keeps 10 rows over 10 dates; two floored rows leave 8 retained rows
+# whose fit side survives the 5-date label-horizon purge before the tail.
+POLICY_FLOORED_TRAIN_SIZE = 2
 # One at-or-below-floor test row per fold test block, plus a smallest-positive
 # row in fold 0's test block so the retained side is exercised too.
 TEST_FLOOR_ROWS = (12, 25, 38, 42, 57)
@@ -186,10 +188,13 @@ class _RecordingModel:
 
 
 def _recording_trainer(record: dict):
-    """Trainer double: records fit rows and returns a recording model."""
+    """Trainer double: records fit and validation rows, returns a recording model."""
 
     def trainer(X_train, y_train, X_val=None, y_val=None):
         record["train_rows"].append(np.asarray(X_train)[:, 0].astype(np.int64))
+        record["val_rows"].append(
+            None if X_val is None else np.asarray(X_val)[:, 0].astype(np.int64)
+        )
         return _RecordingModel(record["scored_rows"]), {}
 
     return trainer
@@ -315,7 +320,7 @@ def test_floor_policy_and_headline_are_single_source() -> None:
 
 
 def test_floor_policy_symmetry() -> None:
-    record = {"train_rows": [], "scored_rows": []}
+    record = {"train_rows": [], "val_rows": [], "scored_rows": []}
     har_calls: list = []
     har_results: list = []
     real_fit = training.fit_har_benchmark
@@ -332,6 +337,10 @@ def test_floor_policy_symmetry() -> None:
     assert len(har_calls) == 5
     assert len(har_results) == 5
 
+    # The fixture stores one row per trading date, so date order is row order.
+    dates = np.datetime64("2000-01-03") + np.arange(N_ROWS)
+    date_pos = np.unique(dates, return_inverse=True)[1]
+
     for fold_idx in range(5):
         fold_key = f"fold_{fold_idx}"
         fold_data = folds_metadata[fold_key]
@@ -339,6 +348,9 @@ def test_floor_policy_symmetry() -> None:
         expected_mask = np.asarray(y[original_test]) > training.RV_FLOOR
         retained_test = original_test[expected_mask]
         expected_train = training._model_training_indices(fold_data, y)
+        expected_fit, expected_tail, expected_purge = training.inner_validation_split(
+            fold_idx, expected_train, date_pos, y
+        )
 
         # Both sides of the fold hold excluded rows, so the checks cannot pass
         # vacuously on a fold with nothing to drop.
@@ -346,9 +358,12 @@ def test_floor_policy_symmetry() -> None:
         assert not expected_mask.all()
         assert len(expected_train) < len(fold_data["train_indices"])
 
-        # Model fitting and model scoring receive the same retained train/test
-        # rows as the HAR benchmark; no at-or-below-floor row reaches either.
-        assert np.array_equal(record["train_rows"][fold_idx], expected_train)
+        # The model fits the inner-fit rows and early-stops on the tail; both
+        # are floor-retained and test-disjoint. The HAR benchmark keeps the
+        # full floor-retained fold-train, so no at-or-below-floor row reaches
+        # fitting, scoring, or the benchmark.
+        assert np.array_equal(record["train_rows"][fold_idx], expected_fit)
+        assert np.array_equal(record["val_rows"][fold_idx], expected_tail)
         assert np.array_equal(record["scored_rows"][fold_idx], retained_test)
         assert np.array_equal(har_calls[fold_idx]["train_indices"], expected_train)
         assert np.array_equal(har_calls[fold_idx]["test_indices"], retained_test)
@@ -356,21 +371,27 @@ def test_floor_policy_symmetry() -> None:
             har_calls[fold_idx]["target_log_test"],
             np.log(np.maximum(y[retained_test], training.RV_FLOOR)),
         )
+        assert np.all(y[record["train_rows"][fold_idx]] > training.RV_FLOOR)
+        assert np.all(y[record["val_rows"][fold_idx]] > training.RV_FLOOR)
         assert np.all(y[record["scored_rows"][fold_idx]] > training.RV_FLOOR)
         assert np.all(y[har_calls[fold_idx]["test_indices"]] > training.RV_FLOOR)
-        assert not set(retained_test.tolist()) & set(expected_train.tolist())
+        assert not set(retained_test.tolist()) & set(expected_fit.tolist())
+        assert not set(retained_test.tolist()) & set(expected_tail.tolist())
 
-        # The stored fold record exposes the same retained set.
+        # The stored fold record exposes the same retained set and the inner
+        # split geometry.
         assert np.array_equal(
             validation[fold_key]["test_floor_mask"], expected_mask
         )
         assert np.array_equal(
             validation[fold_key]["test_indices_scored"], retained_test
         )
+        assert validation[fold_key]["n_inner_val_samples"] == len(expected_tail)
+        assert validation[fold_key]["n_inner_purge_rows"] == expected_purge
 
 
 def test_floor_row_masks_emitted() -> None:
-    record = {"train_rows": [], "scored_rows": []}
+    record = {"train_rows": [], "val_rows": [], "scored_rows": []}
     har_calls: list = []
     har_results: list = []
     real_fit = training.fit_har_benchmark
