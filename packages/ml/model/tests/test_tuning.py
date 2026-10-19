@@ -621,10 +621,15 @@ def test_frozen_config_drives_the_default_trainer() -> None:
     loaded = model_config.get_config()
     frozen = loaded["training"]["hyperparameters"]
     defaults = model_trainer.default_params()
+    # The determinism policy pins the effective thread count over the frozen
+    # selection's historical all-cores value; every other knob is the frozen one.
+    pinned = loaded["training"]["n_jobs"]
+    expected = {**frozen, "n_jobs": pinned}
 
     assert model_trainer.DEFAULT_PARAMS == defaults
-    assert set(defaults) == set(frozen) | {"objective", "eval_metric"}
-    assert {key: defaults[key] for key in frozen} == frozen
+    assert set(defaults) == set(expected) | {"objective", "eval_metric"}
+    assert {key: defaults[key] for key in expected} == expected
+    assert defaults["n_jobs"] == pinned == 1
     assert defaults["objective"] is qlike_objective
     assert defaults["eval_metric"] is qlike_eval_metric
 
