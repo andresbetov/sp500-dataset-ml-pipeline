@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 
 import numpy as np
 import xgboost as xgb
@@ -19,6 +20,34 @@ N_JOBS = get_config()["training"]["n_jobs"]
 # the upper bound on the number of boosting rounds.
 EARLY_STOPPING_ROUNDS = 30
 
+# The baseline training recipe: the one place the current hyperparameters live.
+# ``train_xgboost_model`` builds every model from this mapping and overlays the
+# caller's parameter mapping on top, so the default call and an explicit
+# ``params=dict(DEFAULT_PARAMS)`` are the same estimator. Tuning trials vary
+# hyperparameters through that mapping without editing module globals.
+DEFAULT_PARAMS: dict = {
+	"objective": qlike_objective,
+	"random_state": RANDOM_STATE,
+	"verbosity": 0,
+	"n_jobs": N_JOBS,
+	"tree_method": "hist",
+	"eval_metric": qlike_eval_metric,
+	# Tree structure
+	"max_depth": 6,
+	"min_child_weight": 1.0,
+	"gamma": 0.0,
+	# Learning rate & iterations
+	"learning_rate": 0.05,
+	"n_estimators": 500,
+	# Regularization
+	"reg_alpha": 0.1,
+	"reg_lambda": 1.0,
+	# Subsampling
+	"subsample": 0.8,
+	"colsample_bytree": 0.8,
+	"colsample_bylevel": 0.8,
+}
+
 
 def _map_labels_to_classes(y: np.ndarray) -> tuple[np.ndarray, dict]:
 	"""
@@ -33,6 +62,7 @@ def train_xgboost_model(
 	y_train: np.ndarray,
 	X_val: np.ndarray | None = None,
 	y_val: np.ndarray | None = None,
+	params: Mapping | None = None,
 ) -> tuple[xgb.XGBRegressor, dict]:
 	"""
 	Train XGBoost regression model for daily log-sigma volatility prediction.
@@ -45,6 +75,10 @@ def train_xgboost_model(
 		y_train: Training target (n_samples,) in log daily sigma units
 		X_val: Optional validation features for early stopping
 		y_val: Optional validation target for early stopping
+		params: Optional hyperparameter mapping overlaid on DEFAULT_PARAMS,
+			so tuning trials vary hyperparameters (learning rate, depth,
+			min_child_weight, gamma, random_state, ...) without editing
+			module globals. An unknown key fails in the estimator.
 
 	Returns:
 		Trained XGBRegressor model
@@ -57,38 +91,21 @@ def train_xgboost_model(
 	y_train_reg = y_train.astype(np.float64)
 	label_mapping = {}
 
-	# XGBoost regression configuration
-	model = xgb.XGBRegressor(
-		objective=qlike_objective,
-		random_state=RANDOM_STATE,
-		verbosity=0,
-		n_jobs=N_JOBS,
-		tree_method="hist",
-		eval_metric=qlike_eval_metric,
-		# Tree structure
-		max_depth=6,
-		min_child_weight=1.0,
-		gamma=0.0,
-		# Learning rate & iterations
-		learning_rate=0.05,
-		n_estimators=500,
-		# Regularization
-		reg_alpha=0.1,
-		reg_lambda=1.0,
-		# Subsampling
-		subsample=0.8,
-		colsample_bytree=0.8,
-		colsample_bylevel=0.8,
-	)
+	# XGBoost regression configuration: the baseline recipe with the caller's
+	# parameter mapping overlaid. The default call is the baseline recipe.
+	model_params = dict(DEFAULT_PARAMS)
+	if params:
+		model_params.update(params)
+	model = xgb.XGBRegressor(**model_params)
 
 	logger.info("Training with the QLIKE objective and regression hyperparameters:")
 	logger.info("  - objective: custom QLIKE gradient/Hessian, eval_metric: qlike")
-	logger.info("  - max_depth: 6")
-	logger.info("  - min_child_weight: 1.0")
-	logger.info("  - gamma: 0.0")
-	logger.info("  - learning_rate: 0.05, n_estimators: 500")
-	logger.info("  - reg_alpha: 0.1, reg_lambda: 1.0")
-	logger.info("  - subsample: 0.8, colsample: 0.8/0.8")
+	logger.info(f"  - max_depth: {model_params['max_depth']}")
+	logger.info(f"  - min_child_weight: {model_params['min_child_weight']}")
+	logger.info(f"  - gamma: {model_params['gamma']}")
+	logger.info(f"  - learning_rate: {model_params['learning_rate']}, n_estimators: {model_params['n_estimators']}")
+	logger.info(f"  - reg_alpha: {model_params['reg_alpha']}, reg_lambda: {model_params['reg_lambda']}")
+	logger.info(f"  - subsample: {model_params['subsample']}, colsample: {model_params['colsample_bytree']}/{model_params['colsample_bylevel']}")
 
 	if X_val is not None and y_val is not None:
 		y_val_reg = y_val.astype(np.float64)
