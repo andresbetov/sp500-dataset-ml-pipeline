@@ -20,6 +20,13 @@ A matching hash proves integrity, not authenticity: an attacker who can rewrite
 the artifact can also rewrite the registry entry, so this guards against
 corruption and accidental substitution, not against a writer with access to the
 registry.
+
+The module also hosts the one sanctioned xgboost native-format decode,
+``load_native_model``: it reads the source bytes first and refuses empty or
+unrecognized input with a named error before any native call, because
+``Booster.load_model`` on a zero-length buffer aborts the interpreter
+(SIGABRT, uncatchable). The native formats stay prediction-only: the pkl and
+its params sidecar carry the training recipe.
 """
 
 from __future__ import annotations
@@ -32,6 +39,7 @@ from pathlib import Path
 from typing import Any
 
 import joblib
+import xgboost as xgb
 
 from packages.ml.model.run_log import (
     resolve_stored_path,
@@ -48,6 +56,14 @@ REGISTRY_FILENAME = "artifact_registry.json"
 
 class ArtifactIntegrityError(RuntimeError):
     """An artifact failed size/sha256 verification; the load was refused."""
+
+
+class EmptyModelBufferError(ArtifactIntegrityError):
+    """A native model source is empty; the decoder would abort the process."""
+
+
+class UnrecognizedModelFormatError(ArtifactIntegrityError):
+    """A native model source does not start like a JSON or UBJSON model."""
 
 
 def _default_registry_path() -> Path:
@@ -181,3 +197,65 @@ def load_verified(
         elapsed_ms,
     )
     return joblib.load(resolved)
+
+
+# --- guarded native-format loads -------------------------------------------
+
+# Both supported native formats serialize the model as an object: JSON models
+# are text that starts with "{", UBJSON (and ``Booster.save_raw()``) models are
+# binary that starts with the object marker "{". The sniff is a prefix check,
+# not a parse.
+_ASCII_WHITESPACE = b" \t\r\n"
+
+
+def _looks_like_native_model(data: bytes) -> bool:
+    """Whether ``data`` starts like a JSON or UBJSON native model."""
+    return data.lstrip(_ASCII_WHITESPACE)[:1] == b"{"
+
+
+def load_native_model(
+    source: Path | str | bytes | bytearray | memoryview,
+) -> xgb.Booster:
+    """Load an xgboost native model (JSON/UBJSON) from a path or buffer.
+
+    ``source`` is a filesystem path (``str``/``Path``) or the model bytes
+    (``bytes``/``bytearray``/``memoryview``); the bytes are read (or
+    normalized) and checked before any native call: a missing path raises
+    ``FileNotFoundError``, an empty file or buffer raises
+    ``EmptyModelBufferError``, and a source that does not start like a
+    JSON/UBJSON model raises ``UnrecognizedModelFormatError``. Only a
+    non-empty, model-shaped buffer reaches ``Booster.load_model``.
+
+    The guard must run first: ``Booster.load_model`` on a zero-length buffer
+    aborts the interpreter (SIGABRT, uncatchable) instead of raising, so a
+    torn or truncated artifact handed straight to the decoder would kill the
+    process. The returned booster is a prediction artifact only — the native
+    formats do not carry the training recipe (the pkl remains the training
+    artifact and the params sidecar carries ``get_params()``).
+    """
+    if isinstance(source, (bytes, bytearray, memoryview)):
+        data = bytes(source)
+        origin = "in-memory buffer"
+    else:
+        path = Path(source)
+        if not path.is_file():
+            raise FileNotFoundError(f"native model file not found: {path}")
+        data = path.read_bytes()
+        origin = str(path)
+
+    if not data:
+        raise EmptyModelBufferError(
+            f"empty native model buffer ({origin}): the xgboost decoder "
+            f"aborts the process (SIGABRT) on a zero-length buffer, so the "
+            f"load is refused"
+        )
+    if not _looks_like_native_model(data):
+        raise UnrecognizedModelFormatError(
+            f"unrecognized native model format ({origin}): expected a "
+            f"JSON or UBJSON object (leading '{{'), got {data[:8]!r}"
+        )
+
+    booster = xgb.Booster()
+    booster.load_model(bytearray(data))
+    logger.info("Loaded native model from %s (%d bytes)", origin, len(data))
+    return booster

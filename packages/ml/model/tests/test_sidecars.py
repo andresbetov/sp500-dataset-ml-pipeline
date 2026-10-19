@@ -679,14 +679,27 @@ def test_torn_params_rename_keeps_the_previous_sidecar_intact() -> None:
         assert not list(root.rglob("*.tmp")), "a torn rename left *.tmp residue"
 
 
-def test_no_native_model_formats_in_live_code() -> None:
+def test_native_model_calls_are_confined_to_the_guarded_loader() -> None:
+    """Native decode calls live only in the guarded loader module.
+
+    The guarded loader (``artifact_integrity.load_native_model``) reads the
+    source bytes, refuses empty or wrong-format input with a named error, and
+    only then calls the native decoder. Everywhere else native save/load
+    calls stay banned: the native formats drop the training recipe, so the
+    pkl remains the training artifact and the params sidecar carries
+    ``get_params()``.
+    """
+    guarded_loader = MODEL_ROOT / "artifact_integrity.py"
     hits = []
     for path in sorted(MODEL_ROOT.rglob("*.py")):
-        if TESTS_DIR in path.parents:
+        if TESTS_DIR in path.parents or path == guarded_loader:
             continue
         if NATIVE_MODEL_CALL_RE.search(path.read_text(encoding="utf-8")):
             hits.append(str(path.relative_to(REPO_ROOT)))
-    assert not hits, "native xgboost save/load calls in live code: " + ", ".join(hits)
+    assert not hits, (
+        "native xgboost save/load calls outside the guarded loader: "
+        + ", ".join(hits)
+    )
 
 
 if __name__ == "__main__":
