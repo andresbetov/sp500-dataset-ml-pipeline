@@ -5,15 +5,27 @@ folds:
   label_horizon_days: 5
   separation_min: 6
 training:
+  # Determinism policy: bit-reproducibility over speed. The trainer is pinned to
+  # one thread (`n_jobs`) and every run start pins `OMP_NUM_THREADS` to
+  # `omp_num_threads` before fitting; the effective values, the seed, and the
+  # `PYTHONHASHSEED` environment value are recorded in the run manifest.
+  determinism_policy: bit-reproducible
   # The baseline/campaign base seed (the tuning harness's coarse and refinement
   # stages run at it); the frozen selected seed is `hyperparameters.random_state`
   # below.
   seed: 42
+  # The single-threaded trainer setting and the OpenMP thread count it implies.
+  # Both are pinned (not left at -1/all cores) so identical inputs, seed, and
+  # environment produce identical model bytes.
+  n_jobs: 1
+  omp_num_threads: 1
   validation_tail_fraction: 0.15
   # The frozen selected configuration: the full trainer parameter set of the
   # validation-only tuning campaign's winning seed finalist. The trainer derives
   # its defaults from this section at call time; the selection artifact named
-  # under `tuning.selected` remains the source of truth for these values.
+  # under `tuning.selected` remains the source of truth for these values. The
+  # artifact's `n_jobs: -1` (all cores) is the one deliberate override: the
+  # determinism policy above pins the effective count to `training.n_jobs`.
   hyperparameters:
     learning_rate: 0.03
     max_depth: 8

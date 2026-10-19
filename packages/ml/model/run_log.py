@@ -8,7 +8,14 @@ Every model run records one JSON object with its identity and outcome:
       "status": "running" | "completed" | "failed",
       "git_sha": "<40-hex>" | null,                 # best-effort, null outside a repo
       "config_hash": "<8 hex>",
-      "environment": {"python": "...", "<library>": "..." | null, ...},
+      "environment": {
+        "python": "...", "<library>": "..." | null, ...,  # versions
+        "PYTHONHASHSEED": "<value>" | null,              # process environment
+        "threads": {"policy": ..., "n_jobs": ..., "omp_num_threads": ...},
+        "seed": ..., "random_state": ...,
+        "git_sha": "<40-hex>" | null,
+        "lock_hash": "<64-hex>" | null,                  # sha256 of uv.lock
+      },
       "started_at": "<UTC ISO-8601>",
       "finished_at": "<UTC ISO-8601>" | null,
       "duration_seconds": <float> | null,
@@ -164,6 +171,96 @@ def environment_versions() -> dict[str, str | None]:
     return versions
 
 
+def thread_policy(config: Mapping | None = None) -> dict[str, Any]:
+    """The declared bit-reproducibility policy, read from the config.
+
+    The policy keeps one trainer thread (the top-level ``training.n_jobs`` pin;
+    older configs without it fall back to the frozen
+    ``training.hyperparameters.n_jobs``) and one OpenMP thread
+    (``training.omp_num_threads``). The baseline seed and the frozen trainer
+    seed are reported alongside, so a run record states the whole recipe's
+    determinism inputs rather than only its thread count.
+    """
+    loaded = model_config.get_config() if config is None else config
+    training = loaded.get("training") or {}
+    hyperparameters = training.get("hyperparameters") or {}
+    # The top-level pin wins over the frozen selection's historical value; the
+    # hyperparameter fallback keeps legacy configs (no top-level key) working.
+    n_jobs = training.get("n_jobs", hyperparameters.get("n_jobs", 1))
+    return {
+        "policy": str(training.get("determinism_policy", "bit-reproducible")),
+        "seed": int(training.get("seed", 42)),
+        "random_state": int(
+            hyperparameters.get("random_state", training.get("seed", 42))
+        ),
+        "n_jobs": int(n_jobs),
+        "omp_num_threads": int(training.get("omp_num_threads", 1)),
+    }
+
+
+def apply_thread_policy(config: Mapping | None = None) -> dict[str, Any]:
+    """Enforce the declared OMP thread count and return the effective policy.
+
+    ``OMP_NUM_THREADS`` is pinned to the configured value before any fit: the
+    policy chooses bit-reproducibility over speed, so an inherited multi-thread
+    setting is replaced rather than trusted. The returned mapping is the
+    effective policy (the environment value as a string, plus the process's
+    ``PYTHONHASHSEED``) and is what the run record persists.
+    """
+    policy = thread_policy(config)
+    os.environ["OMP_NUM_THREADS"] = str(policy["omp_num_threads"])
+    return {
+        **policy,
+        "omp_num_threads": os.environ["OMP_NUM_THREADS"],
+        "PYTHONHASHSEED": os.environ.get("PYTHONHASHSEED"),
+    }
+
+
+def lock_hash(project_root: Path | str | None = None) -> str | None:
+    """SHA-256 of ``uv.lock``; ``None`` when the lockfile is absent."""
+    root = (
+        Path(project_root)
+        if project_root is not None
+        else get_project_paths()["project_root"]
+    )
+    try:
+        return sha256_file(root / "uv.lock")
+    except FileNotFoundError:
+        return None
+
+
+def environment_manifest(
+    project_root: Path | str | None = None,
+    config: Mapping | None = None,
+) -> dict[str, Any]:
+    """The per-run environment block: versions, hash seed, threads, provenance.
+
+    Captured at run start after the thread policy is applied, so the recorded
+    ``OMP_NUM_THREADS`` is the effective process value. ``git_sha`` and
+    ``lock_hash`` are best-effort: both stay ``None`` outside a repository or
+    without a lockfile, while the rest of the block is always present.
+    """
+    root = (
+        Path(project_root)
+        if project_root is not None
+        else get_project_paths()["project_root"]
+    )
+    policy = apply_thread_policy(config)
+    return {
+        **environment_versions(),
+        "PYTHONHASHSEED": policy["PYTHONHASHSEED"],
+        "threads": {
+            "policy": policy["policy"],
+            "n_jobs": policy["n_jobs"],
+            "omp_num_threads": policy["omp_num_threads"],
+        },
+        "seed": policy["seed"],
+        "random_state": policy["random_state"],
+        "git_sha": git_sha(root),
+        "lock_hash": lock_hash(root),
+    }
+
+
 def sha256_file(path: Path | str) -> str:
     """SHA-256 of a file's bytes, streamed in 1 MiB chunks."""
     digest = hashlib.sha256()
@@ -222,13 +319,14 @@ def new_run(
     paths = get_project_paths()
     loaded = model_config.get_config() if config is None else config
     digest = config_hash(loaded)
+    environment = environment_manifest(paths["project_root"], config=loaded)
     return {
         "run_id": make_run_id(digest),
         "phase": phase,
         "status": "running",
-        "git_sha": git_sha(paths["project_root"]),
+        "git_sha": environment["git_sha"],
         "config_hash": digest,
-        "environment": environment_versions(),
+        "environment": environment,
         "started_at": _utc_now().isoformat(),
         "finished_at": None,
         "duration_seconds": None,

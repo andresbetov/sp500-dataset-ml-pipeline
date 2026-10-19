@@ -1195,6 +1195,10 @@ def phase_4_training(
 		registry_path=ARTIFACTS_DIR / REGISTRY_FILENAME,
 	)
 	folds_metadata = load_folds_metadata()
+	# Pin the manifest identity for this run: two generations from the same
+	# metadata produce the same digest, so a run record names the exact fold
+	# construction it trained under.
+	run["fold_manifest_hash"] = cross_validator.fold_manifest_hash(folds_metadata)
 
 	logger.info(f"Loaded X: {X.shape}, y: {y.shape}")
 	logger.info(f"Features: {metadata['n_indicators']} indicators + {metadata['n_ticker_features']} ticker = {X.shape[1]} total")

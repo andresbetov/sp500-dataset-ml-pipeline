@@ -6,6 +6,7 @@ from collections.abc import Mapping
 import numpy as np
 import xgboost as xgb
 from packages.ml.model.config import get_config
+from packages.ml.model.run_log import apply_thread_policy
 from packages.ml.model.training.qlike_objective import (
 	qlike_eval_metric,
 	qlike_objective,
@@ -42,8 +43,10 @@ def default_params() -> dict:
 	"""The baseline training recipe, derived from the config at call time.
 
 	Reads the frozen selected configuration from ``training.hyperparameters``
-	and adds the QLIKE objective/eval-metric callables this module owns. A
-	config without that section falls back to the pre-freeze defaults
+	and adds the QLIKE objective/eval-metric callables this module owns. The
+	effective thread count is pinned by ``training.n_jobs`` (the determinism
+	policy) over the selected recipe's historical value. A config without the
+	hyperparameters section falls back to the pre-freeze defaults
 	(:data:`_FALLBACK_HYPERPARAMETERS`, with the seed and thread count from the
 	legacy ``training.seed`` / ``training.n_jobs`` keys when present), so an
 	old config trains exactly as before. ``train_xgboost_model`` overlays the
@@ -58,11 +61,17 @@ def default_params() -> dict:
 			"random_state": training.get("seed", 42),
 			"n_jobs": training.get("n_jobs", -1),
 		}
-	return {
+	recipe = {
 		**hyperparameters,
 		"objective": qlike_objective,
 		"eval_metric": qlike_eval_metric,
 	}
+	# The determinism policy pins the effective thread count over the frozen
+	# selection's historical value (the selected campaign ran at -1/all cores);
+	# every other recipe knob still comes from the frozen section.
+	if training.get("n_jobs") is not None:
+		recipe["n_jobs"] = int(training["n_jobs"])
+	return recipe
 
 
 def __getattr__(name: str) -> dict:
@@ -117,6 +126,9 @@ def train_xgboost_model(
 
 	# XGBoost regression configuration: the config-derived default recipe with
 	# the caller's parameter mapping overlaid. The default call is that recipe.
+	# The thread policy is applied first so OMP_NUM_THREADS is pinned before
+	# the estimator's runtime starts a training thread pool.
+	apply_thread_policy()
 	model_params = default_params()
 	if params:
 		model_params.update(params)

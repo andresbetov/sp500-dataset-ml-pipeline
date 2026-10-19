@@ -119,6 +119,7 @@ def test_propagation() -> None:
     changed["rv_floor"] = 1e-9
     changed["folds"]["n_folds"] = 7
     changed["training"]["hyperparameters"]["random_state"] = 7
+    changed["training"]["n_jobs"] = 2
     changed["training"]["hyperparameters"]["n_jobs"] = 2
     changed["training"]["validation_tail_fraction"] = 0.2
 
