@@ -190,8 +190,9 @@ def test_trainer_wiring_and_tiny_fit() -> None:
     assert label_mapping == {}
     assert captured["objective"] is qlike_objective
     assert captured["eval_metric"] is qlike_eval_metric
-    assert captured["random_state"] == model_trainer.RANDOM_STATE
-    assert captured["n_jobs"] == model_trainer.N_JOBS
+    defaults = model_trainer.default_params()
+    assert captured["random_state"] == defaults["random_state"]
+    assert captured["n_jobs"] == defaults["n_jobs"]
 
     predictions = model.predict(X)
     assert predictions.shape == y.shape

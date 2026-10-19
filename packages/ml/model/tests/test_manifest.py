@@ -348,6 +348,41 @@ def test_phase_4_records_folds_and_artifacts_into_the_caller_run() -> None:
         )
 
 
+def test_phase_4_run_names_the_frozen_selection_in_its_manifest() -> None:
+    from packages.ml.model import config as model_config
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = _prepared_root(tmpdir)
+        _exercise_run(root)
+        record = json.loads(
+            (root / "runs.jsonl").read_text(encoding="utf-8").splitlines()[0]
+        )
+
+    loaded = model_config.get_config()
+    selected = loaded["tuning"]["selected"]
+    assert record["selection"] == {
+        "run_id": selected["run_id"],
+        "trial_index": selected["trial_index"],
+        "config_hash": selected["config_hash"],
+        "artifact": (
+            f"{loaded['paths']['artifacts']}/tuning/{selected['run_id']}"
+            "/selection.json"
+        ),
+    }
+    # The context names the campaign; the parameters stay in the selection
+    # artifact (the source of truth) and the frozen config section.
+    assert "params" not in record["selection"]
+
+
+def test_selection_context_is_absent_without_a_frozen_selection() -> None:
+    from packages.ml.model import config as model_config
+    from packages.ml.model import run_log
+
+    without = {"training": {}, "paths": {"artifacts": "packages/ml/model/artifacts"}}
+    with mock.patch.object(model_config, "get_config", return_value=without):
+        assert run_log.selection_context() is None
+
+
 def test_pipeline_run_writes_exactly_one_line_and_manifest() -> None:
     from packages.ml.model import main as main_module
 

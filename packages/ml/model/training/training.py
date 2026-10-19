@@ -55,6 +55,7 @@ from packages.ml.model.run_log import (
 	record_artifacts,
 	record_fold,
 	record_phase,
+	selection_context,
 	to_repo_relative,
 )
 from packages.ml.model.utils import ARTIFACTS_DIR
@@ -850,6 +851,13 @@ def phase_4_training(
 	standalone = run is None
 	if standalone:
 		run = new_run("phase_4_training", ARTIFACTS_DIR)
+	# The frozen tuning selection this run trains under is named in the run
+	# record for provenance; the selection artifact remains the source of truth
+	# for the parameters frozen under training.hyperparameters. A config
+	# without a frozen selection records nothing.
+	selection = selection_context()
+	if selection is not None:
+		run["selection"] = selection
 	run_id = run["run_id"]
 	phase_started = time.monotonic()
 	logger.info("Phase 4: Fold-Specific Model Training (1 Model per Fold)")

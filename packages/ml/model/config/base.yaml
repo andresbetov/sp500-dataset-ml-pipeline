@@ -5,9 +5,30 @@ folds:
   label_horizon_days: 5
   separation_min: 6
 training:
+  # The baseline/campaign base seed (the tuning harness's coarse and refinement
+  # stages run at it); the frozen selected seed is `hyperparameters.random_state`
+  # below.
   seed: 42
-  n_jobs: -1
   validation_tail_fraction: 0.15
+  # The frozen selected configuration: the full trainer parameter set of the
+  # validation-only tuning campaign's winning seed finalist. The trainer derives
+  # its defaults from this section at call time; the selection artifact named
+  # under `tuning.selected` remains the source of truth for these values.
+  hyperparameters:
+    learning_rate: 0.03
+    max_depth: 8
+    min_child_weight: 25
+    gamma: 0.1
+    n_estimators: 500
+    random_state: 43
+    n_jobs: -1
+    reg_alpha: 0.1
+    reg_lambda: 1.0
+    subsample: 0.8
+    colsample_bytree: 0.8
+    colsample_bylevel: 0.8
+    tree_method: hist
+    verbosity: 0
 paths:
   dataset: data/processed/dataset.parquet
   artifacts: packages/ml/model/artifacts
@@ -16,6 +37,14 @@ run:
   log_path: runs.jsonl
 tuning:
   select_on: validation_qlike
+  # Provenance of the frozen selection above: the campaign run and the winning
+  # trial the frozen values came from. The selection artifact at
+  # <paths.artifacts>/tuning/<run_id>/selection.json remains the source of
+  # truth; phase-4 runs name this provenance in their run manifest.
+  selected:
+    run_id: 20261019T100655Z-5e822810
+    trial_index: 30
+    config_hash: 5e822810
   search_space:
     # Coarse grid: 3 x 3 x 3 = 27 combinations, the configured budget cap.
     coarse_grid:
