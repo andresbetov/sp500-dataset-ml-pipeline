@@ -11,8 +11,9 @@ Three pieces, shared by the training and reporting layers:
   token can never reach a results file and a stray object fails the write
   instead of being masked by ``str()``.
 - ``spread`` is the sample standard deviation of a finite value set
-  (``ddof=1`` by default), the shared dispersion helper for evaluation
-  summaries.
+  (``ddof=1`` by default), the one dispersion convention behind every "±"
+  value in the training summary and the visualization loaders. Population
+  standard deviation remains available only through an explicit ``ddof=0``.
 - ``quarantine_record`` is the failed-fold record shape,
   ``{"error": "<type>: <message>"}``; ``AllFoldsInvalidError`` is the named
   error raised when no fold contributes a valid headline metric
