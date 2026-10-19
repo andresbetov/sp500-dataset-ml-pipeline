@@ -78,8 +78,26 @@ def test_defaults() -> None:
         "separation_min": 6,
     }
     assert cfg["training"]["seed"] == 42
-    assert cfg["training"]["n_jobs"] == -1
     assert cfg["training"]["validation_tail_fraction"] == 0.15
+    # The trainer's frozen default recipe (the selected tuning configuration);
+    # its values are pinned against the campaign's selection artifact in the
+    # tuning tests when that live artifact is present.
+    assert set(cfg["training"]["hyperparameters"]) == {
+        "learning_rate",
+        "max_depth",
+        "min_child_weight",
+        "gamma",
+        "n_estimators",
+        "random_state",
+        "n_jobs",
+        "reg_alpha",
+        "reg_lambda",
+        "subsample",
+        "colsample_bytree",
+        "colsample_bylevel",
+        "tree_method",
+        "verbosity",
+    }
     assert cfg["tuning"]["select_on"] == "validation_qlike"
     assert cfg["holdout"]["n_dates"] == 500
     assert cfg["paths"]["dataset"] == "data/processed/dataset.parquet"
@@ -100,8 +118,8 @@ def test_propagation() -> None:
     changed = config.load_config(config.get_config_path())
     changed["rv_floor"] = 1e-9
     changed["folds"]["n_folds"] = 7
-    changed["training"]["seed"] = 7
-    changed["training"]["n_jobs"] = 2
+    changed["training"]["hyperparameters"]["random_state"] = 7
+    changed["training"]["hyperparameters"]["n_jobs"] = 2
     changed["training"]["validation_tail_fraction"] = 0.2
 
     previous_env = os.environ.get("MODEL_CONFIG_PATH")
@@ -118,8 +136,8 @@ def test_propagation() -> None:
             assert cross_validator.PURGE_HORIZON_D == 5
             assert cross_validator.LABEL_HORIZON_DAYS == 5
             assert cross_validator.SEPARATION_MIN == 6
-            assert model_trainer.RANDOM_STATE == 7
-            assert model_trainer.N_JOBS == 2
+            assert model_trainer.default_params()["random_state"] == 7
+            assert model_trainer.default_params()["n_jobs"] == 2
             assert training.VALIDATION_TAIL_FRACTION == 0.2
         finally:
             if previous_env is None:

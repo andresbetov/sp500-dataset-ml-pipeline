@@ -16,7 +16,15 @@ Every model run records one JSON object with its identity and outcome:
       "folds": [{"fold": "fold_0", "status": ..., "duration_seconds": ...}, ...],
       "artifacts": {"<repo-relative path>": "<sha256 hex>", ...},
       "error": "<type>: <message>" | null,
+      "selection": {"run_id": ..., "trial_index": ..., "config_hash": ...,  # absent without one
+                    "artifact": "<repo-relative selection.json>"},
     }
+
+A phase-4 run records the frozen tuning selection under ``selection`` when
+the config names one (``tuning.selected``); the context identifies the
+campaign and the selection artifact (the source of truth for the selected
+parameters, frozen under ``training.hyperparameters``) without carrying the
+parameters themselves.
 
 ``finish_run`` writes the object twice: pretty-printed to
 ``artifacts/run_manifest.json`` (the latest run) and as one strict-JSON line
@@ -84,6 +92,44 @@ def make_run_id(config_digest: str, now: datetime | None = None) -> str:
     """UTC timestamp plus the 8-hex config hash, e.g. ``20260101T000000Z-1a2b3c4d``."""
     stamp = (now if now is not None else _utc_now()).strftime("%Y%m%dT%H%M%SZ")
     return f"{stamp}-{config_digest}"
+
+
+def selection_context() -> dict | None:
+    """The frozen tuning selection named in the config, or ``None`` when absent.
+
+    A phase-4 run records this context in its manifest so the run's recipe is
+    traceable to the selection artifact -- the source of truth for the
+    parameters frozen under ``training.hyperparameters``. The context names
+    the campaign run id, the winning trial index, the campaign's config hash,
+    and the artifact's repo-relative path; it never carries the parameters
+    themselves. A config without ``tuning.selected`` returns ``None``; a
+    present but malformed section fails by name rather than emitting a partial
+    context.
+    """
+    loaded = model_config.get_config()
+    selected = (loaded.get("tuning") or {}).get("selected")
+    if selected is None:
+        return None
+    if not isinstance(selected, Mapping):
+        raise ValueError(
+            f"tuning.selected must be a mapping, got {type(selected).__name__}"
+        )
+    missing = [
+        key for key in ("run_id", "trial_index", "config_hash") if key not in selected
+    ]
+    if missing:
+        raise ValueError(f"tuning.selected is missing keys: {missing}")
+    context = {
+        "run_id": selected["run_id"],
+        "trial_index": selected["trial_index"],
+        "config_hash": selected["config_hash"],
+    }
+    artifacts = (loaded.get("paths") or {}).get("artifacts")
+    if artifacts:
+        context["artifact"] = (
+            f"{artifacts}/tuning/{selected['run_id']}/selection.json"
+        )
+    return context
 
 
 def git_sha(project_root: Path | str | None = None) -> str | None:

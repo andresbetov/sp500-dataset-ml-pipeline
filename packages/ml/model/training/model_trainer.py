@@ -13,40 +13,63 @@ from packages.ml.model.training.qlike_objective import (
 
 logger = logging.getLogger(__name__)
 
-RANDOM_STATE = get_config()["training"]["seed"]
-N_JOBS = get_config()["training"]["n_jobs"]
 # Early stopping on the inner-validation tail: stop after this many rounds
 # without a validation-QLIKE improvement. The configured n_estimators stays
 # the upper bound on the number of boosting rounds.
 EARLY_STOPPING_ROUNDS = 30
 
-# The baseline training recipe: the one place the current hyperparameters live.
-# ``train_xgboost_model`` builds every model from this mapping and overlays the
-# caller's parameter mapping on top, so the default call and an explicit
-# ``params=dict(DEFAULT_PARAMS)`` are the same estimator. Tuning trials vary
-# hyperparameters through that mapping without editing module globals.
-DEFAULT_PARAMS: dict = {
-	"objective": qlike_objective,
-	"random_state": RANDOM_STATE,
-	"verbosity": 0,
-	"n_jobs": N_JOBS,
+# The pre-freeze baseline recipe: the fallback when a config carries no
+# ``training.hyperparameters`` section (a legacy or external config). The seed
+# and thread count keep the pre-freeze wiring (``training.seed`` /
+# ``training.n_jobs``); every other knob is the previous literal.
+_FALLBACK_HYPERPARAMETERS: dict = {
 	"tree_method": "hist",
-	"eval_metric": qlike_eval_metric,
-	# Tree structure
 	"max_depth": 6,
 	"min_child_weight": 1.0,
 	"gamma": 0.0,
-	# Learning rate & iterations
 	"learning_rate": 0.05,
 	"n_estimators": 500,
-	# Regularization
 	"reg_alpha": 0.1,
 	"reg_lambda": 1.0,
-	# Subsampling
 	"subsample": 0.8,
 	"colsample_bytree": 0.8,
 	"colsample_bylevel": 0.8,
+	"verbosity": 0,
 }
+
+
+def default_params() -> dict:
+	"""The baseline training recipe, derived from the config at call time.
+
+	Reads the frozen selected configuration from ``training.hyperparameters``
+	and adds the QLIKE objective/eval-metric callables this module owns. A
+	config without that section falls back to the pre-freeze defaults
+	(:data:`_FALLBACK_HYPERPARAMETERS`, with the seed and thread count from the
+	legacy ``training.seed`` / ``training.n_jobs`` keys when present), so an
+	old config trains exactly as before. ``train_xgboost_model`` overlays the
+	caller's ``params`` mapping on top of this recipe.
+	"""
+	loaded = get_config()
+	training = loaded.get("training") or {}
+	hyperparameters = training.get("hyperparameters")
+	if not hyperparameters:
+		hyperparameters = {
+			**_FALLBACK_HYPERPARAMETERS,
+			"random_state": training.get("seed", 42),
+			"n_jobs": training.get("n_jobs", -1),
+		}
+	return {
+		**hyperparameters,
+		"objective": qlike_objective,
+		"eval_metric": qlike_eval_metric,
+	}
+
+
+def __getattr__(name: str) -> dict:
+	"""Keep ``DEFAULT_PARAMS`` a module attribute that derives at call time."""
+	if name == "DEFAULT_PARAMS":
+		return default_params()
+	raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def _map_labels_to_classes(y: np.ndarray) -> tuple[np.ndarray, dict]:
@@ -75,10 +98,11 @@ def train_xgboost_model(
 		y_train: Training target (n_samples,) in log daily sigma units
 		X_val: Optional validation features for early stopping
 		y_val: Optional validation target for early stopping
-		params: Optional hyperparameter mapping overlaid on DEFAULT_PARAMS,
-			so tuning trials vary hyperparameters (learning rate, depth,
-			min_child_weight, gamma, random_state, ...) without editing
-			module globals. An unknown key fails in the estimator.
+		params: Optional hyperparameter mapping overlaid on the config-derived
+			defaults (:func:`default_params`), so tuning trials vary
+			hyperparameters (learning rate, depth, min_child_weight, gamma,
+			random_state, ...) without editing config or module state. An
+			unknown key fails in the estimator.
 
 	Returns:
 		Trained XGBRegressor model
@@ -91,9 +115,9 @@ def train_xgboost_model(
 	y_train_reg = y_train.astype(np.float64)
 	label_mapping = {}
 
-	# XGBoost regression configuration: the baseline recipe with the caller's
-	# parameter mapping overlaid. The default call is the baseline recipe.
-	model_params = dict(DEFAULT_PARAMS)
+	# XGBoost regression configuration: the config-derived default recipe with
+	# the caller's parameter mapping overlaid. The default call is that recipe.
+	model_params = default_params()
 	if params:
 		model_params.update(params)
 	model = xgb.XGBRegressor(**model_params)

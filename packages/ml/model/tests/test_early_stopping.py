@@ -380,9 +380,14 @@ def test_phase_wires_the_purged_tail_as_the_trainer_validation_set() -> None:
 
 def test_early_stopping_fires_on_rising_validation_qlike() -> None:
     """A tail whose QLIKE rises stops the fit below the 500-round upper bound."""
+    # The fixture must give the frozen recipe room to grow trees: constant
+    # labels carry zero split gain (gamma > 0 blocks them outright), and the
+    # row count must clear the configured min_child_weight Hessian floor. The
+    # noisy train labels overfit a far validation tail, so the recorded QLIKE
+    # rises round over round and early stopping fires below the bound.
     rng = np.random.default_rng(5)
-    X_train = rng.normal(size=(80, 3))
-    y_train = np.full(80, -1.0)
+    X_train = rng.normal(size=(200, 3))
+    y_train = rng.normal(loc=-1.0, scale=1.0, size=200)
     X_val = rng.normal(size=(20, 3))
     y_val = np.full(20, 10.0)
 

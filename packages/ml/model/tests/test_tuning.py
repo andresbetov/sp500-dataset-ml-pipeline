@@ -8,8 +8,10 @@ synthetic campaign (a stub trainer, temporary output roots) exercises the
 coarse/refinement/seed sequence, the per-trial sidecars carrying each trial's
 train/validation index fingerprints through the sidecar + run-manifest
 machinery, and the selection artifact (``selected_on: validation_qlike``, zero
-``test_*`` keys, and a schema that rejects them). The checks never read or
-write live ``artifacts/**`` or ``data/model_outputs/**``.
+``test_*`` keys, and a schema that rejects them). The campaign checks never
+read or write live ``artifacts/**`` or ``data/model_outputs/**``; the one live
+read is the frozen-config pin, which reads the campaign's selection artifact
+read-only and skips when it is absent from the checkout.
 
 Run with pytest from the repository root:
 
@@ -38,6 +40,10 @@ from packages.ml.model import config as model_config
 from packages.ml.model import run_log
 from packages.ml.model.artifact_integrity import REGISTRY_FILENAME
 from packages.ml.model.training import model_trainer, training
+from packages.ml.model.training.qlike_objective import (
+    qlike_eval_metric,
+    qlike_objective,
+)
 from packages.ml.model.tuning import harness
 
 # Tiny campaign space: two coarse combos x two gamma refinements x two seed
@@ -608,23 +614,42 @@ def test_per_trial_sidecars_record_index_fingerprints_and_manifest_hashes() -> N
             )
 
 
-def test_baseline_seed_42_params_reproduce_the_default_trainer() -> None:
-    # The baseline recipe is the pre-harness inline configuration.
-    baseline = model_trainer.DEFAULT_PARAMS
-    assert baseline["random_state"] == 42
-    assert model_config.get_config()["training"]["seed"] == 42
-    assert baseline["max_depth"] == 6
-    assert baseline["min_child_weight"] == 1.0
-    assert baseline["gamma"] == 0.0
-    assert baseline["learning_rate"] == 0.05
-    assert baseline["n_estimators"] == 500
-    assert baseline["reg_alpha"] == 0.1
-    assert baseline["reg_lambda"] == 1.0
-    assert baseline["subsample"] == 0.8
-    assert baseline["colsample_bytree"] == 0.8
-    assert baseline["colsample_bylevel"] == 0.8
+def test_frozen_config_drives_the_default_trainer() -> None:
+    # The trainer's default recipe is the frozen selected configuration: the
+    # config-derived defaults carry every frozen knob, and DEFAULT_PARAMS
+    # derives from them at call time (not at import).
+    loaded = model_config.get_config()
+    frozen = loaded["training"]["hyperparameters"]
+    defaults = model_trainer.default_params()
 
-    # The default call and the explicit baseline mapping train identically.
+    assert model_trainer.DEFAULT_PARAMS == defaults
+    assert set(defaults) == set(frozen) | {"objective", "eval_metric"}
+    assert {key: defaults[key] for key in frozen} == frozen
+    assert defaults["objective"] is qlike_objective
+    assert defaults["eval_metric"] is qlike_eval_metric
+
+    # A config change reaches the defaults at call time, without a reload.
+    changed = deepcopy(loaded)
+    changed["training"]["hyperparameters"] = {**frozen, "max_depth": 3}
+    with mock.patch.object(model_trainer, "get_config", return_value=changed):
+        assert model_trainer.default_params()["max_depth"] == 3
+        assert model_trainer.DEFAULT_PARAMS["max_depth"] == 3
+
+    # A config without the frozen section falls back to the pre-freeze
+    # defaults, with the seed/thread count from the legacy training keys.
+    legacy = {"training": {"seed": 7, "n_jobs": 2}}
+    with mock.patch.object(model_trainer, "get_config", return_value=legacy):
+        fallback = model_trainer.default_params()
+    assert fallback["random_state"] == 7
+    assert fallback["n_jobs"] == 2
+    assert fallback["max_depth"] == 6
+    assert fallback["min_child_weight"] == 1.0
+    assert fallback["gamma"] == 0.0
+    assert fallback["learning_rate"] == 0.05
+    assert fallback["n_estimators"] == 500
+
+    # The default call and an explicit mapping of the frozen recipe train
+    # identically: the params= override path is unchanged.
     rng = np.random.default_rng(7)
     X = rng.normal(size=(24, N_FEATURES))
     y = rng.uniform(-3.0, -1.0, size=24)
@@ -633,16 +658,16 @@ def test_baseline_seed_42_params_reproduce_the_default_trainer() -> None:
     default_model, _ = model_trainer.train_xgboost_model(
         X, y, X_val=X_val, y_val=y_val
     )
-    baseline_model, _ = model_trainer.train_xgboost_model(
-        X, y, X_val=X_val, y_val=y_val, params=dict(baseline)
+    frozen_model, _ = model_trainer.train_xgboost_model(
+        X, y, X_val=X_val, y_val=y_val, params=dict(defaults)
     )
     np.testing.assert_array_equal(
-        default_model.predict(X_val), baseline_model.predict(X_val)
+        default_model.predict(X_val), frozen_model.predict(X_val)
     )
-    assert default_model.get_params()["random_state"] == 42
+    assert default_model.get_params()["random_state"] == frozen["random_state"]
 
     # The same non-regression holds through the locked views the harness
-    # builds, and every campaign trial starts from the baseline recipe.
+    # builds, and every campaign trial starts from the frozen recipe.
     X_folds, y_folds, row_dates, folds_metadata = _tiny_folds()
     views = harness.build_locked_fold_views(
         "fold_0",
@@ -656,7 +681,7 @@ def test_baseline_seed_42_params_reproduce_the_default_trainer() -> None:
         views["fit"]["y"],
         X_val=views["validation"]["X"],
         y_val=views["validation"]["y"],
-        params=dict(baseline),
+        params=dict(defaults),
     )
     default_from_views, _ = model_trainer.train_xgboost_model(
         views["fit"]["X"],
@@ -681,11 +706,49 @@ def test_baseline_seed_42_params_reproduce_the_default_trainer() -> None:
         )
     assert record["params"], "the campaign must pass a parameter mapping"
     for params in record["params"]:
-        assert set(params) == set(baseline)
-        assert params["n_estimators"] == baseline["n_estimators"]
-        assert params["reg_alpha"] == baseline["reg_alpha"]
-        assert params["objective"] is baseline["objective"]
-        assert params["eval_metric"] is baseline["eval_metric"]
+        assert set(params) == set(defaults)
+        assert params["n_estimators"] == defaults["n_estimators"]
+        assert params["reg_alpha"] == defaults["reg_alpha"]
+        assert params["objective"] is defaults["objective"]
+        assert params["eval_metric"] is defaults["eval_metric"]
+
+
+def test_frozen_config_equals_the_selection_artifact() -> None:
+    """Read-only pin: the frozen config is the campaign's selected values.
+
+    The selection artifact is a live, gitignored artifact; a fresh checkout
+    skips this check rather than failing. The artifact is only read.
+    """
+    loaded = model_config.get_config()
+    frozen = loaded["training"]["hyperparameters"]
+    selected_meta = loaded["tuning"]["selected"]
+    artifact_path = (
+        REPO_ROOT
+        / loaded["paths"]["artifacts"]
+        / "tuning"
+        / selected_meta["run_id"]
+        / "selection.json"
+    )
+    if not artifact_path.is_file():
+        pytest.skip(f"selection artifact absent from this checkout: {artifact_path}")
+
+    selection = json.loads(artifact_path.read_text(encoding="utf-8"))
+    selected = selection["selected_trial"]
+
+    # The config's provenance block names the artifact's own identity.
+    assert selection["run_id"] == selected_meta["run_id"]
+    assert selection["config_hash"] == selected_meta["config_hash"]
+    assert selected["trial_index"] == selected_meta["trial_index"]
+    assert selection["selected_on"] == loaded["tuning"]["select_on"]
+
+    # The frozen full parameter set equals the winning trial's parameters,
+    # minus the two module callables the trainer owns (the artifact records
+    # them by qualified name).
+    artifact_params = dict(selected["params"])
+    for callable_key in ("objective", "eval_metric"):
+        assert isinstance(artifact_params.pop(callable_key), str)
+    assert frozen == artifact_params
+    assert frozen["random_state"] == selected["seed"]
 
 
 if __name__ == "__main__":
