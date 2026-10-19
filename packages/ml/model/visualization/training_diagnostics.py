@@ -23,6 +23,13 @@ from packages.ml.model.visualization.plotting import render_plot
 
 logger = logging.getLogger(__name__)
 
+# The stored target is log sigma. Every axis that carries it names the unit;
+# MAE/RMSE on that target are log-point errors, not raw volatility.
+LOG_SIGMA_UNIT = "log σ (per-day)"
+SIGMA_UNIT = "σ (per-day)"
+LOG_POINT_UNIT = "log points"
+EVALUATION_SUMMARY_FILENAME = "evaluation_summary.json"
+
 # Base series palette. The per-fold colors cycle it so the color list always
 # matches the configured fold count, never a hardcoded five.
 _FOLD_PALETTE = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd"]
@@ -438,8 +445,119 @@ def plot_feature_importance(predictions_dict: dict, summary_df: pd.DataFrame, ou
     return output_path
 
 
+def load_evaluation_summary(evaluation_summary_path: Path | None = None) -> dict:
+    """Load the persisted evaluation tables used by the sigma-scale panel.
+
+    The default is ``results/evaluation_summary.json`` beside the stored loss
+    vectors. A missing file or a payload without ``decile_qlike`` raises a
+    named error; the caller decides whether the panel can render without it.
+    """
+    if evaluation_summary_path is None:
+        evaluation_summary_path = (
+            ARTIFACTS_DIR / "results" / EVALUATION_SUMMARY_FILENAME
+        )
+    path = Path(evaluation_summary_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"Evaluation summary not found at {path}")
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Evaluation summary at {path} is not valid JSON") from exc
+    if not isinstance(payload, dict) or not isinstance(
+        payload.get("decile_qlike"), dict
+    ):
+        raise ValueError(
+            f"Evaluation summary at {path} does not carry a decile_qlike table"
+        )
+    return payload
+
+
+def sigma_decile_records(
+    bins: list[dict],
+    value_key: str = "qlike_model",
+) -> list[dict]:
+    """Persisted decile rows on the sigma scale, without re-binning.
+
+    ``sigma_center`` is ``exp(mean_y_true_log)``; empty or non-finite bins are
+    skipped. The persisted ``decile`` and ``n_rows`` fields are carried through
+    unchanged, so the panel keeps the headline floor-retained row set and the
+    global edges recorded in the evaluation summary.
+    """
+    records = []
+    for row in bins:
+        mean_log = row.get("mean_y_true_log")
+        value = row.get(value_key)
+        if mean_log is None or value is None:
+            continue
+        mean_log = float(mean_log)
+        value = float(value)
+        if not math.isfinite(mean_log) or not math.isfinite(value):
+            continue
+        records.append(
+            {
+                "decile": int(row["decile"]),
+                "sigma_center": math.exp(mean_log),
+                "value": value,
+                "n_rows": int(row["n_rows"]),
+            }
+        )
+    return records
+
+
+def _plot_sigma_decile_panel(ax, evaluation_summary: dict) -> None:
+    """Draw pooled QLIKE by sigma decile from the persisted decile table."""
+    deciles = evaluation_summary["decile_qlike"]
+    pooled = deciles.get("pooled") or {}
+    bins = pooled.get("bins") or []
+    model = sigma_decile_records(bins, value_key="qlike_model")
+    har = sigma_decile_records(bins, value_key="qlike_har")
+
+    if model:
+        ax.plot(
+            [record["sigma_center"] for record in model],
+            [record["value"] for record in model],
+            color="steelblue",
+            marker="o",
+            linewidth=2,
+            markersize=5,
+            label="Pooled model QLIKE",
+        )
+    if har:
+        ax.plot(
+            [record["sigma_center"] for record in har],
+            [record["value"] for record in har],
+            color="darkorange",
+            marker="s",
+            linewidth=2,
+            markersize=5,
+            label="Pooled HAR QLIKE",
+        )
+
+    ax.set_xlabel(
+        f"Actual {SIGMA_UNIT}; decile mean, floor-retained rows, no re-binning",
+        fontsize=12,
+        fontweight="bold",
+    )
+    ax.set_ylabel("QLIKE (per-day σ units)", fontsize=12, fontweight="bold")
+    ax.set_title(
+        "QLIKE by σ Decile (persisted evaluation table)",
+        fontsize=14,
+        fontweight="bold",
+    )
+    ax.grid(alpha=0.3)
+    ax.legend(fontsize=10)
+
+
 def plot_error_by_volatility_bin(predictions_dict: dict, output_path: Path | None = None) -> Path:
-    """Plot mean absolute error by actual volatility decile across folds.
+    """Plot mean absolute error by log-sigma decile plus a sigma-scale panel.
+
+    The left panel bins the stored log target with
+    ``pd.qcut(..., duplicates="drop")``; its x centres are mean ``log σ`` and
+    its errors are in log points, so both axes declare those units. The right
+    panel renders the persisted evaluation decile table on the sigma scale:
+    the x centres are ``exp()`` of the table's mean log-sigma centres, the rows
+    are the headline floor-retained bins, and no re-binning happens.
 
     ``pd.qcut(..., duplicates="drop")`` can realize fewer than ten bins when
     the test target is constant or duplicate-heavy. The guard is warn-only:
@@ -462,7 +580,7 @@ def plot_error_by_volatility_bin(predictions_dict: dict, output_path: Path | Non
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    fig, ax = plt.subplots(figsize=(14, 8))
+    fig, (ax, ax_sigma) = plt.subplots(1, 2, figsize=(20, 8))
 
     for i, fold_name in enumerate(FOLD_NAMES):
         fold_data = predictions_dict[fold_name]
@@ -470,7 +588,7 @@ def plot_error_by_volatility_bin(predictions_dict: dict, output_path: Path | Non
         y_pred = fold_data["test_pred"]
         abs_errors = np.abs(y_true - y_pred)
 
-        # Bin actual volatility into deciles. ``duplicates="drop"`` collapses
+        # Bin the stored log sigma into deciles. ``duplicates="drop"`` collapses
         # duplicate quantile edges, so a constant or duplicate-heavy target can
         # realize fewer than ten bins (a constant target realizes none). The
         # guard is warn-only: name the fold and the realized count, then render
@@ -483,7 +601,7 @@ def plot_error_by_volatility_bin(predictions_dict: dict, output_path: Path | Non
         n_bins = int(finite_deciles.max()) + 1 if finite_deciles.size else 0
         if n_bins < 10:
             logger.warning(
-                "Volatility decile collapse for %s: pd.qcut realized %d of 10 "
+                "log σ decile collapse for %s: pd.qcut realized %d of 10 "
                 "bins; rendering the bins that exist",
                 fold_name,
                 n_bins,
@@ -498,9 +616,9 @@ def plot_error_by_volatility_bin(predictions_dict: dict, output_path: Path | Non
             if mask.sum() == 0:
                 continue
             bin_errors = abs_errors[mask]
-            bin_vol = y_true[mask]
+            bin_log_sigma = y_true[mask]
 
-            bin_centers.append(bin_vol.mean())
+            bin_centers.append(bin_log_sigma.mean())
             bin_means.append(bin_errors.mean())
             bin_stds.append(bin_errors.std())
 
@@ -512,15 +630,57 @@ def plot_error_by_volatility_bin(predictions_dict: dict, output_path: Path | Non
                     color=FOLD_COLORS[i], marker="o", capsize=4, linewidth=2,
                     markersize=6, label=f"Fold {i}", alpha=0.8)
 
-    ax.set_xlabel("Actual Volatility (Decile Mean)", fontsize=12, fontweight="bold")
-    ax.set_ylabel("Mean Absolute Error", fontsize=12, fontweight="bold")
-    ax.set_title("Prediction Error by Volatility Decile", fontsize=14, fontweight="bold")
+    ax.set_xlabel(
+        f"Actual {LOG_SIGMA_UNIT}; decile mean",
+        fontsize=12,
+        fontweight="bold",
+    )
+    ax.set_ylabel(
+        f"Mean Absolute Error ({LOG_POINT_UNIT})",
+        fontsize=12,
+        fontweight="bold",
+    )
+    ax.set_title(
+        "Prediction Error by log σ Decile (log scale)",
+        fontsize=14,
+        fontweight="bold",
+    )
     ax.grid(alpha=0.3)
     ax.legend(fontsize=10)
 
+    try:
+        evaluation_summary = load_evaluation_summary()
+    except (FileNotFoundError, ValueError) as exc:
+        logger.info("Sigma decile panel unavailable: %s", exc)
+        ax_sigma.text(
+            0.5,
+            0.5,
+            "Persisted evaluation decile table unavailable",
+            ha="center",
+            va="center",
+            transform=ax_sigma.transAxes,
+            fontsize=11,
+        )
+        ax_sigma.set_xlabel(
+            f"Actual {SIGMA_UNIT}; decile mean",
+            fontsize=12,
+            fontweight="bold",
+        )
+        ax_sigma.set_ylabel(
+            "QLIKE (per-day σ units)", fontsize=12, fontweight="bold"
+        )
+        ax_sigma.set_title(
+            "QLIKE by σ Decile (persisted evaluation table)",
+            fontsize=14,
+            fontweight="bold",
+        )
+        ax_sigma.grid(alpha=0.3)
+    else:
+        _plot_sigma_decile_panel(ax_sigma, evaluation_summary)
+
     plt.tight_layout()
     plt.savefig(output_path, dpi=300, bbox_inches="tight")
-    logger.info("Saved error by volatility bin plot to %s", output_path)
+    logger.info("Saved error by log σ decile plot to %s", output_path)
     plt.close()
 
     return output_path

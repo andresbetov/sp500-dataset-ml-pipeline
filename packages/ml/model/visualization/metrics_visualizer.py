@@ -26,6 +26,9 @@ logger = logging.getLogger(__name__)
 # input falls back to a margin of this many R² units.
 R2_AXIS_MARGIN_FRACTION = 0.05
 
+# The stored target is log sigma, so MAE/RMSE are log-point errors.
+LOG_POINT_UNIT = "log points"
+
 # The heatmap color is the value's position on an absolute per-metric
 # reference, oriented so 1 is better and clipped to [0, 1]. R² is anchored at
 # 0 (no skill) in the middle of [-1, 1]; MAE/RMSE are log-point errors on
@@ -41,7 +44,7 @@ HEATMAP_REFERENCE: dict[str, dict[str, float | bool]] = {
 HEATMAP_NEUTRAL_SCORE = 0.5
 HEATMAP_COLUMN_TOLERANCE = 1e-12
 HEATMAP_SCALE_LABEL = (
-    "Absolute reference score (R²: [-1, 1]; MAE/RMSE: [0, 1]; "
+    "Absolute reference score (R²: [-1, 1]; MAE/RMSE: [0, 1] log points; "
     "0.5 = neutral; green = better)"
 )
 
@@ -185,8 +188,14 @@ def plot_mae_rmse_comparison(summary_df: pd.DataFrame, output_path: Path | None 
                 ha="center", va="bottom", fontsize=9)
 
     ax1.set_xlabel("Fold", fontsize=12, fontweight="bold")
-    ax1.set_ylabel("MAE (Mean Absolute Error)", fontsize=12, fontweight="bold")
-    ax1.set_title("Test MAE by Fold", fontsize=13, fontweight="bold")
+    ax1.set_ylabel(
+        f"MAE (Mean Absolute Error, {LOG_POINT_UNIT})",
+        fontsize=12,
+        fontweight="bold",
+    )
+    ax1.set_title(
+        f"Test MAE by Fold ({LOG_POINT_UNIT})", fontsize=13, fontweight="bold"
+    )
     ax1.grid(axis="y", alpha=0.3)
     ax1.legend()
 
@@ -202,8 +211,14 @@ def plot_mae_rmse_comparison(summary_df: pd.DataFrame, output_path: Path | None 
                 ha="center", va="bottom", fontsize=9)
 
     ax2.set_xlabel("Fold", fontsize=12, fontweight="bold")
-    ax2.set_ylabel("RMSE (Root Mean Squared Error)", fontsize=12, fontweight="bold")
-    ax2.set_title("Test RMSE by Fold", fontsize=13, fontweight="bold")
+    ax2.set_ylabel(
+        f"RMSE (Root Mean Squared Error, {LOG_POINT_UNIT})",
+        fontsize=12,
+        fontweight="bold",
+    )
+    ax2.set_title(
+        f"Test RMSE by Fold ({LOG_POINT_UNIT})", fontsize=13, fontweight="bold"
+    )
     ax2.grid(axis="y", alpha=0.3)
     ax2.legend()
 
