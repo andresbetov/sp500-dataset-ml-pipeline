@@ -14,13 +14,17 @@ The module owns two artifacts, both written by ``phase_4_training``:
   sanitizer and written with ``allow_nan=False``.
 
 The report carries the dual OOS-R² conventions the training phase emitted
-(consumed, not recomputed), the DM/CW/GW tests on the model-vs-HAR loss
-differentials (Newey-West HAC lag = horizon - 1 = 4), Mincer-Zarnowitz
-regressions pooled and per fold with ``n_valid``, decile QLIKE on global
-edges, regime QLIKE on the persisted metadata labels, QLIKE mean/median/IQR/
-top-1% tail tables, the floor with/without decomposition plus its top-1%
-shares, the date-clustered gap (descriptive mean ± SE with ``n_dates`` and
-``n_valid``), expanding-origin loss curves per fold, and the calibration stub.
+(consumed, not recomputed), the **promoted QLIKE headline** (the unweighted
+mean of the fold metrics with per-fold edges, per-fold `n_test`, the
+n_valid/n_total counts, the separate row-weighted pooled values from the
+persisted vectors, and the single-seed caveat), the DM/CW/GW tests on the
+model-vs-HAR loss differentials (Newey-West HAC lag = horizon - 1 = 4),
+Mincer-Zarnowitz regressions pooled and per fold with ``n_valid``, decile
+QLIKE on global edges, regime QLIKE on the persisted metadata labels, QLIKE
+mean/median/IQR/top-1% tail tables, the floor with/without decomposition plus
+its top-1% shares, the date-clustered gap (descriptive mean ± SE with
+``n_dates`` and ``n_valid``), expanding-origin loss curves per fold, and the
+calibration stub.
 
 Inference roles are labelled, not interchangeable: the cluster-by-date
 ``mean ± SE`` is descriptive (equal-weight dates; it understates uncertainty
@@ -90,6 +94,29 @@ N_REGIMES = 7
 
 SCHEMA_VERSION = 1
 SCALE_NOTE = "log target (log daily sigma); QLIKE in per-day sigma units"
+
+# The promoted headline convention: one equal-weight metric per fold. The
+# number of folds is config-sourced, so the note is formatted with the fold
+# count actually reported (five in the pipeline configuration).
+QLIKE_HEADLINE_CONVENTION = "unweighted mean of the {n_folds} fold metrics"
+QLIKE_HEADLINE_WEIGHTING = (
+    "each fold contributes one equal-weight metric regardless of its n_test; "
+    "the aggregate is not row-weighted"
+)
+QLIKE_EDGE_DEFINITION = (
+    "edge = har_qlike - model_qlike per fold and har_qlike - model_qlike "
+    "between the aggregate means; positive means the model has the lower QLIKE"
+)
+QLIKE_POOLED_WEIGHTING = (
+    "row-weighted mean over every floor-retained row of the valid folds, "
+    "computed from the persisted per-row loss vectors; not an average of the "
+    "per-fold ratios"
+)
+QLIKE_SINGLE_SEED_CAVEAT = (
+    "single seed: the fold metrics come from one training run (one seed); "
+    "seed-to-seed uncertainty is not estimated, so the aggregate is a "
+    "run-level result, not a seed-level confidence statement"
+)
 
 # The deferred post-hoc adjustment route was not selected (the QLIKE-consistent
 # objective is the estimand): the report declares the status explicitly instead
@@ -799,6 +826,107 @@ def _inference_roles() -> dict:
     }
 
 
+def build_headline_block(
+    vectors: pd.DataFrame,
+    fold_keys: list[str],
+    valid_folds: list[str],
+    quarantined_folds: dict,
+    headline_row_set: str,
+) -> dict:
+    """The promoted QLIKE headline: equal-weight fold mean plus pooled context.
+
+    ``aggregate`` is the **unweighted mean of the fold metrics**: each fold's
+    model and HAR QLIKE is first averaged over its own floor-retained rows
+    (exactly the fold metric the training summary reports), then the fold
+    values are averaged with equal weight. ``pooled`` is the separate
+    row-weighted mean over every retained vector row of the valid folds, so it
+    answers a different question (the average row's loss) and is never an
+    average of fold ratios. Per-fold edges use ``har_qlike - model_qlike``
+    (positive = model lower loss), and the aggregate edge is the difference of
+    the two aggregate means. Quarantined folds stay listed with null metrics
+    and are excluded from both aggregates.
+    """
+    retained = vectors[~vectors["is_floor"].to_numpy(dtype=bool)]
+    folds = {}
+    model_values = []
+    har_values = []
+    for index, fold_key in enumerate(fold_keys, start=1):
+        fold_retained = retained[retained["fold"] == fold_key]
+        fold_all = vectors[vectors["fold"] == fold_key]
+        quarantined = fold_key in quarantined_folds
+        if quarantined or fold_retained.empty:
+            model_qlike = har_qlike = edge = None
+        else:
+            model_qlike = float(fold_retained["loss_model"].mean())
+            har_qlike = float(fold_retained["loss_har"].mean())
+            edge = har_qlike - model_qlike
+            model_values.append(model_qlike)
+            har_values.append(har_qlike)
+        folds[fold_key] = {
+            "label": f"{fold_key} ({index} of {len(fold_keys)})",
+            "n_test": int(len(fold_retained)),
+            "n_test_total": int(len(fold_all)),
+            "model_qlike": model_qlike,
+            "har_qlike": har_qlike,
+            "edge": edge,
+            "quarantined": bool(quarantined),
+        }
+
+    aggregate_model = float(np.mean(model_values)) if model_values else None
+    aggregate_har = float(np.mean(har_values)) if har_values else None
+    aggregate_edge = (
+        None
+        if aggregate_model is None or aggregate_har is None
+        else aggregate_har - aggregate_model
+    )
+
+    pooled_frame = retained[retained["fold"].isin(valid_folds)]
+    pooled_model = (
+        float(pooled_frame["loss_model"].mean()) if not pooled_frame.empty else None
+    )
+    pooled_har = (
+        float(pooled_frame["loss_har"].mean()) if not pooled_frame.empty else None
+    )
+    pooled_edge = (
+        None
+        if pooled_model is None or pooled_har is None
+        else pooled_har - pooled_model
+    )
+
+    return {
+        "metric": "QLIKE",
+        "convention": QLIKE_HEADLINE_CONVENTION.format(n_folds=len(fold_keys)),
+        "weighting": QLIKE_HEADLINE_WEIGHTING,
+        "edge_definition": QLIKE_EDGE_DEFINITION,
+        "row_set": headline_row_set,
+        "scale": SCALE_NOTE,
+        "n_valid": len(model_values),
+        "n_total": len(fold_keys),
+        "excluded_folds": sorted(quarantined_folds),
+        "aggregate": {
+            "model_qlike": aggregate_model,
+            "har_qlike": aggregate_har,
+            "edge": aggregate_edge,
+        },
+        "pooled": {
+            "model_qlike": pooled_model,
+            "har_qlike": pooled_har,
+            "edge": pooled_edge,
+            "n_rows": int(len(pooled_frame)),
+            "n_valid_folds": len(valid_folds),
+            "n_total_folds": len(fold_keys),
+            "excluded_folds": sorted(quarantined_folds),
+            "weighting": QLIKE_POOLED_WEIGHTING,
+            "source": (
+                "persisted per-row loss vectors "
+                "(results/per_row_losses.parquet)"
+            ),
+        },
+        "folds": folds,
+        "caveat": QLIKE_SINGLE_SEED_CAVEAT,
+    }
+
+
 def build_evaluation_summary(
     vectors: pd.DataFrame,
     *,
@@ -813,10 +941,14 @@ def build_evaluation_summary(
 
     Every statistic is computed from ``vectors`` (and the persisted regime
     labels indexed by ``row_idx``); the dual OOS-R² values are consumed from
-    ``dual_oos_r2`` as the training phase emitted them. Quarantined folds are
-    excluded from every pooled aggregate and from the gap/SE/DM/CW/GW/MZ
-    inputs; their per-fold descriptive blocks remain in the report flagged
-    with ``quarantined: true``.
+    ``dual_oos_r2`` as the training phase emitted them. The ``headline`` block
+    is the promoted QLIKE aggregate: the unweighted mean of the fold metrics
+    (each fold's loss over its own floor-retained rows), with per-fold edges
+    and counts, plus the separate row-weighted pooled values from the same
+    vectors and the single-seed caveat. Quarantined folds are excluded from
+    every pooled aggregate and from the gap/SE/DM/CW/GW/MZ inputs; their
+    per-fold descriptive blocks remain in the report flagged with
+    ``quarantined: true``.
     """
     vectors = _validate_frame(vectors)
     quarantine = dict(quarantined_folds or {})
@@ -1082,6 +1214,13 @@ def build_evaluation_summary(
         "source": "persisted per-row loss vectors (results/per_row_losses.parquet)",
         "row_set": headline_row_set,
         "scale": SCALE_NOTE,
+        "headline": build_headline_block(
+            vectors,
+            fold_keys,
+            valid_folds,
+            quarantine,
+            headline_row_set,
+        ),
         "n_folds": len(fold_keys),
         "n_valid_folds": len(valid_folds),
         "n_total_folds": len(fold_keys),

@@ -969,6 +969,13 @@ def _format_metric(block: dict, fmt: str = ".4f") -> str:
 	return f"{block['mean']:{fmt}}±{block['std']:{fmt}}"
 
 
+def _format_scalar(value: float | None, fmt: str = ".6f", signed: bool = False) -> str:
+	"""One headline scalar, ``n/a`` when no valid fold produced it."""
+	if value is None:
+		return "n/a"
+	return format(value, f"+{fmt}" if signed else fmt)
+
+
 def _save_training_results(
 	validation_predictions: dict,
 	fold_training_summary: dict,
@@ -1597,23 +1604,44 @@ def phase_4_training(
 	total_test_samples = sum(len(p["test_pred"]) for p in fold_predictions_list)
 
 	logger.info(f"Phase 4 complete: {len(fold_training_summary)} fold model(s), {total_test_samples:,} test samples total, {total_time:.1f}s ({total_train_time:.1f}s train + {total_inference_time:.1f}s inference + {total_har_time:.1f}s HAR)")
+
+	# The promoted headline is the persisted aggregate, not a bare GLOBAL mean:
+	# the unweighted mean of the fold metrics with the convention, counts, edge
+	# definition, and single-seed caveat stated in the same lines. The separate
+	# row-weighted pooled value is a diagnostic and is labelled as such.
+	headline = evaluation_summary["headline"]
+	aggregate = headline["aggregate"]
+	pooled = headline["pooled"]
 	logger.info(
-		f"Cross-validation results (GLOBAL, "
-		f"{metrics['test_r2']['n_valid']}/{metrics['test_r2']['n_total']} folds valid): "
-		f"R²={_format_metric(metrics['test_r2'])}, "
-		f"MAE={_format_metric(metrics['test_mae'], '.6f')}, "
-		f"RMSE={_format_metric(metrics['test_rmse'], '.6f')}"
+		f"Headline aggregate QLIKE ({headline['convention']}; "
+		f"{headline['n_valid']}/{headline['n_total']} folds valid; "
+		f"{headline['row_set']}): "
+		f"model={_format_scalar(aggregate['model_qlike'])} | "
+		f"HAR={_format_scalar(aggregate['har_qlike'])} | "
+		f"edge={_format_scalar(aggregate['edge'], signed=True)} "
+		f"({headline['edge_definition']})"
 	)
 	logger.info(
-		f"QLIKE (GLOBAL, log-target, "
-		f"{metrics['test_qlike']['n_valid']}/{metrics['test_qlike']['n_total']} folds valid): "
-		f"model={_format_metric(metrics['test_qlike'], '.6f')} | "
-		f"HAR benchmark={_format_metric(metrics['har_qlike'], '.6f')} "
-		f"(R²={_format_metric(metrics['har_r2'])})"
+		f"  Weighting: {headline['weighting']}. Caveat: {headline['caveat']}"
+	)
+	logger.info(
+		f"  Pooled row-weighted diagnostic (not the headline; "
+		f"{pooled['n_rows']:,} retained rows from persisted vectors): "
+		f"model={_format_scalar(pooled['model_qlike'])} | "
+		f"HAR={_format_scalar(pooled['har_qlike'])} | "
+		f"edge={_format_scalar(pooled['edge'], signed=True)}"
+	)
+	logger.info(
+		f"Fold-spread diagnostics (unweighted fold mean ± sample std; not the headline): "
+		f"R²={_format_metric(metrics['test_r2'])}, "
+		f"MAE={_format_metric(metrics['test_mae'], '.6f')}, "
+		f"RMSE={_format_metric(metrics['test_rmse'], '.6f')}, "
+		f"HAR R²={_format_metric(metrics['har_r2'])}"
 	)
 
 	# Log per-fold metrics; a quarantined fold is named with its error instead
-	# of formatting its invalid metric values.
+	# of formatting its invalid metric values. Every fold is labelled as one of
+	# the five equal-weight members, so fold_0 is never read as the headline.
 	for fold_key in sorted(fold_training_summary.keys()):
 		if fold_key in quarantined_folds:
 			logger.warning(
@@ -1635,8 +1663,15 @@ def phase_4_training(
 		test_date_min = fold_training_summary[fold_key].get("test_date_min", "?")
 		test_date_max = fold_training_summary[fold_key].get("test_date_max", "?")
 
-		logger.info(f"  {fold_key}: R²={fold_r2:.4f}, MAE={fold_mae:.6f}, RMSE={fold_rmse:.6f}, QLIKE={fold_qlike:.6f}")
-		logger.info(f"    └─ HAR benchmark: R²={fold_har_r2:.4f}, QLIKE={fold_har_qlike:.6f}")
+		fold_label = headline["folds"][fold_key]["label"]
+		fold_edge = headline["folds"][fold_key]["edge"]
+		logger.info(
+			f"  {fold_label}: model QLIKE={_format_scalar(fold_qlike)} | "
+			f"HAR QLIKE={_format_scalar(fold_har_qlike)} | "
+			f"edge={_format_scalar(fold_edge, signed=True)}"
+		)
+		logger.info(f"    └─ R²={fold_r2:.4f}, MAE={fold_mae:.6f}, RMSE={fold_rmse:.6f}")
+		logger.info(f"    └─ HAR benchmark: R²={fold_har_r2:.4f}")
 		logger.info(f"    └─ Train: {train_date_min} to {train_date_max} | Test: {test_date_min} to {test_date_max}")
 		logger.info(f"    └─ Timing: {train_time:.1f}s train + {inference_time:.1f}s inference + {har_time:.1f}s HAR = {fold_time:.1f}s fold total")
 
