@@ -7,6 +7,7 @@ from pathlib import Path
 import joblib
 import numpy as np
 import pandas as pd
+from packages.ml.model.artifact_integrity import REGISTRY_FILENAME, record_artifact
 from packages.ml.model.config import get_config
 from packages.ml.model.utils import ARTIFACTS_DIR, get_project_paths, normalize_dates
 
@@ -288,6 +289,9 @@ def phase_2_feature_selection() -> tuple[np.ndarray, np.ndarray, dict, None]:
     np.save(X_path, X)
     np.save(y_path, Y)
     joblib.dump(metadata, metadata_path)
+    # Record the hash at write time so Phases 3 and 4 can verify this artifact
+    # before loading it (the run manifest is finalized only at the end).
+    record_artifact(metadata_path, registry_path=ARTIFACTS_DIR / REGISTRY_FILENAME)
     logger.info(f"Saved X to {X_path}")
     logger.info(f"Saved Y to {y_path}")
     logger.info(f"Saved metadata to {metadata_path}")

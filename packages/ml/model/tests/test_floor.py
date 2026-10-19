@@ -32,6 +32,7 @@ import numpy as np
 import pytest
 
 from conftest import ARTIFACTS_DIR, DATASET_PATH, requires_live_artifacts
+from packages.ml.model.artifact_integrity import REGISTRY_FILENAME, record_artifact
 from packages.ml.model.cross_validation import cv_utils
 from packages.ml.model.training import training
 
@@ -117,6 +118,12 @@ def _write_synthetic_artifacts(
     np.save(inputs / "Y.npy", y)
     joblib.dump(metadata, inputs / "metadata.pkl")
     joblib.dump(folds_metadata, folds / "folds_metadata.pkl")
+    # The live readers verify recorded hashes before loading; the synthetic
+    # inputs must carry their registry entries like the real writers'.
+    record_artifact(inputs / "metadata.pkl", registry_path=root / REGISTRY_FILENAME)
+    record_artifact(
+        folds / "folds_metadata.pkl", registry_path=root / REGISTRY_FILENAME
+    )
 
 
 def _run_fold_loop(

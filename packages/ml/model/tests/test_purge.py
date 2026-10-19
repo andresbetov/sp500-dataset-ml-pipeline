@@ -36,6 +36,7 @@ import pytest
 
 from conftest import ARTIFACTS_DIR, REPO_ROOT, requires_live_artifacts
 from packages.ml.model import config as model_config
+from packages.ml.model.artifact_integrity import REGISTRY_FILENAME, record_artifact
 from packages.ml.model.cross_validation import cross_validator
 from packages.ml.model.training import training
 
@@ -138,6 +139,7 @@ def _write_phase_2_inputs(root: Path, n_dates: int) -> None:
         },
         inputs / "metadata.pkl",
     )
+    record_artifact(inputs / "metadata.pkl", registry_path=root / REGISTRY_FILENAME)
 
 
 def test_every_fold_keeps_the_test_block_whole_with_five_excluded_dates() -> None:
@@ -250,6 +252,9 @@ def test_fold_structure_and_persisted_payload_without_the_test_purge_key() -> No
         np.save(inputs / "X.npy", np.zeros((n_rows, 1)))
         np.save(inputs / "Y.npy", np.full(n_rows, 0.25))
         joblib.dump(metadata, inputs / "metadata.pkl")
+        record_artifact(
+            inputs / "metadata.pkl", registry_path=root / REGISTRY_FILENAME
+        )
 
         with mock.patch.object(cross_validator, "ARTIFACTS_DIR", root):
             folds = cross_validator.phase_3_cross_validation()

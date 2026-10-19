@@ -13,12 +13,15 @@ from __future__ import annotations
 
 import importlib
 import re
+import tempfile
 import traceback
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
 from conftest import ARTIFACTS_DIR, REPO_ROOT, requires_live_artifacts
+from packages.ml.model.artifact_integrity import REGISTRY_FILENAME, record_artifact
 
 MODEL_ROOT = REPO_ROOT / "packages" / "ml" / "model"
 TESTS_DIR = MODEL_ROOT / "tests"
@@ -76,9 +79,26 @@ def test_live_import_surface() -> None:
 def test_live_fold_metadata(artifacts_dir: Path) -> None:
     requires_live_artifacts(artifacts_dir)
 
+    from packages.ml.model.cross_validation import cv_utils
     from packages.ml.model.cross_validation.cv_utils import load_folds_metadata
 
-    folds_metadata = load_folds_metadata()
+    # The loader now verifies a recorded size+sha256 before loading. The live
+    # tree has no registry yet, so record the live artifact's hash into a
+    # temporary registry and point the loader's artifact root at a symlinked
+    # copy: the live artifact is only read, never rewritten.
+    with tempfile.TemporaryDirectory() as tmpdir:
+        temp_root = Path(tmpdir)
+        (temp_root / "folds").mkdir()
+        (temp_root / "folds" / "folds_metadata.pkl").symlink_to(
+            (artifacts_dir / "folds" / "folds_metadata.pkl").resolve()
+        )
+        record_artifact(
+            temp_root / "folds" / "folds_metadata.pkl",
+            registry_path=temp_root / REGISTRY_FILENAME,
+        )
+        with mock.patch.object(cv_utils, "ARTIFACTS_DIR", temp_root):
+            folds_metadata = load_folds_metadata()
+
     # Only fold_* keys are folds; versioned schema metadata keys may coexist.
     fold_keys = {key for key in folds_metadata if key.startswith("fold_")}
     assert fold_keys == {f"fold_{fold_id}" for fold_id in range(5)}

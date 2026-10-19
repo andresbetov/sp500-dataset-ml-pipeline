@@ -37,6 +37,7 @@ import pandas as pd
 import pytest
 
 from conftest import DATASET_PATH
+from packages.ml.model.artifact_integrity import REGISTRY_FILENAME, record_artifact
 
 FOLD_PATH_N_DATES = 60
 FOLD_PATH_TEST_DATES = 6
@@ -207,6 +208,14 @@ def _run_synthetic_fold_path() -> dict:
         np.save(inputs / "Y.npy", targets)
         joblib.dump(metadata, inputs / "metadata.pkl")
         joblib.dump(folds_metadata, folds / "folds_metadata.pkl")
+        # The live readers verify recorded hashes before loading; the synthetic
+        # inputs must carry their registry entries like the real writers'.
+        record_artifact(
+            inputs / "metadata.pkl", registry_path=root / REGISTRY_FILENAME
+        )
+        record_artifact(
+            folds / "folds_metadata.pkl", registry_path=root / REGISTRY_FILENAME
+        )
         dataset = _write_dataset(root, tickers, dates, log_returns)
 
         with contextlib.ExitStack() as stack:

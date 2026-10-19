@@ -42,6 +42,8 @@ import numpy as np
 import pytest
 
 from conftest import REPO_ROOT
+from packages.ml.model import artifact_integrity
+from packages.ml.model.artifact_integrity import REGISTRY_FILENAME, record_artifact
 from packages.ml.model.cross_validation import cv_utils
 from packages.ml.model.features.feature_engineering import INDICATORS
 from packages.ml.model.training import training
@@ -167,6 +169,12 @@ def _write_synthetic_artifacts(root: Path) -> None:
     np.save(inputs / "Y.npy", y)
     joblib.dump(metadata, inputs / "metadata.pkl")
     joblib.dump(folds_metadata, folds / "folds_metadata.pkl")
+    # The live readers verify recorded hashes before loading; the synthetic
+    # inputs must carry their registry entries like the real writers'.
+    record_artifact(inputs / "metadata.pkl", registry_path=root / REGISTRY_FILENAME)
+    record_artifact(
+        folds / "folds_metadata.pkl", registry_path=root / REGISTRY_FILENAME
+    )
 
 
 def _exercise_run(root: Path) -> tuple:
@@ -351,7 +359,7 @@ def test_plot_loads_the_run_scoped_checkpoints_the_manifest_names() -> None:
                 mock.patch.object(training_diagnostics, "ARTIFACTS_DIR", root)
             )
             stack.enter_context(
-                mock.patch.object(training_diagnostics.joblib, "load", spy)
+                mock.patch.object(artifact_integrity.joblib, "load", spy)
             )
             training_diagnostics.plot_feature_importance(validation, None, output)
 

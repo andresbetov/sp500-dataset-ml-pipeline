@@ -34,6 +34,7 @@ import pandas as pd
 import pytest
 
 from conftest import ARTIFACTS_DIR, DATASET_PATH, requires_live_artifacts
+from packages.ml.model.artifact_integrity import REGISTRY_FILENAME, record_artifact
 from packages.ml.model.cross_validation import cross_validator
 from packages.ml.model.features import feature_engineering
 from packages.ml.model.training import training
@@ -118,6 +119,9 @@ def _write_synthetic_inputs(root: Path) -> tuple[np.ndarray, np.ndarray, dict]:
     np.save(inputs / "X.npy", X)
     np.save(inputs / "Y.npy", Y)
     joblib.dump(metadata, inputs / "metadata.pkl")
+    # The live Phase 3 reader verifies recorded hashes before loading; a
+    # synthetic input set must carry its registry entry like the real writer's.
+    record_artifact(inputs / "metadata.pkl", registry_path=root / REGISTRY_FILENAME)
     return X, Y, metadata
 
 
@@ -316,6 +320,9 @@ def test_live_extraction_and_fold_contract_match_stored_artifacts() -> None:
                 (ARTIFACTS_DIR / "inputs" / f"{name}.npy").resolve()
             )
         joblib.dump(live_metadata, inputs / "metadata.pkl")
+        record_artifact(
+            inputs / "metadata.pkl", registry_path=root / REGISTRY_FILENAME
+        )
 
         with mock.patch.object(cross_validator, "ARTIFACTS_DIR", root):
             folds = cross_validator.phase_3_cross_validation()

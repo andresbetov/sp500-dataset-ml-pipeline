@@ -76,7 +76,7 @@ Phase 1 feature code lives in `packages/ml/dataset/features/` (one family per mo
 | `packages/ml/model/artifacts/folds/` | 3 | Fold indices and date ranges for temporal validation |
 | `packages/ml/model/artifacts/checkpoints/` | 4 | One trained model per fold plus its `fold_<i>_params.json` hyperparameter sidecar, under a run-scoped `<run_id>/` directory; each file is written atomically (tmp + rename) |
 | `packages/ml/model/artifacts/results/` | 1, 4 | `fold_training_summary.json` (per-fold metrics), `har_benchmark.json` (HAR-RV benchmark per fold), `regime_characterization.json`, predictions |
-| `packages/ml/model/artifacts/` | 2-5 | `runs.jsonl` (append-only run log: one strict-JSON line per run), `run_manifest.json` (latest run: identity, config hash, environment versions, phase/fold status, durations, artifact hashes) |
+| `packages/ml/model/artifacts/` | 2-5 | `runs.jsonl` (append-only run log: one strict-JSON line per run), `run_manifest.json` (latest run: identity, config hash, environment versions, phase/fold status, durations, artifact hashes), `artifact_registry.json` (byte size + sha256 per recorded artifact, updated atomically at write time; every live `joblib.load` verifies against it before loading) |
 | `data/model_outputs/` | 5 | 14 PNG evaluation charts |
 
 Everything in the table is generated output and gitignored.

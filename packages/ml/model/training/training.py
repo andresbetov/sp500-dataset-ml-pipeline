@@ -24,6 +24,11 @@ from pathlib import Path
 import joblib
 import numpy as np
 import pandas as pd
+from packages.ml.model.artifact_integrity import (
+	REGISTRY_FILENAME,
+	load_verified,
+	record_artifact,
+)
 from packages.ml.model.config import get_config
 from packages.ml.model.cross_validation.cv_utils import load_folds_metadata
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
@@ -405,6 +410,10 @@ def _train_fold_model(
 	write_checkpoint_atomically(model, model_path)
 	if not model_path.exists():
 		raise RuntimeError(f"Failed to save fold {fold_idx} model to {model_path}")
+	# Record the checkpoint hash at write time: the run manifest is finalized
+	# only at the end of the run, so the registry is what same-run readers
+	# verify against.
+	record_artifact(model_path, registry_path=ARTIFACTS_DIR / REGISTRY_FILENAME)
 	logger.info(f"  Saved fold {fold_idx} model to {model_path}")
 
 	# Save the full parameter set beside the checkpoint: the pkl is the training
@@ -412,6 +421,7 @@ def _train_fold_model(
 	# do not round-trip get_params().
 	params_path = fold_params_path(fold_idx, run_id)
 	write_fold_params_atomically(model, params_path)
+	record_artifact(params_path, registry_path=ARTIFACTS_DIR / REGISTRY_FILENAME)
 	logger.info(f"  Saved fold {fold_idx} parameters to {params_path}")
 
 	predictions_dict = {
@@ -502,6 +512,7 @@ def _save_training_results(
 	har_report_path = ARTIFACTS_DIR / "results" / "har_benchmark.json"
 
 	joblib.dump(validation_predictions, val_pred_path)
+	record_artifact(val_pred_path, registry_path=ARTIFACTS_DIR / REGISTRY_FILENAME)
 
 	# Convert fold_training_summary to JSON-serializable format. Persisted paths
 	# stay repo-relative: to_repo_relative passes already-relative strings through
@@ -519,6 +530,7 @@ def _save_training_results(
 
 	with open(summary_path, "w") as f:
 		json.dump(summary_json, f, indent=2, default=str)
+	record_artifact(summary_path, registry_path=ARTIFACTS_DIR / REGISTRY_FILENAME)
 
 	# HAR benchmark report: per-fold coefficients and metrics next to the fold model's,
 	# so the mandatory benchmark is auditable without reloading the predictions. The
@@ -593,6 +605,7 @@ def _save_training_results(
 	}
 	with open(har_report_path, "w") as f:
 		json.dump(har_report, f, indent=2, default=str)
+	record_artifact(har_report_path, registry_path=ARTIFACTS_DIR / REGISTRY_FILENAME)
 
 	logger.info(f"Training outputs saved (HAR benchmark report: {har_report_path})")
 
@@ -637,7 +650,10 @@ def phase_4_training(
 	logger.info("Loading Phase 2-3 outputs...")
 	X = np.load(ARTIFACTS_DIR / "inputs" / "X.npy", mmap_mode="r")
 	y = np.load(ARTIFACTS_DIR / "inputs" / "Y.npy", mmap_mode="r")
-	metadata = joblib.load(ARTIFACTS_DIR / "inputs" / "metadata.pkl")
+	metadata = load_verified(
+		ARTIFACTS_DIR / "inputs" / "metadata.pkl",
+		registry_path=ARTIFACTS_DIR / REGISTRY_FILENAME,
+	)
 	folds_metadata = load_folds_metadata()
 
 	logger.info(f"Loaded X: {X.shape}, y: {y.shape}")
