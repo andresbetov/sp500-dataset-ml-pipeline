@@ -19,6 +19,7 @@ import logging
 import math
 import os
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import joblib
@@ -396,6 +397,42 @@ def _fold_params_payload(model: object) -> dict:
 	}
 
 
+def _write_atomically(path: Path, write_payload: Callable[[Path], None]) -> None:
+	"""Write ``path`` via a sibling ``*.tmp`` + ``os.replace``.
+
+	The parent directory is created before the temporary file is opened, so a
+	dir-less target cannot fail with ``FileNotFoundError``. The final path
+	appears only through the atomic rename: a failure anywhere — including in
+	the rename itself — removes the temporary file, so no ``*.tmp`` residue is
+	left behind and a previous file at the target path stays intact.
+	"""
+	path.parent.mkdir(parents=True, exist_ok=True)
+	tmp_path = path.with_name(path.name + ".tmp")
+	try:
+		write_payload(tmp_path)
+		os.replace(tmp_path, path)
+	finally:
+		if tmp_path.exists():
+			tmp_path.unlink()
+
+
+def _write_json_atomically(
+	path: Path,
+	payload: dict,
+	*,
+	trailing_newline: bool = False,
+	**dump_kwargs,
+) -> None:
+	"""Write one strict-JSON document through the shared atomic writer."""
+	def _dump(tmp_path: Path) -> None:
+		with open(tmp_path, "w", encoding="utf-8") as handle:
+			json.dump(payload, handle, **dump_kwargs)
+			if trailing_newline:
+				handle.write("\n")
+
+	_write_atomically(path, _dump)
+
+
 def write_fold_params_atomically(model: object, params_path: Path) -> None:
 	"""Write the fold model's parameter sidecar via a sibling ``*.tmp`` + rename.
 
@@ -408,22 +445,14 @@ def write_fold_params_atomically(model: object, params_path: Path) -> None:
 	The pkl remains the training artifact; this sidecar is the parameter
 	record, not a loadable model.
 	"""
-	params_path.parent.mkdir(parents=True, exist_ok=True)
-	tmp_path = params_path.with_name(params_path.name + ".tmp")
-	try:
-		with open(tmp_path, "w", encoding="utf-8") as handle:
-			json.dump(
-				_fold_params_payload(model),
-				handle,
-				indent=2,
-				sort_keys=True,
-				allow_nan=False,
-			)
-			handle.write("\n")
-		os.replace(tmp_path, params_path)
-	finally:
-		if tmp_path.exists():
-			tmp_path.unlink()
+	_write_json_atomically(
+		params_path,
+		_fold_params_payload(model),
+		trailing_newline=True,
+		indent=2,
+		sort_keys=True,
+		allow_nan=False,
+	)
 
 
 def write_checkpoint_atomically(model: object, model_path: Path) -> None:
@@ -435,14 +464,7 @@ def write_checkpoint_atomically(model: object, model_path: Path) -> None:
 	is left behind and a previous checkpoint at the target path stays intact.
 	The payload is unchanged: ``joblib.dump`` of the trained ``XGBRegressor``.
 	"""
-	model_path.parent.mkdir(parents=True, exist_ok=True)
-	tmp_path = model_path.with_name(model_path.name + ".tmp")
-	try:
-		joblib.dump(model, tmp_path)
-		os.replace(tmp_path, model_path)
-	finally:
-		if tmp_path.exists():
-			tmp_path.unlink()
+	_write_atomically(model_path, lambda tmp_path: joblib.dump(model, tmp_path))
 
 
 def _train_fold_model(
@@ -469,6 +491,11 @@ def _train_fold_model(
 	``None`` (direct callers) the fit runs to the configured round count and
 	both persistence keys stay ``None``.
 
+	The returned predictions carry the model-step timing (``train_time_seconds``,
+	``inference_time_seconds``); the full fold timing — the HAR fit and the
+	remaining fold work included — is recorded by the phase that calls this
+	helper.
+
 	Args:
 		fold_idx: Fold index (0-based)
 		run_id: Run id of the owning run; scopes the checkpoint directory
@@ -485,7 +512,7 @@ def _train_fold_model(
 	Returns:
 		(model, predictions_dict)
 	"""
-	fold_start = time.time()
+	model_start = time.time()
 	tail_note = (
 		f", early stopping on {len(X_val):,} inner-validation rows"
 		if X_val is not None
@@ -548,7 +575,7 @@ def _train_fold_model(
 	# than write a NaN metric.
 	test_qlike = qlike_loss(y_test, y_pred)
 
-	fold_elapsed = time.time() - fold_start
+	model_elapsed = time.time() - model_start
 	logger.info(f"  Fold {fold_idx}: R²={test_r2:.4f}, MAE={test_mae:.6f}, RMSE={test_rmse:.6f}, QLIKE={test_qlike:.6f}")
 	if best_iteration is not None:
 		logger.info(
@@ -556,7 +583,7 @@ def _train_fold_model(
 			f"{model.n_estimators} configured rounds "
 			f"({len(eval_history['qlike'])} rounds evaluated)"
 		)
-	logger.info(f"    └─ Timing: {train_time:.1f}s train + {inference_time:.1f}s inference = {fold_elapsed:.1f}s total")
+	logger.info(f"    └─ Timing: {train_time:.1f}s train + {inference_time:.1f}s inference = {model_elapsed:.1f}s model step")
 
 	# Save the model under the run-scoped checkpoint directory, atomically:
 	# the recorded path is repo-relative in the fold summary/predictions and in
@@ -595,7 +622,8 @@ def _train_fold_model(
 		"n_features": X_train.shape[1],
 		"train_time_seconds": train_time,
 		"inference_time_seconds": inference_time,
-		"fold_time_seconds": fold_elapsed,
+		# The full fold total is recorded by the phase, which also times the
+		# HAR fit this helper does not see.
 		"fold_model_path": to_repo_relative(model_path),
 		"train_date_range": (fold_data["train_date_min"], fold_data["train_date_max"]),
 		"test_date_range": (fold_data["test_date_min"], fold_data["test_date_max"]),
@@ -649,6 +677,7 @@ def _aggregate_fold_results(fold_predictions_list: list) -> tuple[dict, dict]:
 			"clip_rate": float(pred_dict["clip_rate"]),
 			"train_time_seconds": pred_dict["train_time_seconds"],
 			"inference_time_seconds": pred_dict["inference_time_seconds"],
+			"har_time_seconds": pred_dict["har_time_seconds"],
 			"fold_time_seconds": pred_dict["fold_time_seconds"],
 		}
 
@@ -669,12 +698,20 @@ def _save_training_results(
 	interpretable. The fit/report scale declarations and the comparator note
 	come from the HAR benchmark module and are written next to the existing
 	benchmark label.
+
+	Every artifact is written through the shared atomic writer: the results
+	directory is created if absent (a dir-less target cannot fail with
+	``FileNotFoundError``), the final path appears only through the rename, and
+	a torn write leaves no partial final file and no ``*.tmp`` residue.
 	"""
 	val_pred_path = ARTIFACTS_DIR / "results" / "validation_predictions.pkl"
 	summary_path = ARTIFACTS_DIR / "results" / "fold_training_summary.json"
 	har_report_path = ARTIFACTS_DIR / "results" / "har_benchmark.json"
 
-	joblib.dump(validation_predictions, val_pred_path)
+	_write_atomically(
+		val_pred_path,
+		lambda tmp_path: joblib.dump(validation_predictions, tmp_path),
+	)
 	record_artifact(val_pred_path, registry_path=ARTIFACTS_DIR / REGISTRY_FILENAME)
 
 	# Convert fold_training_summary to JSON-serializable format. Persisted paths
@@ -691,8 +728,7 @@ def _save_training_results(
 				summary_json[fold_key]["model_path"]
 			)
 
-	with open(summary_path, "w") as f:
-		json.dump(summary_json, f, indent=2, default=str)
+	_write_json_atomically(summary_path, summary_json, indent=2, default=str)
 	record_artifact(summary_path, registry_path=ARTIFACTS_DIR / REGISTRY_FILENAME)
 
 	# HAR benchmark report: per-fold coefficients and metrics next to the fold model's,
@@ -766,8 +802,7 @@ def _save_training_results(
 			for fold_key, result in har_benchmark_results.items()
 		},
 	}
-	with open(har_report_path, "w") as f:
-		json.dump(har_report, f, indent=2, default=str)
+	_write_json_atomically(har_report_path, har_report, indent=2, default=str)
 	record_artifact(har_report_path, registry_path=ARTIFACTS_DIR / REGISTRY_FILENAME)
 
 	logger.info(f"Training outputs saved (HAR benchmark report: {har_report_path})")
@@ -859,6 +894,7 @@ def phase_4_training(
 	har_benchmark_results = {}
 
 	for fold_key in fold_keys:
+		fold_started = time.time()
 		fold_idx = int(fold_key.split("_", 1)[1])
 		fold_data = folds_metadata[fold_key]
 
@@ -953,6 +989,7 @@ def phase_4_training(
 		# train rows beyond the per-ticker warm-up only and scored on the retained
 		# test rows (scored unchanged even when a ticker's series starts inside the
 		# block).
+		har_started = time.time()
 		har_result = fit_har_benchmark(
 			train_indices=train_indices,
 			test_indices=test_indices_scored,
@@ -964,6 +1001,7 @@ def phase_4_training(
 			fold_key=fold_key,
 			coefficient_interpretation=coefficient_interpretation,
 		)
+		har_time_seconds = time.time() - har_started
 
 		# The warm-up filter applies to the fit only: a late index entrant's first
 		# dates can fall inside a test block, and those scoring rows are scored
@@ -1004,6 +1042,12 @@ def phase_4_training(
 			f"{har_result['n_test']:,} scored rows, "
 			f"clip_rate={har_result['clip_rate']:.6f})"
 		)
+
+		# The timing decomposition: the fold total encloses the model step
+		# (train + inference), the HAR fit, and the remaining fold work, so the
+		# recorded parts sum to the reported full fold cost.
+		predictions_dict["har_time_seconds"] = har_time_seconds
+		predictions_dict["fold_time_seconds"] = time.time() - fold_started
 
 		record_fold(run, fold_key, "completed", predictions_dict["fold_time_seconds"])
 		fold_predictions_list.append(predictions_dict)
@@ -1063,6 +1107,7 @@ def phase_4_training(
 		# Aggregate timing
 		total_train_time = sum(s.get("train_time_seconds", 0) for s in fold_training_summary.values())
 		total_inference_time = sum(s.get("inference_time_seconds", 0) for s in fold_training_summary.values())
+		total_har_time = sum(s.get("har_time_seconds", 0) for s in fold_training_summary.values())
 		total_test_samples = sum(len(p["test_pred"]) for p in fold_predictions_list)
 
 		mean_qlike = np.mean([s["test_qlike"] for s in fold_training_summary.values()])
@@ -1071,7 +1116,7 @@ def phase_4_training(
 		std_har_qlike = np.std([s["har_qlike"] for s in fold_training_summary.values()])
 		mean_har_r2 = np.mean([s["har_r2"] for s in fold_training_summary.values()])
 
-		logger.info(f"Phase 4 complete: {len(fold_training_summary)} fold model(s), {total_test_samples:,} test samples total, {total_time:.1f}s ({total_train_time:.1f}s train + {total_inference_time:.1f}s inference)")
+		logger.info(f"Phase 4 complete: {len(fold_training_summary)} fold model(s), {total_test_samples:,} test samples total, {total_time:.1f}s ({total_train_time:.1f}s train + {total_inference_time:.1f}s inference + {total_har_time:.1f}s HAR)")
 		logger.info(f"Cross-validation results (GLOBAL): R²={mean_r2:.4f}±{std_r2:.4f}, MAE={mean_mae:.6f}±{std_mae:.6f}, RMSE={mean_rmse:.6f}±{std_rmse:.6f}")
 		logger.info(f"QLIKE (GLOBAL, log-target): model={mean_qlike:.6f}±{std_qlike:.6f} | HAR benchmark={mean_har_qlike:.6f}±{std_har_qlike:.6f} (R²={mean_har_r2:.4f})")
 
@@ -1085,6 +1130,8 @@ def phase_4_training(
 			fold_har_r2 = fold_training_summary[fold_key].get("har_r2", float('nan'))
 			train_time = fold_training_summary[fold_key].get("train_time_seconds", 0)
 			inference_time = fold_training_summary[fold_key].get("inference_time_seconds", 0)
+			har_time = fold_training_summary[fold_key].get("har_time_seconds", 0)
+			fold_time = fold_training_summary[fold_key].get("fold_time_seconds", 0)
 			train_date_min = fold_training_summary[fold_key].get("train_date_min", "?")
 			train_date_max = fold_training_summary[fold_key].get("train_date_max", "?")
 			test_date_min = fold_training_summary[fold_key].get("test_date_min", "?")
@@ -1093,7 +1140,7 @@ def phase_4_training(
 			logger.info(f"  {fold_key}: R²={fold_r2:.4f}, MAE={fold_mae:.6f}, RMSE={fold_rmse:.6f}, QLIKE={fold_qlike:.6f}")
 			logger.info(f"    └─ HAR benchmark: R²={fold_har_r2:.4f}, QLIKE={fold_har_qlike:.6f}")
 			logger.info(f"    └─ Train: {train_date_min} to {train_date_max} | Test: {test_date_min} to {test_date_max}")
-			logger.info(f"    └─ Timing: {train_time:.1f}s train + {inference_time:.1f}s inference")
+			logger.info(f"    └─ Timing: {train_time:.1f}s train + {inference_time:.1f}s inference + {har_time:.1f}s HAR = {fold_time:.1f}s fold total")
 	else:
 		logger.info(f"Phase 4 complete: {len(fold_training_summary)} fold model(s), {total_time:.1f}s (no valid metrics)")
 

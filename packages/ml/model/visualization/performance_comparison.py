@@ -87,7 +87,11 @@ def plot_metrics_comparison(summary_df: pd.DataFrame, output_path: Path | None =
 
 def plot_timing_breakdown(summary_df: pd.DataFrame, output_path: Path | None = None) -> Path:
     """
-    Create stacked horizontal bar chart showing train/inference timing per fold.
+    Create stacked horizontal bar chart showing the full fold timing per fold.
+
+    The stacked segments are train time, inference time, the HAR benchmark fit,
+    and the remaining fold work, so the bar sums to the reported
+    ``fold_time_seconds``; the total label is that full fold cost.
 
     Args:
         summary_df: DataFrame from load_fold_training_summary()
@@ -105,6 +109,14 @@ def plot_timing_breakdown(summary_df: pd.DataFrame, output_path: Path | None = N
     fold_nums = summary_df["fold"].str.extract(r'fold_(\d+)')[0].astype(int).values
     train_times = summary_df["train_time_seconds"].values
     inference_times = summary_df["inference_time_seconds"].values
+    har_times = summary_df["har_time_seconds"].values
+    fold_times = summary_df["fold_time_seconds"].values
+
+    # The remaining fold work keeps the stack equal to the reported full fold
+    # cost: fold_time_seconds encloses train + inference + HAR plus the rest.
+    other_times = np.maximum(
+        fold_times - (train_times + inference_times + har_times), 0.0
+    )
 
     fig, ax = plt.subplots(figsize=(10, 6))
 
@@ -113,17 +125,20 @@ def plot_timing_breakdown(summary_df: pd.DataFrame, output_path: Path | None = N
 
     bars_train = ax.barh(y, train_times, height, label="Train Time", color="steelblue", alpha=0.8)
     bars_inference = ax.barh(y, inference_times, height, left=train_times, label="Inference Time", color="coral", alpha=0.8)
+    har_left = train_times + inference_times
+    bars_har = ax.barh(y, har_times, height, left=har_left, label="HAR Fit", color="mediumseagreen", alpha=0.8)
+    other_left = har_left + har_times
+    bars_other = ax.barh(y, other_times, height, left=other_left, label="Other Fold Work", color="silver", alpha=0.8)
 
-    # Add total time labels on each bar
-    for i, (train, inference) in enumerate(zip(train_times, inference_times)):
-        total = train + inference
+    # Total labels carry the full fold cost (train + inference + HAR + rest).
+    for i, total in enumerate(fold_times):
         ax.text(total + max(train_times) * 0.02, i, f"{total:.1f}s",
                 ha="left", va="center", fontsize=10, fontweight="bold")
 
     ax.set_yticks(y)
     ax.set_yticklabels([f"Fold {n}" for n in fold_nums])
     ax.set_xlabel("Time (seconds)", fontsize=12, fontweight="bold")
-    ax.set_title("Training vs Inference Time per Fold", fontsize=14, fontweight="bold")
+    ax.set_title("Fold Time Breakdown: Train, Inference, and HAR Fit per Fold", fontsize=14, fontweight="bold")
     ax.legend(loc="lower right", fontsize=11)
     ax.grid(axis="x", alpha=0.3)
 
