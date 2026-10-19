@@ -82,6 +82,33 @@ VALIDATION_TAIL_FRACTION = float(get_config()["training"]["validation_tail_fract
 # reads the per-fold masks and counts emitted below.
 HEADLINE_ROW_SET = "floor-retained rows (raw RV strictly above RV_FLOOR)"
 
+# The dual OOS-R² conventions reported per fold and pooled. Both live on the same
+# scale over the same floor-retained scored rows; only the denominator differs:
+# the prevailing-mean convention demeans by the scored rows' mean at the reporting
+# level (the fold's own test mean per fold, the pooled test mean pooled), and the
+# vs-HAR convention divides by the HAR benchmark's squared error on the same rows.
+OOS_R2_SCALE = "log target"
+OOS_R2_PREVAILING_MEAN_NOTE = (
+	"oos_r2_prevailing_mean = 1 - SSE_model / SSE_mean on the log target: "
+	"SSE_mean is the squared error of the prevailing mean over the scored rows "
+	"at the reporting level (the fold's own test mean per fold, the pooled test "
+	"mean pooled), the sklearn r2_score convention at that level"
+)
+OOS_R2_VS_HAR_NOTE = (
+	"oos_r2_vs_har = 1 - SSE_model / SSE_HAR on the log target: SSE_HAR is the "
+	"squared error of the HAR benchmark's per-row log forecasts (variance-level "
+	"OLS mapped back to the log scale and clipped at the shared floor) over the "
+	"same floor-retained scored rows"
+)
+OOS_R2_CONVENTION_NOTE = (
+	"dual OOS-R² on the log target over the floor-retained scored rows: "
+	+ OOS_R2_PREVAILING_MEAN_NOTE
+	+ "; "
+	+ OOS_R2_VS_HAR_NOTE
+	+ "; test_r2 (model) and har_r2 (benchmark) keep the fold-own-mean sklearn "
+	"r2_score convention"
+)
+
 
 def floor_retained_mask(values: np.ndarray) -> np.ndarray:
 	"""The single floor policy: True where a raw target is strictly above RV_FLOOR.
@@ -124,6 +151,101 @@ def qlike_loss(actual_log: np.ndarray, forecast_log: np.ndarray) -> float:
 	if not np.isfinite(delta).all():
 		raise ValueError("QLIKE received non-finite log targets or forecasts")
 	return qlike_mean(delta)
+
+
+def oos_r2_prevailing_mean(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+	"""OOS-R² against the prevailing mean of the scored rows (log target).
+
+	``1 - SSE_model / SSE_mean`` with both sums over exactly the rows passed
+	in: the fold's own test mean for a fold call, the pooled test mean for a
+	pooled call. This is sklearn's ``r2_score`` convention restated as an
+	explicit SSE ratio (the two agree to floating-point round-off); on a
+	constant target (``SSE_mean == 0``) it follows ``r2_score``: 1.0 when the
+	model reproduces the constant exactly, 0.0 otherwise, never a division by
+	zero. The value is not comparable across aggregation levels: a fold value
+	demeans by that fold's own test mean, the pooled value by the pooled mean.
+	"""
+	values = np.asarray(y_true, dtype=np.float64)
+	predictions = np.asarray(y_pred, dtype=np.float64)
+	if values.shape != predictions.shape:
+		raise ValueError(
+			f"oos_r2_prevailing_mean received {values.shape} targets and "
+			f"{predictions.shape} predictions"
+		)
+	if values.size == 0:
+		raise ValueError("oos_r2_prevailing_mean received no scored rows")
+	sse_model = float(np.sum((values - predictions) ** 2))
+	sse_mean = float(np.sum((values - values.mean()) ** 2))
+	if sse_mean == 0.0:
+		return 1.0 if sse_model == 0.0 else 0.0
+	return 1.0 - sse_model / sse_mean
+
+
+def oos_r2_vs_har(
+	y_true: np.ndarray, y_pred: np.ndarray, har_forecast_log: np.ndarray
+) -> float:
+	"""OOS-R² against the HAR benchmark's per-row forecasts (log target).
+
+	``1 - SSE_model / SSE_HAR`` over exactly the floor-retained scored rows
+	the HAR forecasts were produced for: numerator and denominator are both
+	squared errors of log-target forecasts, so the ratio compares the model
+	and the benchmark on one scale. A zero HAR error (``SSE_HAR == 0``) leaves
+	the ratio undefined and raises rather than fabricating a value.
+	"""
+	values = np.asarray(y_true, dtype=np.float64)
+	predictions = np.asarray(y_pred, dtype=np.float64)
+	har_predictions = np.asarray(har_forecast_log, dtype=np.float64)
+	if not (values.shape == predictions.shape == har_predictions.shape):
+		raise ValueError(
+			"oos_r2_vs_har received misaligned rows: targets "
+			f"{values.shape}, predictions {predictions.shape}, HAR forecasts "
+			f"{har_predictions.shape}"
+		)
+	if values.size == 0:
+		raise ValueError("oos_r2_vs_har received no scored rows")
+	sse_model = float(np.sum((values - predictions) ** 2))
+	sse_har = float(np.sum((values - har_predictions) ** 2))
+	if sse_har == 0.0:
+		raise ValueError(
+			"oos_r2_vs_har is undefined: the HAR forecasts have zero squared "
+			"error on these rows"
+		)
+	return 1.0 - sse_model / sse_har
+
+
+def pooled_oos_r2(fold_predictions: dict) -> dict:
+	"""The pooled dual OOS-R² report block over every fold's scored rows.
+
+	Concatenates each fold record's ``test_true`` (log target), ``test_pred``
+	(model forecasts), and ``har_forecast_log`` (HAR benchmark forecasts) in
+	fold-key order and reports both conventions pooled:
+	``oos_r2_prevailing_mean`` demeans by the pooled test mean (the pooled
+	analogue of the per-fold fold-own mean), and ``oos_r2_vs_har`` divides the
+	summed model error by the summed HAR error. The block states the scale,
+	the row set, the pooled row count, and each convention's denominator, so a
+	reader never has to guess which mean or which benchmark produced a value.
+	"""
+	fold_keys = sorted(fold_predictions)
+	if not fold_keys:
+		raise ValueError("pooled_oos_r2 received no folds")
+	y_true = np.concatenate(
+		[np.asarray(fold_predictions[key]["test_true"]) for key in fold_keys]
+	)
+	y_pred = np.concatenate(
+		[np.asarray(fold_predictions[key]["test_pred"]) for key in fold_keys]
+	)
+	har_forecast = np.concatenate(
+		[np.asarray(fold_predictions[key]["har_forecast_log"]) for key in fold_keys]
+	)
+	return {
+		"oos_r2_prevailing_mean": oos_r2_prevailing_mean(y_true, y_pred),
+		"oos_r2_vs_har": oos_r2_vs_har(y_true, y_pred, har_forecast),
+		"scale": OOS_R2_SCALE,
+		"row_set": HEADLINE_ROW_SET,
+		"n_scored_rows": int(y_true.size),
+		"prevailing_mean_convention": OOS_R2_PREVAILING_MEAN_NOTE,
+		"vs_har_convention": OOS_R2_VS_HAR_NOTE,
+	}
 
 
 def validate_fold_minima(fold_idx: int, train_indices: np.ndarray, test_indices: np.ndarray) -> None:
@@ -565,9 +687,15 @@ def _train_fold_model(
 	y_pred = model.predict(X_test)
 	inference_time = time.time() - inference_start
 
-	# Compute metrics on the log target. R² follows sklearn's convention, whose
-	# denominator is the fold's own test variance (fold-own-mean); it is not comparable
-	# to a non-demeaned R²_oos. The block below swallows failures into NaN metrics.
+	# Compute metrics on the log target. ``test_r2`` is sklearn's fold-own-mean R²
+	# (1 - SSE_model/SSE_fold_mean); the dual OOS-R² keys are emitted after the HAR
+	# fit, where the fold's per-row HAR forecasts exist: ``oos_r2_prevailing_mean``
+	# states the same fold-own-mean convention under its honest name (pooled, it
+	# demeans by the pooled mean instead), and ``oos_r2_vs_har`` is
+	# 1 - SSE_model/SSE_HAR on the same floor-retained scored rows. The fold-own-mean
+	# value is not comparable to the pooled value or to a non-demeaned R²_oos. The
+	# block below swallows failures into NaN metrics; r2_score on a constant target
+	# returns 1.0/0.0, not NaN.
 	try:
 		test_r2 = r2_score(y_test, y_pred)
 		test_mae = mean_absolute_error(y_test, y_pred)
@@ -678,6 +806,10 @@ def _aggregate_fold_results(fold_predictions_list: list) -> tuple[dict, dict]:
 			"test_mae": pred_dict["test_mae"],
 			"test_rmse": pred_dict["test_rmse"],
 			"test_qlike": pred_dict["test_qlike"],
+			"oos_r2_prevailing_mean": pred_dict["oos_r2_prevailing_mean"],
+			"oos_r2_vs_har": pred_dict["oos_r2_vs_har"],
+			"oos_r2_scale": pred_dict["oos_r2_scale"],
+			"oos_r2_row_set": pred_dict["oos_r2_row_set"],
 			"har_r2": pred_dict["har_r2"],
 			"har_qlike": pred_dict["har_qlike"],
 			"clip_count": int(pred_dict["clip_count"]),
@@ -696,6 +828,7 @@ def _save_training_results(
 	fold_training_summary: dict,
 	har_benchmark_results: dict,
 	coefficient_interpretation: bool = False,
+	pooled_oos_r2_report: dict | None = None,
 ) -> None:
 	"""Save training results and the HAR benchmark report to disk.
 
@@ -704,7 +837,10 @@ def _save_training_results(
 	fold's HAC fields so a reader can tell whether the standard errors are
 	interpretable. The fit/report scale declarations and the comparator note
 	come from the HAR benchmark module and are written next to the existing
-	benchmark label.
+	benchmark label. When the caller passes a ``pooled_oos_r2_report`` (the
+	training phase computes it from the persisted per-fold predictions), the
+	HAR report carries it as the top-level ``pooled_oos_r2`` block with both
+	conventions, their scale, their row set, and the pooled row count.
 
 	Every artifact is written through the shared atomic writer: the results
 	directory is created if absent (a dir-less target cannot fail with
@@ -777,7 +913,7 @@ def _save_training_results(
 	har_report = {
 		"benchmark": "HAR-RV (Corsi (2009)): canonical 1/5/22 trailing variance components, OLS in variance levels",
 		"target": "log(realized_volatility_5d)",
-		"r2_convention": "log-target scale, fold-own-mean (sklearn r2_score)",
+		"r2_convention": OOS_R2_CONVENTION_NOTE,
 		"qlike": "h/f - ln(h/f) - 1 with h=exp(actual), f=exp(forecast); target in native per-day sigma units",
 		"fit_scale": FIT_SCALE,
 		"report_scale": REPORT_SCALE,
@@ -809,6 +945,11 @@ def _save_training_results(
 			for fold_key, result in har_benchmark_results.items()
 		},
 	}
+	# The pooled dual OOS-R² block: computed by the training phase from the
+	# per-fold scored rows and written only when the caller passes it, so direct
+	# callers of this writer (tests, sidecar tools) keep their minimal payloads.
+	if pooled_oos_r2_report is not None:
+		har_report["pooled_oos_r2"] = pooled_oos_r2_report
 	write_json_atomically(har_report_path, har_report, indent=2, default=str)
 	record_artifact(har_report_path, registry_path=ARTIFACTS_DIR / REGISTRY_FILENAME)
 
@@ -833,7 +974,12 @@ def phase_4_training(
 	dates of each ticker's series, whose trailing windows are incomplete).
 	Degenerate at-or-below-floor target rows are flat-window artifacts and are
 	excluded from fitting and scoring under the single floor policy; the
-	retained row set is declared and counted.
+	retained row set is declared and counted. Every fold persists the HAR
+	benchmark's per-row log forecasts and emits the dual OOS-R² conventions —
+	``oos_r2_prevailing_mean`` (the fold's own test mean per fold; the pooled
+	test mean at the pooled level) and ``oos_r2_vs_har`` (against the HAR
+	forecasts) — each with its scale and floor-retained row set stated, per
+	fold and pooled.
 
 	``coefficient_interpretation`` defaults to False, the pipeline setting: the
 	canonical variance-level OLS fit reports no coefficient standard errors, and the
@@ -1037,12 +1183,25 @@ def phase_4_training(
 				"headline_row_set": HEADLINE_ROW_SET,
 			}
 		)
-		har_result["har_qlike"] = qlike_loss(y_test, har_result.pop("forecast_log"))
+		har_forecast_log = har_result.pop("forecast_log")
+		har_result["har_qlike"] = qlike_loss(y_test, har_forecast_log)
 		predictions_dict["har_r2"] = har_result["har_r2"]
 		predictions_dict["har_qlike"] = har_result["har_qlike"]
 		predictions_dict["n_warmup_excluded"] = har_result["n_warmup_excluded"]
 		predictions_dict["clip_count"] = har_result["clip_count"]
 		predictions_dict["clip_rate"] = har_result["clip_rate"]
+		# Persist the HAR per-row log forecasts and emit the dual OOS-R²
+		# conventions on the same floor-retained scored rows; the pooled block is
+		# computed after the fold loop and written into the HAR report.
+		predictions_dict["har_forecast_log"] = har_forecast_log
+		predictions_dict["oos_r2_prevailing_mean"] = oos_r2_prevailing_mean(
+			y_test, predictions_dict["test_pred"]
+		)
+		predictions_dict["oos_r2_vs_har"] = oos_r2_vs_har(
+			y_test, predictions_dict["test_pred"], har_forecast_log
+		)
+		predictions_dict["oos_r2_scale"] = OOS_R2_SCALE
+		predictions_dict["oos_r2_row_set"] = HEADLINE_ROW_SET
 		har_benchmark_results[fold_key] = har_result
 
 		logger.info(
@@ -1055,6 +1214,11 @@ def phase_4_training(
 			f"clip_count={har_result['clip_count']:,} of "
 			f"{har_result['n_test']:,} scored rows, "
 			f"clip_rate={har_result['clip_rate']:.6f})"
+		)
+		logger.info(
+			f"    └─ OOS-R² (log target, {HEADLINE_ROW_SET}): "
+			f"prevailing mean={predictions_dict['oos_r2_prevailing_mean']:.4f}, "
+			f"vs HAR={predictions_dict['oos_r2_vs_har']:.4f}"
 		)
 
 		# The timing decomposition: the fold total encloses the model step
@@ -1075,12 +1239,23 @@ def phase_4_training(
 		fold_training_summary[fold_key]["n_features_indicators"] = int(metadata["n_indicators"])
 		fold_training_summary[fold_key]["n_features_ticker"] = int(metadata["n_ticker_features"])
 
+	# The pooled dual OOS-R² block over every fold's floor-retained scored rows,
+	# from the persisted per-fold predictions; written into the HAR report.
+	pooled_oos_r2_report = pooled_oos_r2(validation_predictions)
+	logger.info(
+		f"Pooled OOS-R² (log target, {HEADLINE_ROW_SET}): "
+		f"prevailing mean={pooled_oos_r2_report['oos_r2_prevailing_mean']:.4f}, "
+		f"vs HAR={pooled_oos_r2_report['oos_r2_vs_har']:.4f} "
+		f"({pooled_oos_r2_report['n_scored_rows']:,} scored rows)"
+	)
+
 	# Save outputs
 	_save_training_results(
 		validation_predictions,
 		fold_training_summary,
 		har_benchmark_results,
 		coefficient_interpretation=coefficient_interpretation,
+		pooled_oos_r2_report=pooled_oos_r2_report,
 	)
 	# One checkpoint and one parameter sidecar per trained fold; the indices
 	# come from the folds this run actually trained.
