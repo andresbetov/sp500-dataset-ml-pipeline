@@ -70,6 +70,16 @@ OPTIONAL_COLUMNS = frozenset(
 
 KNOWN_COLUMNS = frozenset(REQUIRED_COLUMNS) | OPTIONAL_COLUMNS
 
+# The one statement of the QLIKE gap's direction, carried into the manifest so
+# every consumer reads the same convention: the model beats HAR when its loss
+# is lower, so a positive ``har_qlike - test_qlike`` gap means model better.
+QLIKE_GAP_SIGN_CONVENTION = (
+    "qlike_gap = har_qlike - test_qlike; positive means the model's QLIKE is "
+    "lower (better) than the HAR benchmark"
+)
+
+QLIKE_STAT_COLUMNS = ("test_qlike", "har_qlike", "har_r2")
+
 
 def _validate_fold_summary(data: object) -> dict[str, int]:
     """Validate the summary's fold keys and required columns.
@@ -248,5 +258,72 @@ def extract_sample_stats(summary_df: pd.DataFrame) -> dict:
         "mean_train_samples": summary_df["n_train_samples"].mean(),
         "mean_test_samples": summary_df["n_test_samples"].mean(),
         "n_folds": len(summary_df),
+    }
+
+
+def _finite_value(value: object) -> float | None:
+    """Coerce a fold cell to a strict-JSON-safe float, or ``None``."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if np.isfinite(number) else None
+
+
+def _column_values(summary_df: pd.DataFrame, column: str) -> pd.Series:
+    """Return one numeric column; an absent optional column is all ``NaN``."""
+    if column not in summary_df.columns:
+        return pd.Series(np.nan, index=summary_df.index, dtype=np.float64)
+    return pd.to_numeric(summary_df[column], errors="coerce")
+
+
+def extract_qlike_stats(summary_df: pd.DataFrame) -> dict:
+    """
+    Extract per-fold QLIKE/HAR statistics and their aggregate means.
+
+    The gap follows the module's single sign convention
+    (``QLIKE_GAP_SIGN_CONVENTION``). A fold missing either input carries
+    ``None`` for the gap; aggregate means are taken over the finite fold
+    values only.
+
+    Args:
+        summary_df: DataFrame from load_fold_training_summary()
+
+    Returns:
+        Dict with ``sign_convention``, ``per_fold`` records (one per fold,
+        carrying ``test_qlike``/``har_qlike``/``har_r2``/``qlike_gap``), and
+        the aggregate ``means`` block.
+    """
+    columns = {name: _column_values(summary_df, name) for name in QLIKE_STAT_COLUMNS}
+    per_fold: dict[str, dict[str, float | None]] = {}
+    for position, fold in enumerate(summary_df["fold"]):
+        record = {
+            name: _finite_value(columns[name].iloc[position])
+            for name in QLIKE_STAT_COLUMNS
+        }
+        test_qlike = record["test_qlike"]
+        har_qlike = record["har_qlike"]
+        record["qlike_gap"] = (
+            har_qlike - test_qlike
+            if test_qlike is not None and har_qlike is not None
+            else None
+        )
+        per_fold[str(fold)] = record
+
+    def mean_of(key: str) -> float | None:
+        values = [
+            record[key] for record in per_fold.values() if record[key] is not None
+        ]
+        return float(np.mean(values)) if values else None
+
+    return {
+        "sign_convention": QLIKE_GAP_SIGN_CONVENTION,
+        "per_fold": per_fold,
+        "means": {
+            "test_qlike_mean": mean_of("test_qlike"),
+            "har_qlike_mean": mean_of("har_qlike"),
+            "har_r2_mean": mean_of("har_r2"),
+            "qlike_gap_mean": mean_of("qlike_gap"),
+        },
     }
 
