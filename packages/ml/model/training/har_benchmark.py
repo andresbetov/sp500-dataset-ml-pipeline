@@ -395,8 +395,13 @@ def fit_har_benchmark(
     implied volatility stays positive for the loss; equivalently the returned log
     forecast obeys ``forecast_log >= ln(forecast_floor)`` — the one declared forecast
     constraint, documented in the module docstring, where the floor comes from the
-    shared config and must equal the model's floor. R² is reported on the log target
-    against the fold's own test mean — the same convention the fold models use.
+    shared config and must equal the model's floor. ``har_r2`` is reported on the log
+    target against the fold's own test mean — the same fold-own-mean convention the
+    fold models' ``test_r2`` uses. The model-vs-HAR comparison is the training
+    phase's dual reporting layer: it keeps the returned per-row ``forecast_log`` and
+    emits ``oos_r2_vs_har`` = ``1 - SSE_model/SSE_HAR`` on the same scored rows
+    (alongside ``oos_r2_prevailing_mean``, the fold-own/pooled prevailing-mean
+    convention under its honest name).
 
     The clip is counted where it is applied: ``clip_count`` of the ``n_test`` scored
     rows fall below ``forecast_floor**2`` and ``clip_rate = clip_count / n_test``. A

@@ -71,6 +71,12 @@ def load_validation_predictions(predictions_path: Path | None = None) -> dict:
 def plot_actual_vs_predicted(predictions_dict: dict, output_path: Path | None = None) -> Path:
     """Create scatter plots of actual vs predicted values per fold with diagonal reference.
 
+    The combined panel labels its pooled R² with its convention — the pooled
+    prevailing-mean denominator (the pooled test mean) — instead of a bare R².
+    When every fold record carries the persisted per-row HAR forecasts
+    (``har_forecast_log``), the pooled model-vs-HAR value is shown beside it,
+    so the panel names both dual conventions rather than implying one.
+
     Args:
         predictions_dict: Dict of fold predictions from load_validation_predictions()
         output_path: Where to save the figure. If None, uses default outputs_dir.
@@ -135,8 +141,27 @@ def plot_actual_vs_predicted(predictions_dict: dict, output_path: Path | None = 
     ax_combined.plot([min_val, max_val], [min_val, max_val], "r--", linewidth=2, label="y = x")
 
     from sklearn.metrics import r2_score
+    # The combined panel names its convention: the pooled prevailing-mean
+    # denominator (the pooled test mean), never a bare R². When every fold
+    # record carries the persisted per-row HAR forecasts, the pooled
+    # model-vs-HAR value is shown next to it, so the panel does not imply a
+    # single convention.
     combined_r2 = r2_score(all_true, all_pred)
-    ax_combined.text(0.05, 0.95, f"$R^2 = {combined_r2:.4f}$", transform=ax_combined.transAxes,
+    combined_label = f"pooled $R^2$ vs pooled mean = {combined_r2:.4f}"
+    if all("har_forecast_log" in predictions_dict[name] for name in FOLD_NAMES):
+        from packages.ml.model.training.training import oos_r2_vs_har
+
+        all_har = np.concatenate(
+            [
+                np.asarray(predictions_dict[name]["har_forecast_log"])
+                for name in FOLD_NAMES
+            ]
+        )
+        combined_label += (
+            f"\npooled $R^2$ vs HAR = "
+            f"{oos_r2_vs_har(all_true, all_pred, all_har):.4f}"
+        )
+    ax_combined.text(0.05, 0.95, combined_label, transform=ax_combined.transAxes,
                     fontsize=12, verticalalignment="top",
                     bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.8))
 

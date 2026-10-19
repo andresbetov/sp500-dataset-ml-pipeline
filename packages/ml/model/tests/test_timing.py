@@ -49,7 +49,8 @@ N_TICKER_FEATURES = 1
 TIMING_TOLERANCE = 1e-6
 
 # The per-fold summary keys that predate the HAR timing component. The new
-# schema adds ``har_time_seconds`` and changes nothing else.
+# schema adds ``har_time_seconds`` and the dual OOS-R² keys and changes nothing
+# else.
 PREEXISTING_SUMMARY_KEYS = frozenset(
     {
         "train_date_min",
@@ -83,6 +84,17 @@ PREEXISTING_SUMMARY_KEYS = frozenset(
         "fold_time_seconds",
         "n_features_indicators",
         "n_features_ticker",
+    }
+)
+
+# The dual OOS-R² keys added by the reporting task: both conventions with their
+# scale and row-set declarations, per fold.
+DUAL_OOS_R2_SUMMARY_KEYS = frozenset(
+    {
+        "oos_r2_prevailing_mean",
+        "oos_r2_vs_har",
+        "oos_r2_scale",
+        "oos_r2_row_set",
     }
 )
 
@@ -240,7 +252,7 @@ def test_fold_timing_decomposes_into_train_inference_and_har() -> None:
             )
 
 
-def test_summary_schema_gains_only_the_har_timing_key() -> None:
+def test_summary_schema_adds_only_declared_keys() -> None:
     """The per-fold summary keeps every pre-existing key and value."""
     with tempfile.TemporaryDirectory() as tmpdir:
         root = _prepared_root(tmpdir)
@@ -249,13 +261,14 @@ def test_summary_schema_gains_only_the_har_timing_key() -> None:
         )
 
         for fold_key, stored in summary_json.items():
-            assert set(stored) == PREEXISTING_SUMMARY_KEYS | {
-                "har_time_seconds"
-            }, (
+            declared = (
+                PREEXISTING_SUMMARY_KEYS
+                | {"har_time_seconds"}
+                | DUAL_OOS_R2_SUMMARY_KEYS
+            )
+            assert set(stored) == declared, (
                 fold_key,
-                sorted(
-                    set(stored) ^ (PREEXISTING_SUMMARY_KEYS | {"har_time_seconds"})
-                ),
+                sorted(set(stored) ^ declared),
             )
             prediction = validation[fold_key]
             for key in (
