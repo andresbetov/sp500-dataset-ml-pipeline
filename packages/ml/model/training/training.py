@@ -139,20 +139,21 @@ def validate_fold_minima(fold_idx: int, train_indices: np.ndarray, test_indices:
 		raise ValueError(f"Fold {fold_idx}: empty test indices")
 
 
-def _fold_keys(folds_metadata: dict) -> list[str]:
+def fold_keys(folds_metadata: dict) -> list[str]:
 	"""The payload's fold keys in fold-index order.
 
 	The persisted payload is a schema-versioned superset, so only ``fold_*``
 	keys are folds; the metadata keys (schema_version, feature_names, holdout,
 	n_dates) are not. Malformed fold keys fail by name rather than surfacing as
-	an opaque index error.
+	an opaque index error. Consumers that iterate folds (the training phase and
+	the tuning harness) share this ordering.
 	"""
-	fold_keys = [key for key in folds_metadata if key.startswith("fold_")]
+	fold_key_list = [key for key in folds_metadata if key.startswith("fold_")]
 	try:
-		return sorted(fold_keys, key=lambda key: int(key.split("_", 1)[1]))
+		return sorted(fold_key_list, key=lambda key: int(key.split("_", 1)[1]))
 	except ValueError as exc:
 		raise ValueError(
-			f"fold_* metadata keys must be fold_<index>; got {sorted(fold_keys)}"
+			f"fold_* metadata keys must be fold_<index>; got {sorted(fold_key_list)}"
 		) from exc
 
 
@@ -184,10 +185,10 @@ def _validate_training_prerequisites(
 	# executed correctly). The persisted payload is a schema-versioned
 	# superset, so count fold_* keys only: metadata keys (schema_version,
 	# feature_names, holdout, n_dates) are not folds.
-	fold_keys = _fold_keys(folds_metadata)
+	fold_key_list = fold_keys(folds_metadata)
 	n_folds = cross_validator.N_FOLDS
-	if len(fold_keys) != n_folds:
-		raise ValueError(f"Expected {n_folds} folds, got {len(fold_keys)}")
+	if len(fold_key_list) != n_folds:
+		raise ValueError(f"Expected {n_folds} folds, got {len(fold_key_list)}")
 
 	# Validate features; a single vectorized scan is fine, X may be a memory map.
 	finite = np.isfinite(X)
@@ -242,7 +243,7 @@ def _validate_training_prerequisites(
 
 	# Validate every fold holds both sides (single minima implementation:
 	# validate_fold_minima).
-	for fold_key in fold_keys:
+	for fold_key in fold_key_list:
 		fold_idx = int(fold_key.split("_", 1)[1])
 		fold_data = folds_metadata[fold_key]
 		validate_fold_minima(fold_idx, fold_data["train_indices"], fold_data["test_indices"])
@@ -369,7 +370,7 @@ def fold_params_path(fold_idx: int, run_id: str) -> Path:
 SIDECAR_VERSION_KEYS = ("python", "xgboost", "numpy", "pandas", "scikit-learn")
 
 
-def _sidecar_value(value: object) -> object:
+def sidecar_value(value: object) -> object:
 	"""Project one ``get_params()`` value onto strict-JSON data.
 
 	Callables (the QLIKE objective and eval metric) become their qualified
@@ -389,7 +390,7 @@ def _fold_params_payload(model: object) -> dict:
 	versions = environment_versions()
 	return {
 		"params": {
-			key: _sidecar_value(value)
+			key: sidecar_value(value)
 			for key, value in model.get_params().items()
 		},
 		"environment": {key: versions.get(key) for key in SIDECAR_VERSION_KEYS},
@@ -416,14 +417,19 @@ def _write_atomically(path: Path, write_payload: Callable[[Path], None]) -> None
 			tmp_path.unlink()
 
 
-def _write_json_atomically(
+def write_json_atomically(
 	path: Path,
 	payload: dict,
 	*,
 	trailing_newline: bool = False,
 	**dump_kwargs,
 ) -> None:
-	"""Write one strict-JSON document through the shared atomic writer."""
+	"""Write one strict-JSON document through the shared atomic writer.
+
+	The shared writer behind the fold params sidecar and the tuning harness's
+	per-trial sidecars: strict JSON with ``allow_nan=False``, a sibling
+	``*.tmp`` + ``os.replace``, and no partial final file on failure.
+	"""
 	def _dump(tmp_path: Path) -> None:
 		with open(tmp_path, "w", encoding="utf-8") as handle:
 			json.dump(payload, handle, **dump_kwargs)
@@ -445,7 +451,7 @@ def write_fold_params_atomically(model: object, params_path: Path) -> None:
 	The pkl remains the training artifact; this sidecar is the parameter
 	record, not a loadable model.
 	"""
-	_write_json_atomically(
+	write_json_atomically(
 		params_path,
 		_fold_params_payload(model),
 		trailing_newline=True,
@@ -728,7 +734,7 @@ def _save_training_results(
 				summary_json[fold_key]["model_path"]
 			)
 
-	_write_json_atomically(summary_path, summary_json, indent=2, default=str)
+	write_json_atomically(summary_path, summary_json, indent=2, default=str)
 	record_artifact(summary_path, registry_path=ARTIFACTS_DIR / REGISTRY_FILENAME)
 
 	# HAR benchmark report: per-fold coefficients and metrics next to the fold model's,
@@ -802,7 +808,7 @@ def _save_training_results(
 			for fold_key, result in har_benchmark_results.items()
 		},
 	}
-	_write_json_atomically(har_report_path, har_report, indent=2, default=str)
+	write_json_atomically(har_report_path, har_report, indent=2, default=str)
 	record_artifact(har_report_path, registry_path=ARTIFACTS_DIR / REGISTRY_FILENAME)
 
 	logger.info(f"Training outputs saved (HAR benchmark report: {har_report_path})")
@@ -888,12 +894,12 @@ def phase_4_training(
 
 	# Train one model per fold (the persisted payload's fold keys) with strict
 	# temporal separation.
-	fold_keys = _fold_keys(folds_metadata)
+	fold_key_list = fold_keys(folds_metadata)
 	fold_predictions_list = []
 	fold_model_paths = []
 	har_benchmark_results = {}
 
-	for fold_key in fold_keys:
+	for fold_key in fold_key_list:
 		fold_started = time.time()
 		fold_idx = int(fold_key.split("_", 1)[1])
 		fold_data = folds_metadata[fold_key]

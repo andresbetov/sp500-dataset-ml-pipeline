@@ -16,5 +16,16 @@ run:
   log_path: runs.jsonl
 tuning:
   select_on: validation_qlike
+  search_space:
+    # Coarse grid: 3 x 3 x 3 = 27 combinations, the configured budget cap.
+    coarse_grid:
+      learning_rate: [0.03, 0.05, 0.1]
+      max_depth: [4, 6, 8]
+      min_child_weight: [1, 5, 25]
+    # Finalist refinement: the best coarse combination is re-run per gamma.
+    finalist_refinement:
+      gamma: [0.0, 0.1]
+    # Seed finalists: the best refined combination is re-run per seed.
+    seed_finalists: [42, 43, 44]
 holdout:
   n_dates: 500
