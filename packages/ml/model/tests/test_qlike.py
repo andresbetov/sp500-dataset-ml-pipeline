@@ -40,6 +40,14 @@ FIXTURE_POINTS = 21
 FORBIDDEN_ROUTE = re.compile(r"smear|calibrat|Duan|Jensen", re.IGNORECASE)
 SCALER_TOKENS = ("scaler", "standardscaler", "minmaxscaler", "robustscaler")
 
+# The evaluation report declares the post-hoc adjustment status explicitly
+# ("not applied"); that declaration is the one permitted occurrence of the
+# vocabulary, and only in the report module. The fitting vocabulary
+# (smear/Duan/Jensen) stays banned there too, so no fitted factor can hide
+# behind the allowance.
+DECLARED_STATUS_MODULE = MODEL_ROOT / "evaluation" / "report.py"
+FITTING_ROUTE = re.compile(r"smear|Duan|Jensen", re.IGNORECASE)
+
 
 def _qlike(delta: np.ndarray) -> np.ndarray:
     return np.exp(delta) - delta - 1.0
@@ -204,10 +212,21 @@ def test_no_deferred_route_tokens() -> None:
     for path in sorted(MODEL_ROOT.rglob("*.py")):
         if TESTS_DIR in path.parents:
             continue
-        if FORBIDDEN_ROUTE.search(path.read_text(encoding="utf-8")):
-            hits.append(str(path.relative_to(REPO_ROOT)))
+        text = path.read_text(encoding="utf-8")
+        if not FORBIDDEN_ROUTE.search(text):
+            continue
+        if path == DECLARED_STATUS_MODULE and not FITTING_ROUTE.search(text):
+            continue
+        hits.append(str(path.relative_to(REPO_ROOT)))
 
     assert not hits, "recalibration vocabulary remains: " + ", ".join(hits)
+
+    # The permitted module carries only the declared status, never a fitted
+    # factor: no smearing/selection vocabulary and an explicit "not applied".
+    if DECLARED_STATUS_MODULE.is_file():
+        text = DECLARED_STATUS_MODULE.read_text(encoding="utf-8")
+        assert not FITTING_ROUTE.search(text)
+        assert "not applied" in text.lower()
 
 
 def test_reported_loss_floor_magnitudes() -> None:

@@ -49,11 +49,13 @@ def _raise_if_overflow(delta: np.ndarray) -> None:
         )
 
 
-def qlike_mean(delta) -> float:
-    """Mean QLIKE over a finite log-ratio array.
+def qlike_losses(delta) -> np.ndarray:
+    """Elementwise QLIKE over a finite log-ratio array.
 
-    This is the one formula behind both the training metric and the reported
-    fold loss. The exponential bound is checked before ``exp`` is evaluated.
+    This is the single elementwise formula behind both the training metric and
+    every reported loss: ``exp(delta) - delta - 1`` with the same finiteness
+    and overflow guards as ``qlike_mean``. The per-row loss vectors consume it,
+    so a row's persisted loss and the fold's mean loss come from one formula.
     """
     values = np.asarray(delta, dtype=np.float64)
     if not np.isfinite(values).all():
@@ -63,7 +65,16 @@ def qlike_mean(delta) -> float:
     loss = np.exp(values) - values - 1.0
     if not np.isfinite(loss).all():
         raise ValueError("QLIKE produced non-finite values")
-    return float(loss.mean())
+    return loss
+
+
+def qlike_mean(delta) -> float:
+    """Mean QLIKE over a finite log-ratio array.
+
+    This is the one formula behind both the training metric and the reported
+    fold loss. The exponential bound is checked before ``exp`` is evaluated.
+    """
+    return float(qlike_losses(delta).mean())
 
 
 def qlike_grad_hess(actual_log, forecast_log) -> tuple[np.ndarray, np.ndarray]:

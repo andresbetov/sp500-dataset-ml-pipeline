@@ -359,12 +359,15 @@ def test_floor_policy_symmetry() -> None:
         assert len(expected_train) < len(fold_data["train_indices"])
 
         # The model fits the inner-fit rows and early-stops on the tail; both
-        # are floor-retained and test-disjoint. The HAR benchmark keeps the
-        # full floor-retained fold-train, so no at-or-below-floor row reaches
-        # fitting, scoring, or the benchmark.
+        # are floor-retained and test-disjoint. The one prediction call covers
+        # the fold's full test block so the per-row loss vectors can carry the
+        # floor-excluded rows; the headline scored set selected from it is
+        # floor-retained, and the HAR benchmark keeps the full floor-retained
+        # fold-train, so no at-or-below-floor row enters fitting, the headline
+        # metrics, or the benchmark.
         assert np.array_equal(record["train_rows"][fold_idx], expected_fit)
         assert np.array_equal(record["val_rows"][fold_idx], expected_tail)
-        assert np.array_equal(record["scored_rows"][fold_idx], retained_test)
+        assert np.array_equal(record["scored_rows"][fold_idx], original_test)
         assert np.array_equal(har_calls[fold_idx]["train_indices"], expected_train)
         assert np.array_equal(har_calls[fold_idx]["test_indices"], retained_test)
         assert np.array_equal(
@@ -373,8 +376,9 @@ def test_floor_policy_symmetry() -> None:
         )
         assert np.all(y[record["train_rows"][fold_idx]] > training.RV_FLOOR)
         assert np.all(y[record["val_rows"][fold_idx]] > training.RV_FLOOR)
-        assert np.all(y[record["scored_rows"][fold_idx]] > training.RV_FLOOR)
+        assert np.all(y[retained_test] > training.RV_FLOOR)
         assert np.all(y[har_calls[fold_idx]["test_indices"]] > training.RV_FLOOR)
+        assert len(validation[fold_key]["test_pred"]) == len(retained_test)
         assert not set(retained_test.tolist()) & set(expected_fit.tolist())
         assert not set(retained_test.tolist()) & set(expected_tail.tolist())
 

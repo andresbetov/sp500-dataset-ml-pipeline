@@ -354,6 +354,45 @@ def _coefficient_standard_errors(
     return ols_se, hac_se
 
 
+def har_forecast_log(
+    coefficients,
+    regressors: np.ndarray,
+    indices: np.ndarray,
+    forecast_floor: float,
+) -> tuple[np.ndarray, int]:
+    """The benchmark's per-row log forecasts at ``indices`` (the one forecast path).
+
+    ``coefficients`` is the fitted OLS vector (intercept plus the canonical
+    1/5/22 components), ``regressors`` the per-row variance components, and
+    ``indices`` the rows to forecast. The design is built and constrained
+    exactly as the fold fit applies it: the variance-space forecast is clipped
+    at ``forecast_floor**2`` (equivalently ``forecast_log >=
+    ln(forecast_floor)``) and every applied clip is counted. Both the fold
+    benchmark and the evaluation decomposition's floor-row forecasts call this
+    function, so the forecast formula exists once and cannot drift between
+    them; no coefficient is refitted here.
+    """
+    coefficients = np.asarray(coefficients, dtype=np.float64)
+    regressors = np.asarray(regressors, dtype=np.float64)
+    indices = np.asarray(indices)
+    if regressors.ndim != 2:
+        raise ValueError(
+            f"HAR forecast expects a 2-D regressor matrix, got {regressors.shape}"
+        )
+    if coefficients.shape != (regressors.shape[1] + 1,):
+        raise ValueError(
+            f"HAR forecast received {coefficients.size} coefficients for "
+            f"{regressors.shape[1]} regressors"
+        )
+    design = np.column_stack([np.ones(len(indices)), regressors[indices]])
+    floor_squared = forecast_floor**2
+    forecast_variance = design @ coefficients
+    below_floor = forecast_variance < floor_squared
+    clip_count = int(np.count_nonzero(below_floor))
+    forecast_variance[below_floor] = floor_squared
+    return 0.5 * np.log(forecast_variance), clip_count
+
+
 def fit_har_benchmark(
     train_indices: np.ndarray,
     test_indices: np.ndarray,
@@ -436,7 +475,6 @@ def fit_har_benchmark(
         )
 
     train_design = np.column_stack([np.ones(len(fit_indices)), regressors[fit_indices]])
-    test_design = np.column_stack([np.ones(len(test_indices)), regressors[test_indices]])
 
     target_variance = np.exp(2.0 * np.asarray(target_log_train, dtype=np.float64))
     coefficients, *_ = np.linalg.lstsq(
@@ -457,12 +495,9 @@ def fit_har_benchmark(
     # floor**2, i.e. forecast_log >= ln(forecast_floor). The same mask that
     # selects the clipped rows counts them, so clip_count/clip_rate cannot
     # drift from the applied clip.
-    floor_squared = forecast_floor**2
-    forecast_variance = test_design @ coefficients
-    below_floor = forecast_variance < floor_squared
-    clip_count = int(np.count_nonzero(below_floor))
-    forecast_variance[below_floor] = floor_squared
-    forecast_log = 0.5 * np.log(forecast_variance)
+    forecast_log, clip_count = har_forecast_log(
+        coefficients, regressors, test_indices, forecast_floor
+    )
     har_r2 = float(r2_score(target_log_test, forecast_log))
     clip_rate = clip_count / len(test_indices) if len(test_indices) else 0.0
     if clip_count:
@@ -474,7 +509,7 @@ def fit_har_benchmark(
             clip_count,
             len(test_indices),
             clip_rate,
-            floor_squared,
+            forecast_floor**2,
             np.log(forecast_floor),
         )
 

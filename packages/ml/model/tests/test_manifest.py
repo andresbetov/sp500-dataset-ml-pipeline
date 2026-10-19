@@ -333,7 +333,9 @@ def test_phase_4_records_folds_and_artifacts_into_the_caller_run() -> None:
             f"fold_{fold_idx}" for fold_idx in range(5)
         ]
         assert record["phases"] == [], "phase timing belongs to the orchestrator"
-        assert len(record["artifacts"]) == 13, record["artifacts"]
+        # 5 checkpoints + 5 parameter sidecars + the three training results +
+        # the per-row loss vectors and the evaluation summary.
+        assert len(record["artifacts"]) == 15, record["artifacts"]
         assert any(
             key.endswith(f"checkpoints/{run['run_id']}/fold_0.pkl")
             for key in record["artifacts"]
