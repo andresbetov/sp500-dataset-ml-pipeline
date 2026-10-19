@@ -30,6 +30,7 @@ from packages.ml.model.artifact_integrity import (
 	record_artifact,
 )
 from packages.ml.model.config import get_config
+from packages.ml.model.cross_validation import cross_validator
 from packages.ml.model.cross_validation.cv_utils import load_folds_metadata
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from packages.ml.model.training.har_benchmark import (
@@ -137,6 +138,23 @@ def validate_fold_minima(fold_idx: int, train_indices: np.ndarray, test_indices:
 		raise ValueError(f"Fold {fold_idx}: empty test indices")
 
 
+def _fold_keys(folds_metadata: dict) -> list[str]:
+	"""The payload's fold keys in fold-index order.
+
+	The persisted payload is a schema-versioned superset, so only ``fold_*``
+	keys are folds; the metadata keys (schema_version, feature_names, holdout,
+	n_dates) are not. Malformed fold keys fail by name rather than surfacing as
+	an opaque index error.
+	"""
+	fold_keys = [key for key in folds_metadata if key.startswith("fold_")]
+	try:
+		return sorted(fold_keys, key=lambda key: int(key.split("_", 1)[1]))
+	except ValueError as exc:
+		raise ValueError(
+			f"fold_* metadata keys must be fold_<index>; got {sorted(fold_keys)}"
+		) from exc
+
+
 def _validate_training_prerequisites(
 	X: np.ndarray,
 	y: np.ndarray,
@@ -148,7 +166,7 @@ def _validate_training_prerequisites(
 
 	For regression, validates:
 	- Target is continuous (non-NaN, finite values)
-	- Exactly 5 folds (Phase 3 must have completed correctly)
+	- The configured number of folds (Phase 3 must have completed correctly)
 	- Features are finite (a non-finite input would poison every fold fit)
 	- No duplicated (ticker, date) rows (one row per ticker-day)
 	- Feature width matches the metadata counts
@@ -161,12 +179,14 @@ def _validate_training_prerequisites(
 		inf_count = np.isinf(y).sum()
 		raise ValueError(f"Invalid target values. Found {nan_count} NaNs and {inf_count} infs")
 
-	# Validate folds count (Phase 3 executed correctly). The persisted payload
-	# is a schema-versioned superset, so count fold_* keys only: metadata keys
-	# (schema_version, feature_names, holdout, n_dates) are not folds.
-	fold_keys = [key for key in folds_metadata if key.startswith("fold_")]
-	if len(fold_keys) != 5:
-		raise ValueError(f"Expected 5 folds, got {len(fold_keys)}")
+	# Validate folds count against the configured single source (Phase 3
+	# executed correctly). The persisted payload is a schema-versioned
+	# superset, so count fold_* keys only: metadata keys (schema_version,
+	# feature_names, holdout, n_dates) are not folds.
+	fold_keys = _fold_keys(folds_metadata)
+	n_folds = cross_validator.N_FOLDS
+	if len(fold_keys) != n_folds:
+		raise ValueError(f"Expected {n_folds} folds, got {len(fold_keys)}")
 
 	# Validate features; a single vectorized scan is fine, X may be a memory map.
 	finite = np.isfinite(X)
@@ -221,8 +241,9 @@ def _validate_training_prerequisites(
 
 	# Validate every fold holds both sides (single minima implementation:
 	# validate_fold_minima).
-	for fold_idx in range(5):
-		fold_data = folds_metadata[f"fold_{fold_idx}"]
+	for fold_key in fold_keys:
+		fold_idx = int(fold_key.split("_", 1)[1])
+		fold_data = folds_metadata[fold_key]
 		validate_fold_minima(fold_idx, fold_data["train_indices"], fold_data["test_indices"])
 
 	logger.info(f"Pre-training validation passed")
@@ -271,7 +292,7 @@ def inner_validation_split(
 	reserved holdout window beyond it.
 
 	Args:
-		fold_idx: Fold index (0-4), used in error messages.
+		fold_idx: Fold index (0-based), used in error messages.
 		train_indices: Floor-retained fold-train row indices.
 		date_pos: Per-row position in the sorted unique trading dates.
 		y: Raw target array (floor-retained rows are required on both sides).
@@ -449,7 +470,7 @@ def _train_fold_model(
 	both persistence keys stay ``None``.
 
 	Args:
-		fold_idx: Fold index (0-4)
+		fold_idx: Fold index (0-based)
 		run_id: Run id of the owning run; scopes the checkpoint directory
 		X_train: Inner-fit features from fold_i_train
 		y_train: Inner-fit log-target from fold_i_train
@@ -587,7 +608,7 @@ def _train_fold_model(
 
 def _aggregate_fold_results(fold_predictions_list: list) -> tuple[dict, dict]:
 	"""
-	Aggregate predictions and metrics across all 5 folds.
+	Aggregate predictions and metrics across all folds.
 
 	Returns:
 		(validation_predictions, fold_training_summary)
@@ -757,7 +778,8 @@ def phase_4_training(
 	run: dict | None = None,
 ) -> tuple[dict, dict, list]:
 	"""
-	Orchestrate Phase 4: Train 5 fold-specific XGBoost models (1 per fold) with no temporal leakage.
+	Orchestrate Phase 4: Train one fold-specific XGBoost model per configured
+	fold with no temporal leakage.
 	Each fold_i_model trains exclusively on fold_i_train and is evaluated on fold_i_test.
 	Each fold also holds out the temporally last VALIDATION_TAIL_FRACTION of its
 	floor-retained training rows as a purged inner-validation tail; the model
@@ -829,13 +851,15 @@ def phase_4_training(
 	# instead of by stored row order.
 	_, date_pos = np.unique(metadata["date"], return_inverse=True)
 
-	# Train 5 models (1 per fold) with strict temporal separation
+	# Train one model per fold (the persisted payload's fold keys) with strict
+	# temporal separation.
+	fold_keys = _fold_keys(folds_metadata)
 	fold_predictions_list = []
 	fold_model_paths = []
 	har_benchmark_results = {}
 
-	for fold_idx in range(5):
-		fold_key = f"fold_{fold_idx}"
+	for fold_key in fold_keys:
+		fold_idx = int(fold_key.split("_", 1)[1])
 		fold_data = folds_metadata[fold_key]
 
 		# Extract fold-specific data under the single floor policy: the same
@@ -1000,10 +1024,15 @@ def phase_4_training(
 		har_benchmark_results,
 		coefficient_interpretation=coefficient_interpretation,
 	)
+	# One checkpoint and one parameter sidecar per trained fold; the indices
+	# come from the folds this run actually trained.
+	fold_indices = sorted(
+		int(fold_key.split("_", 1)[1]) for fold_key in fold_training_summary
+	)
 	record_artifacts(
 		run,
-		[fold_checkpoint_path(fold_idx, run_id) for fold_idx in range(5)]
-		+ [fold_params_path(fold_idx, run_id) for fold_idx in range(5)]
+		[fold_checkpoint_path(fold_idx, run_id) for fold_idx in fold_indices]
+		+ [fold_params_path(fold_idx, run_id) for fold_idx in fold_indices]
 		+ [
 			ARTIFACTS_DIR / "results" / "validation_predictions.pkl",
 			ARTIFACTS_DIR / "results" / "fold_training_summary.json",
@@ -1042,7 +1071,7 @@ def phase_4_training(
 		std_har_qlike = np.std([s["har_qlike"] for s in fold_training_summary.values()])
 		mean_har_r2 = np.mean([s["har_r2"] for s in fold_training_summary.values()])
 
-		logger.info(f"Phase 4 complete: 5 fold model(s), {total_test_samples:,} test samples total, {total_time:.1f}s ({total_train_time:.1f}s train + {total_inference_time:.1f}s inference)")
+		logger.info(f"Phase 4 complete: {len(fold_training_summary)} fold model(s), {total_test_samples:,} test samples total, {total_time:.1f}s ({total_train_time:.1f}s train + {total_inference_time:.1f}s inference)")
 		logger.info(f"Cross-validation results (GLOBAL): R²={mean_r2:.4f}±{std_r2:.4f}, MAE={mean_mae:.6f}±{std_mae:.6f}, RMSE={mean_rmse:.6f}±{std_rmse:.6f}")
 		logger.info(f"QLIKE (GLOBAL, log-target): model={mean_qlike:.6f}±{std_qlike:.6f} | HAR benchmark={mean_har_qlike:.6f}±{std_har_qlike:.6f} (R²={mean_har_r2:.4f})")
 
@@ -1066,7 +1095,7 @@ def phase_4_training(
 			logger.info(f"    └─ Train: {train_date_min} to {train_date_max} | Test: {test_date_min} to {test_date_max}")
 			logger.info(f"    └─ Timing: {train_time:.1f}s train + {inference_time:.1f}s inference")
 	else:
-		logger.info(f"Phase 4 complete: 5 fold model(s), {total_time:.1f}s (no valid metrics)")
+		logger.info(f"Phase 4 complete: {len(fold_training_summary)} fold model(s), {total_time:.1f}s (no valid metrics)")
 
 	if standalone:
 		record_phase(

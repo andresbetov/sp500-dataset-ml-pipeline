@@ -133,7 +133,7 @@ def _verify_fold_separation(
 
 def phase_3_cross_validation() -> dict:
     """
-    Date-group 5-fold cross-validation with a train-only purge and a holdout reserve.
+    Date-group cross-validation with a train-only purge and a holdout reserve.
 
     The final HOLDOUT_N_DATES unique trading dates are reserved as the holdout
     window before any fold construction, so no fold train or test row can fall
@@ -151,11 +151,12 @@ def phase_3_cross_validation() -> dict:
 
     The persisted payload is the schema-versioned superset: the schema version,
     the pinned feature names, the recorded holdout window, the remainder date
-    count, and the five fold records (which carry typed gap keys). The return
-    value stays the five-fold dict the orchestrator consumes.
+    count, and the configured fold records (which carry typed gap keys). The
+    return value stays the fold dict the orchestrator consumes.
 
     Returns:
-        folds: Dict with 5 folds containing train/test indices and date bounds
+        folds: Dict with the configured folds containing train/test indices and
+        date bounds
     """
     logger.info("Phase 3: Date-Group Cross-Validation Setup")
 
