@@ -440,6 +440,14 @@ def plot_feature_importance(predictions_dict: dict, summary_df: pd.DataFrame, ou
 def plot_error_by_volatility_bin(predictions_dict: dict, output_path: Path | None = None) -> Path:
     """Plot mean absolute error by actual volatility decile across folds.
 
+    ``pd.qcut(..., duplicates="drop")`` can realize fewer than ten bins when
+    the test target is constant or duplicate-heavy. The guard is warn-only:
+    the fold and the realized bin count are logged and the available bins
+    still render. Live folds realize ten of ten bins and never warn. A
+    constant ``test_true`` also makes sklearn's ``r2_score`` return 1.0 when
+    the forecasts match and 0.0 otherwise, never NaN; that metric convention
+    is intentional and is not a quarantine.
+
     Args:
         predictions_dict: Dict of fold predictions from load_validation_predictions()
         output_path: Where to save the figure. If None, uses default outputs_dir.
@@ -461,9 +469,24 @@ def plot_error_by_volatility_bin(predictions_dict: dict, output_path: Path | Non
         y_pred = fold_data["test_pred"]
         abs_errors = np.abs(y_true - y_pred)
 
-        # Bin actual volatility into deciles
-        deciles = pd.qcut(y_true, q=10, labels=False, duplicates="drop")
-        n_bins = deciles.max() + 1
+        # Bin actual volatility into deciles. ``duplicates="drop"`` collapses
+        # duplicate quantile edges, so a constant or duplicate-heavy target can
+        # realize fewer than ten bins (a constant target realizes none). The
+        # guard is warn-only: name the fold and the realized count, then render
+        # the bins that exist. Live folds are 10/10.
+        deciles = np.asarray(
+            pd.qcut(y_true, q=10, labels=False, duplicates="drop"),
+            dtype=np.float64,
+        )
+        finite_deciles = deciles[np.isfinite(deciles)]
+        n_bins = int(finite_deciles.max()) + 1 if finite_deciles.size else 0
+        if n_bins < 10:
+            logger.warning(
+                "Volatility decile collapse for %s: pd.qcut realized %d of 10 "
+                "bins; rendering the bins that exist",
+                fold_name,
+                n_bins,
+            )
 
         bin_centers = []
         bin_means = []
