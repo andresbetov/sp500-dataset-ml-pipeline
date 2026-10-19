@@ -89,8 +89,12 @@ def main(dry_run: bool = False) -> None:
         logger.info("Phase 4: Model Training")
         validation_predictions, fold_training_summary, fold_model_paths = phase_4_training(run=run)
         logger.info(f"Phase 4 complete: {len(fold_model_paths)} models trained")
-        mean_qlike = np.mean([summary["test_qlike"] for summary in fold_training_summary.values()])
-        mean_har_qlike = np.mean([summary["har_qlike"] for summary in fold_training_summary.values()])
+        # Quarantined folds carry NaN metrics; the global means filter them.
+        # The phase's run record holds the n_valid/n_total counts and the
+        # quarantine records, and it raises before returning when no fold is
+        # valid.
+        mean_qlike = np.nanmean([summary["test_qlike"] for summary in fold_training_summary.values()])
+        mean_har_qlike = np.nanmean([summary["har_qlike"] for summary in fold_training_summary.values()])
         logger.info(f"Evaluation: mean QLIKE {mean_qlike:.6f} (HAR benchmark {mean_har_qlike:.6f})")
         record_phase(
             run,
