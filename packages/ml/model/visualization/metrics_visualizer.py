@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 from packages.ml.model.visualization.data_loader import load_fold_training_summary
+from packages.ml.model.visualization.plotting import render_plot
 
 logger = logging.getLogger(__name__)
 
@@ -184,7 +185,10 @@ def plot_metric_heatmap(summary_df: pd.DataFrame, output_path: Path | None = Non
     return output_path
 
 
-def generate_metrics_visualizations(summary_df: pd.DataFrame | None = None, output_dir: Path | None = None) -> list[Path]:
+def generate_metrics_visualizations(
+    summary_df: pd.DataFrame | None = None,
+    output_dir: Path | None = None,
+) -> list[Path]:
     """
     Generate all regression metric visualizations.
 
@@ -204,11 +208,22 @@ def generate_metrics_visualizations(summary_df: pd.DataFrame | None = None, outp
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    paths = [
-        plot_r2_scores(summary_df, output_dir / "r2_scores_by_fold.png"),
-        plot_mae_rmse_comparison(summary_df, output_dir / "mae_rmse_comparison.png"),
-        plot_metric_heatmap(summary_df, output_dir / "metrics_heatmap.png"),
+    plots = [
+        ("r2_scores_by_fold", plot_r2_scores),
+        ("mae_rmse_comparison", plot_mae_rmse_comparison),
+        ("metrics_heatmap", plot_metric_heatmap),
     ]
+
+    paths = []
+    for plot_name, plot_function in plots:
+        path = render_plot(
+            "metrics",
+            plot_name,
+            lambda output_path, render=plot_function: render(summary_df, output_path),
+            output_dir,
+        )
+        if path is not None:
+            paths.append(path)
 
     logger.info(f"Generated {len(paths)} metric visualizations")
     return paths

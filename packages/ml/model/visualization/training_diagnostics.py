@@ -19,6 +19,7 @@ from packages.ml.model.features.feature_engineering import INDICATORS
 from packages.ml.model.run_log import resolve_stored_path
 from packages.ml.model.utils import ARTIFACTS_DIR
 from packages.ml.model.visualization.data_loader import load_fold_training_summary
+from packages.ml.model.visualization.plotting import render_plot
 
 logger = logging.getLogger(__name__)
 
@@ -525,8 +526,11 @@ def plot_error_by_volatility_bin(predictions_dict: dict, output_path: Path | Non
     return output_path
 
 
-def generate_training_diagnostics(predictions_dict: dict | None = None, summary_df: pd.DataFrame | None = None,
-                                  output_dir: Path | None = None) -> list[Path]:
+def generate_training_diagnostics(
+    predictions_dict: dict | None = None,
+    summary_df: pd.DataFrame | None = None,
+    output_dir: Path | None = None,
+) -> list[Path]:
     """Generate all training diagnostic visualizations.
 
     Args:
@@ -549,12 +553,36 @@ def generate_training_diagnostics(predictions_dict: dict | None = None, summary_
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    paths = [
-        plot_actual_vs_predicted(predictions_dict, output_dir / "actual_vs_predicted.png"),
-        plot_residuals(predictions_dict, output_dir / "residuals_distribution.png"),
-        plot_feature_importance(predictions_dict, summary_df, output_dir / "feature_importance.png"),
-        plot_error_by_volatility_bin(predictions_dict, output_dir / "error_by_volatility_bin.png"),
+    plots = [
+        (
+            "actual_vs_predicted",
+            lambda output_path: plot_actual_vs_predicted(
+                predictions_dict, output_path
+            ),
+        ),
+        (
+            "residuals_distribution",
+            lambda output_path: plot_residuals(predictions_dict, output_path),
+        ),
+        (
+            "feature_importance",
+            lambda output_path: plot_feature_importance(
+                predictions_dict, summary_df, output_path
+            ),
+        ),
+        (
+            "error_by_volatility_bin",
+            lambda output_path: plot_error_by_volatility_bin(
+                predictions_dict, output_path
+            ),
+        ),
     ]
+
+    paths = []
+    for plot_name, plot_function in plots:
+        path = render_plot("diagnostics", plot_name, plot_function, output_dir)
+        if path is not None:
+            paths.append(path)
 
     logger.info("Generated %d training diagnostic visualizations", len(paths))
     return paths
