@@ -72,6 +72,9 @@ REQUIRED_RECORD_KEYS = {
 class _ConstantModel:
     """Picklable stand-in fold model: predicts the log-target mean (zero)."""
 
+    def get_params(self) -> dict:
+        return {"n_estimators": 1, "missing": float("nan")}
+
     def predict(self, X: np.ndarray) -> np.ndarray:
         return np.zeros(len(X), dtype=np.float64)
 
@@ -323,9 +326,13 @@ def test_phase_4_records_folds_and_artifacts_into_the_caller_run() -> None:
             f"fold_{fold_idx}" for fold_idx in range(5)
         ]
         assert record["phases"] == [], "phase timing belongs to the orchestrator"
-        assert len(record["artifacts"]) == 8, record["artifacts"]
+        assert len(record["artifacts"]) == 13, record["artifacts"]
         assert any(
             key.endswith(f"checkpoints/{run['run_id']}/fold_0.pkl")
+            for key in record["artifacts"]
+        )
+        assert any(
+            key.endswith(f"checkpoints/{run['run_id']}/fold_0_params.json")
             for key in record["artifacts"]
         )
         assert any(
