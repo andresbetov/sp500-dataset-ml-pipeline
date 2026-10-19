@@ -9,15 +9,88 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from packages.ml.model.visualization.data_loader import load_fold_training_summary
+from packages.ml.model.visualization.data_loader import (
+    QLIKE_GAP_SIGN_CONVENTION,
+    extract_qlike_stats,
+    load_fold_training_summary,
+)
 from packages.ml.model.visualization.plotting import render_plot
 
 logger = logging.getLogger(__name__)
 
+R2_UNIT = "dimensionless"
+LOG_POINT_UNIT = "log points"
+
+# The QLIKE clause is the shared extractor's definition, not a local copy, so
+# the two cannot drift. R² is oriented the same way because higher R² is the
+# better score.
+BENCHMARK_GAP_SIGN_CONVENTION = (
+    f"Gap convention: {QLIKE_GAP_SIGN_CONVENTION}; "
+    "R² gap = test_r2 - har_r2 (positive = model better than HAR)."
+)
+
+
+def _finite_float(value: object) -> float | None:
+    """Coerce a cell to a finite float, or ``None`` when it is not finite."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if np.isfinite(number) else None
+
+
+def _benchmark_records(summary_df: pd.DataFrame) -> pd.DataFrame:
+    """Build the per-fold absolutes and model-vs-HAR gap records for the table.
+
+    QLIKE values and gaps come from the shared stats extractor, whose gap is
+    ``har_qlike - test_qlike``. The R² gap is oriented the same way (positive =
+    model better): ``test_r2 - har_r2``. Missing optional inputs stay ``None``.
+    """
+    qlike_stats = extract_qlike_stats(summary_df)
+    records = []
+    for position, fold in enumerate(summary_df["fold"].astype(str)):
+        shared = qlike_stats["per_fold"].get(fold, {})
+        test_r2 = _finite_float(summary_df["test_r2"].iloc[position])
+        har_r2 = shared.get("har_r2")
+        records.append(
+            {
+                "fold": fold,
+                "test_r2": test_r2,
+                "test_mae": _finite_float(summary_df["test_mae"].iloc[position]),
+                "test_rmse": _finite_float(summary_df["test_rmse"].iloc[position]),
+                "har_r2": har_r2,
+                "r2_gap": (
+                    test_r2 - har_r2
+                    if test_r2 is not None and har_r2 is not None
+                    else None
+                ),
+                "test_qlike": shared.get("test_qlike"),
+                "har_qlike": shared.get("har_qlike"),
+                "qlike_gap": shared.get("qlike_gap"),
+            }
+        )
+    return pd.DataFrame(records)
+
+
+def _format_value(value: float | None) -> str:
+    return "n/a" if value is None else f"{value:.4f}"
+
+
+def _format_gap(value: float | None) -> str:
+    return "n/a" if value is None else f"{value:+.4f}"
+
 
 def plot_metrics_comparison(summary_df: pd.DataFrame, output_path: Path | None = None) -> Path:
     """
-    Create grouped bar chart of R², MAE, and RMSE across folds with normalized overlay.
+    Plot one absolute-value panel per metric and a per-fold benchmark-gap table.
+
+    R² is dimensionless; MAE and RMSE are log points on the log target. Each
+    metric gets its own axis so the units never share a scale. The table keeps
+    the absolute values and adds the model-vs-HAR QLIKE and R² gaps under the
+    figure's single sign convention.
+
+    Only absolute values are drawn: no normalized score is rendered, so a
+    constant metric cannot produce a 1.0/0.0 tie artifact.
 
     Args:
         summary_df: DataFrame from load_fold_training_summary()
@@ -33,52 +106,115 @@ def plot_metrics_comparison(summary_df: pd.DataFrame, output_path: Path | None =
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     fold_nums = summary_df["fold"].str.extract(r'fold_(\d+)')[0].astype(int).values
-    r2_scores = summary_df["test_r2"].values
-    mae_values = summary_df["test_mae"].values
-    rmse_values = summary_df["test_rmse"].values
-
-    # Normalize each metric to [0, 1] for overlay comparison
-    def normalize(arr: np.ndarray) -> np.ndarray:
-        min_val, max_val = arr.min(), arr.max()
-        if max_val == min_val:
-            return np.ones_like(arr)
-        return (arr - min_val) / (max_val - min_val)
-
-    r2_norm = normalize(r2_scores)
-    mae_norm = 1 - normalize(mae_values)  # Invert so lower=better maps to higher score
-    rmse_norm = 1 - normalize(rmse_values)
-
     x = np.arange(len(fold_nums))
-    width = 0.25
 
-    fig, ax1 = plt.subplots(figsize=(12, 7))
+    panel_specs = (
+        ("test_r2", "R²", f"R² ({R2_UNIT}; higher is better)", "steelblue"),
+        ("test_mae", "MAE", f"MAE ({LOG_POINT_UNIT}; lower is better)", "coral"),
+        ("test_rmse", "RMSE", f"RMSE ({LOG_POINT_UNIT}; lower is better)", "lightgreen"),
+    )
 
-    bars_r2 = ax1.bar(x - width, r2_scores, width, label="R²", color="steelblue", alpha=0.8, edgecolor="black")
-    bars_mae = ax1.bar(x, mae_values, width, label="MAE", color="coral", alpha=0.8, edgecolor="black")
-    bars_rmse = ax1.bar(x + width, rmse_values, width, label="RMSE", color="lightgreen", alpha=0.8, edgecolor="black")
+    fig = plt.figure(figsize=(18, 11))
+    grid = fig.add_gridspec(2, 3, height_ratios=(1.0, 0.85))
+    axes = [fig.add_subplot(grid[0, column]) for column in range(3)]
+    table_axis = fig.add_subplot(grid[1, :])
+    table_axis.axis("off")
 
-    ax1.set_xlabel("Fold", fontsize=12, fontweight="bold")
-    ax1.set_ylabel("Actual Value", fontsize=12, fontweight="bold")
-    ax1.set_title("Regression Metrics Comparison Across Folds\n(Bars=Actual, Lines=Normalized [0=worst, 1=best])",
-                  fontsize=14, fontweight="bold")
-    ax1.set_xticks(x)
-    ax1.set_xticklabels([f"Fold {n}" for n in fold_nums])
-    ax1.grid(axis="y", alpha=0.3)
+    for axis, (column, metric_name, ylabel, color) in zip(axes, panel_specs):
+        values = summary_df[column].to_numpy(dtype=np.float64)
+        bars = axis.bar(x, values, color=color, alpha=0.8, edgecolor="black")
 
-    # Secondary axis for normalized scores
-    ax2 = ax1.twinx()
-    ax2.plot(x, r2_norm, marker="o", linewidth=2, markersize=7, color="steelblue", label="R² (norm)")
-    ax2.plot(x, mae_norm, marker="s", linewidth=2, markersize=7, color="coral", label="MAE (norm)")
-    ax2.plot(x, rmse_norm, marker="^", linewidth=2, markersize=7, color="lightgreen", label="RMSE (norm)")
-    ax2.set_ylabel("Normalized Score (1=best)", fontsize=12, fontweight="bold")
-    ax2.set_ylim([-0.1, 1.1])
+        axis.set_xlabel("Fold", fontsize=12, fontweight="bold")
+        axis.set_ylabel(ylabel, fontsize=12, fontweight="bold")
+        axis.set_title(
+            f"{metric_name} by Fold (absolute values)",
+            fontsize=13,
+            fontweight="bold",
+        )
+        axis.set_xticks(x)
+        axis.set_xticklabels([f"Fold {n}" for n in fold_nums])
+        axis.grid(axis="y", alpha=0.3)
+        axis.margins(y=0.15)
+        if column == "test_r2":
+            axis.axhline(0.0, color="black", linewidth=0.8, alpha=0.6)
 
-    # Combined legend
-    lines1, labels1 = ax1.get_legend_handles_labels()
-    lines2, labels2 = ax2.get_legend_handles_labels()
-    ax1.legend(lines1 + lines2, labels1 + labels2, loc="upper left", fontsize=10)
+        for bar, value in zip(bars, values):
+            if not np.isfinite(value):
+                continue
+            axis.text(
+                bar.get_x() + bar.get_width() / 2.0,
+                value,
+                f"{value:.4f}",
+                ha="center",
+                va="bottom" if value >= 0 else "top",
+                fontsize=9,
+                fontweight="bold",
+            )
 
-    plt.tight_layout()
+    records = _benchmark_records(summary_df)
+    headers = (
+        "Fold",
+        f"R² ({R2_UNIT})",
+        f"MAE ({LOG_POINT_UNIT})",
+        f"RMSE ({LOG_POINT_UNIT})",
+        "HAR R²",
+        "R² gap",
+        "Model QLIKE",
+        "HAR QLIKE",
+        "QLIKE gap",
+    )
+    cells = [
+        (
+            str(record.fold),
+            _format_value(record.test_r2),
+            _format_value(record.test_mae),
+            _format_value(record.test_rmse),
+            _format_value(record.har_r2),
+            _format_gap(record.r2_gap),
+            _format_value(record.test_qlike),
+            _format_value(record.har_qlike),
+            _format_gap(record.qlike_gap),
+        )
+        for record in records.itertuples(index=False)
+    ]
+    table = table_axis.table(
+        cellText=cells,
+        colLabels=headers,
+        loc="center",
+        cellLoc="center",
+        colWidths=(0.07, 0.11, 0.11, 0.11, 0.10, 0.10, 0.11, 0.11, 0.11),
+    )
+    table.auto_set_font_size(False)
+    table.set_fontsize(9)
+    table.scale(1.0, 1.45)
+    for (row, _column), cell in table.get_celld().items():
+        if row == 0:
+            cell.set_text_props(weight="bold")
+            cell.set_facecolor("#e8e8e8")
+    table_axis.set_title(
+        "Absolute metrics and benchmark gaps per fold",
+        fontsize=13,
+        fontweight="bold",
+        pad=12,
+    )
+
+    fig.suptitle(
+        "Regression Metrics and HAR Benchmark Gaps Across Folds",
+        fontsize=15,
+        fontweight="bold",
+    )
+    table_axis.text(
+        0.5,
+        -0.06,
+        BENCHMARK_GAP_SIGN_CONVENTION,
+        transform=table_axis.transAxes,
+        ha="center",
+        va="top",
+        fontsize=9,
+        style="italic",
+    )
+
+    fig.tight_layout(rect=(0, 0, 1, 0.95))
     plt.savefig(output_path, dpi=300, bbox_inches="tight")
     logger.info(f"Saved metrics comparison plot to {output_path}")
     plt.close()
