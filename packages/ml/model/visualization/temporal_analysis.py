@@ -6,7 +6,6 @@ import logging
 from pathlib import Path
 
 import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
 import pandas as pd
 
 from packages.ml.model.visualization.data_loader import load_fold_training_summary

@@ -40,3 +40,11 @@ phase/fold status, durations, artifact hashes) and is written atomically.
 `packages/ml/model/artifacts/baseline_v1/` is retained with a provenance
 `README.md` and hash `manifest.json`; removal requires an explicit owner
 override, and the override is appended to `runs.jsonl`.
+
+## Stale directories
+
+`packages/ml/model/artifacts/legacy/` is created empty by the entry point and
+Phase 2. No pipeline phase writes files to or reads files from it; it is
+retained in place (no deletion path) and is not an output root. The model
+package README (`packages/ml/model/README.md`) documents both this directory
+and the retained baseline snapshot above.

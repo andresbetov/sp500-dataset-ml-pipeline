@@ -16,6 +16,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import seaborn as sns
 
 from packages.ml.model.visualization.data_loader import load_fold_training_summary
 from packages.ml.model.visualization.plotting import (
@@ -263,8 +264,6 @@ def plot_metric_heatmap(summary_df: pd.DataFrame, output_path: Path | None = Non
     metrics_df["fold"] = metrics_df["fold"].str.extract(r'fold_(\d+)')[0].astype(int)
     metrics_df = metrics_df.set_index("fold")
     metrics_scores = _heatmap_scores(metrics_df)
-
-    import seaborn as sns
 
     fig, ax = plt.subplots(figsize=(10, 6))
 
