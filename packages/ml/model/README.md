@@ -61,6 +61,12 @@ python -m packages.ml.model.main --folds 0,2
 
 # Continue the latest run manifest, reusing complete verified fold records
 python -m packages.ml.model.main --resume
+
+# After the normal phases, evaluate the reserved holdout once under the lock
+python -m packages.ml.model.main --evaluate-holdout
+
+# Override an already locked holdout with an explicitly recorded reason
+python -m packages.ml.model.main --force-holdout "explicit review reason"
 ```
 
 `--resume` requires the manifest's run id, config hash, fold-manifest hash, and
@@ -72,6 +78,24 @@ instead of falling back to a fresh run. Retention keeps the newest
 `runs.jsonl` is append-only and is never pruned. The full command and flag
 contract is in the repository [`README.md`](../../../README.md) and
 [`AGENTS.md`](../../../AGENTS.md).
+
+## Locked holdout
+
+The holdout is opt-in and one-shot. The first `--evaluate-holdout` writes
+`artifacts/results/holdout_lock.json` and records the lock in
+`run_manifest.json` before any holdout metric exists. The lock binds the frozen
+selection recipe, the Phase-2 dataset pin and derived `X`/`Y` hashes, the
+fold-manifest hash, and the reserved bounds. The manifest carries the full lock
+payload and every new run manifest carries the latest holdout block forward;
+the append-only `runs.jsonl` is the fallback if a manifest lost it, so an
+ordinary run cannot erase the lock and a lost results lock is restored and
+remains binding. The evaluation
+is one final refit on the purged remainder plus the HAR-RV benchmark on the
+same rows, predicting the holdout block once; the result lands in
+`results/holdout_report.json` with `results/SHA256SUMS`. A second evaluation
+raises `HoldoutLockError`, a post-lock resume records a skipped holdout, and
+`--force-holdout <reason>` appends to `results/holdout_overrides.jsonl` without
+accepting a changed lock identity.
 
 ## Legacy and stale directories
 

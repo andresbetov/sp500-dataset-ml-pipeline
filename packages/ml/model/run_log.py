@@ -21,6 +21,8 @@ Every model run records one JSON object with its identity and outcome:
       "duration_seconds": <float> | null,
       "phases": [{"phase": ..., "status": ..., "duration_seconds": ...}, ...],
       "folds": [{"fold": "fold_0", "status": ..., "duration_seconds": ...}, ...],
+      "holdout": {"status": ..., "lock_sha256": "<64-hex>",       # absent before a lock
+                  "bounds": {"start": ..., "end": ...}, ...},
       "artifacts": {"<repo-relative path>": "<sha256 hex>", ...},
       "error": "<type>: <message>" | null,
       "selection": {"run_id": ..., "trial_index": ..., "config_hash": ...,  # absent without one
@@ -549,6 +551,31 @@ def resolve_stored_path(
     return Path(os.path.normpath(root / candidate))
 
 
+def _previous_holdout(artifacts_dir: Path) -> dict[str, Any] | None:
+    """The latest manifest's holdout block, if it carries a lock record.
+
+    ``run_manifest.json`` is overwritten by every run. Carrying the holdout
+    block into each new run record keeps the one-shot lock durable across
+    ordinary runs that do not evaluate the holdout; the append-only
+    ``runs.jsonl`` remains a second fallback. An unreadable or absent manifest
+    yields no carried block rather than failing the new run.
+    """
+    manifest_path = artifacts_dir / MANIFEST_FILENAME
+    if not manifest_path.is_file():
+        return None
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as handle:
+            document = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(document, dict):
+        return None
+    record = document.get("holdout")
+    if isinstance(record, Mapping) and record.get("lock_sha256"):
+        return dict(record)
+    return None
+
+
 def new_run(
     phase: str,
     artifacts_dir: Path | str | None = None,
@@ -587,6 +614,12 @@ def new_run(
         "_started_monotonic": time.monotonic(),
         "_pending_artifacts": [],
     }
+    # Carry the latest holdout lock block into every new manifest so an
+    # ordinary pipeline run cannot erase the one-shot record merely by
+    # overwriting run_manifest.json.
+    carried_holdout = _previous_holdout(record["_artifacts_dir"])
+    if carried_holdout is not None:
+        record["holdout"] = carried_holdout
     # Persist a run-start manifest for a fresh run so a hard interruption
     # before finish_run still leaves the identity a later --resume needs. A
     # resumed run keeps the existing manifest until its state write, so the
@@ -621,6 +654,34 @@ def record_fold(
             "duration_seconds": float(duration_seconds),
         }
     )
+
+
+def record_holdout(
+    run: dict[str, Any], record: Mapping[str, Any]
+) -> None:
+    """Set the run record's holdout block (lock, skip, or evaluation).
+
+    The holdout block is the manifest-side one-shot record: it carries the
+    lock hash, the full lock payload, and the reserved bounds before any
+    holdout metric exists, and is replaced by the evaluated/skipped status and
+    report hashes afterwards. The payload makes the manifest record binding on
+    its own: a lost results lock can be verified and restored from it. Required
+    keys fail by name so a partial record cannot enter a manifest.
+    """
+    if not isinstance(record, Mapping):
+        raise TypeError(
+            f"holdout record must be a mapping, got {type(record).__name__}"
+        )
+    missing = [
+        key
+        for key in ("status", "lock_sha256", "bounds")
+        if key not in record
+    ]
+    if missing:
+        raise ValueError(
+            f"holdout record is missing required key(s): {', '.join(missing)}"
+        )
+    run["holdout"] = dict(record)
 
 
 def record_artifacts(run: dict[str, Any], paths: Iterable[Path | str]) -> None:

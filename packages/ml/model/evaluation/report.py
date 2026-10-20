@@ -811,6 +811,11 @@ def calibration_stub() -> dict:
     }
 
 
+def post_hoc_adjustment() -> dict:
+    """The declared post-hoc adjustment status block (not applied)."""
+    return calibration_stub()
+
+
 def _inference_roles() -> dict:
     """The role labels that keep the two variance estimates distinguishable."""
     return {

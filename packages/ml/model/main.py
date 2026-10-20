@@ -13,6 +13,7 @@ if __name__ == "__main__" and __package__ is None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
     __package__ = "packages.ml.model"
 
+from packages.ml.model.evaluation import holdout
 from packages.ml.model.features.feature_engineering import phase_2_feature_selection
 from packages.ml.model.cross_validation.cross_validator import phase_3_cross_validation
 from packages.ml.model.training.training import parse_fold_selection, phase_4_training
@@ -42,6 +43,8 @@ def main(
     dry_run: bool = False,
     resume: bool = False,
     folds: list[int] | None = None,
+    evaluate_holdout: bool = False,
+    force_holdout: str | None = None,
 ) -> None:
     """Orchestrate ML pipeline: Phase 2 → Phase 3 → Phase 4 → Phase 5 (Visualization).
 
@@ -54,7 +57,20 @@ def main(
     ``resume`` continues the latest manifest's run id after validating its
     config hash and fold-manifest hash; ``folds`` limits training to the named
     fold indices. With neither argument the full run is unchanged.
+
+    ``evaluate_holdout`` requests the one-shot locked holdout evaluation after
+    the normal phases; without it the holdout window is never read. A resumed
+    run that already holds a lock records a skipped holdout instead of
+    re-scoring. ``force_holdout`` is the explicit override reason for an
+    already locked holdout and implies ``evaluate_holdout``.
     """
+    if force_holdout is not None:
+        if not isinstance(force_holdout, str) or not force_holdout.strip():
+            raise ValueError(
+                "--force-holdout requires a non-empty reason"
+            )
+        force_holdout = force_holdout.strip()
+        evaluate_holdout = True
     setup_logging()
     selection = parse_fold_selection(folds) if folds is not None else None
     if dry_run:
@@ -67,6 +83,10 @@ def main(
             planned += f"; folds {selection}"
         if resume:
             planned += "; resume the latest manifest identity"
+        if evaluate_holdout:
+            planned += "; locked holdout evaluation once"
+            if force_holdout is not None:
+                planned += f" (override: {force_holdout})"
         logger.info(planned)
         return
 
@@ -164,6 +184,36 @@ def main(
             time.perf_counter() - phase_started,
         )
 
+        # Locked holdout: opt-in only, after the normal pipeline is healthy.
+        # The lock and its manifest record are written before the refit and
+        # every metric; a resumed run with an existing lock records a skip.
+        if evaluate_holdout:
+            phase_started = time.perf_counter()
+            logger.info("Holdout: locked one-shot evaluation")
+            holdout_result = holdout.evaluate_holdout(
+                run=run,
+                artifacts_dir=ARTIFACTS_DIR,
+                resume=resume,
+                force_reason=force_holdout,
+            )
+            holdout_status = holdout_result["status"]
+            record_phase(
+                run,
+                "holdout_evaluation",
+                holdout_status,
+                time.perf_counter() - phase_started,
+            )
+            if holdout_status == "skipped":
+                logger.info(
+                    "Holdout: already locked; the resumed run recorded a skip "
+                    "instead of re-evaluating"
+                )
+            else:
+                logger.info(
+                    f"Holdout: final report written to "
+                    f"{holdout_result['report_path']}"
+                )
+
     except Exception as e:
         logger.error(f"Pipeline failed: {e}", exc_info=True)
         finish_run(run, status="failed", error=f"{type(e).__name__}: {e}")
@@ -197,13 +247,35 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="0,2",
         help="comma-separated fold indices to train (default: every fold)",
     )
+    parser.add_argument(
+        "--evaluate-holdout",
+        action="store_true",
+        help="after the normal phases, evaluate the already reserved holdout "
+        "once under the written lock and produce the final report",
+    )
+    parser.add_argument(
+        "--force-holdout",
+        default=None,
+        metavar="REASON",
+        help="re-evaluate an already locked holdout; the non-empty reason is "
+        "appended to the override record (implies --evaluate-holdout)",
+    )
     return parser
 
 
 def cli(argv: list[str] | None = None) -> None:
     """Parse the CLI and run the pipeline."""
-    args = build_parser().parse_args(argv)
-    main(dry_run=args.dry_run, resume=args.resume, folds=args.folds)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.force_holdout is not None and not args.force_holdout.strip():
+        parser.error("--force-holdout requires a non-empty reason")
+    main(
+        dry_run=args.dry_run,
+        resume=args.resume,
+        folds=args.folds,
+        evaluate_holdout=args.evaluate_holdout,
+        force_holdout=args.force_holdout,
+    )
 
 
 if __name__ == "__main__":

@@ -35,6 +35,26 @@ retention prunes directories, never log lines. `run_manifest.json` records the
 latest run (identity, config hash, fold-manifest hash, fold selection,
 phase/fold status, durations, artifact hashes) and is written atomically.
 
+## Locked holdout
+
+The holdout evaluation is opt-in (`--evaluate-holdout`) and one-shot. The
+first evaluation writes `results/holdout_lock.json` and records its SHA-256,
+bounds, and full lock payload in the run manifest before the final refit or any
+holdout metric. The lock hashes the frozen selection recipe, the Phase-2
+dataset pin and derived `X`/`Y` hashes, the fold-manifest hash, and the reserved
+bounds. The manifest record is binding: every new run manifest carries the
+latest holdout block forward, and the append-only `runs.jsonl` is the fallback
+when a manifest has lost it. A lost results lock is restored from either source
+and remains a refusal/skip, never a silent re-evaluation. A second evaluation
+raises `HoldoutLockError`; a post-lock resume records a skipped holdout instead
+of re-scoring; `--force-holdout <reason>` requires a recorded lock, appends an
+override record to `results/holdout_overrides.jsonl`, and still refuses a
+changed lock identity. The evaluation writes `results/holdout_model.pkl`,
+`results/holdout_predictions.pkl`, `results/holdout_report.json` (protocol,
+holdout metrics, config hash, git sha, environment reference, artifact
+hashes), and `results/SHA256SUMS` over the report and its sibling holdout
+artifacts.
+
 ## Baseline provenance
 
 `packages/ml/model/artifacts/baseline_v1/` is retained with a provenance

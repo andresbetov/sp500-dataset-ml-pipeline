@@ -51,7 +51,7 @@ python -m packages.ml.model.main
 # writes model artifacts and charts (see Outputs)
 ```
 
-Both phases work from the repository root or from inside their own package directory, and the model phase runs the same through either form above. The model entry accepts `--dry-run` (log the plan and exit), `--resume` (continue the latest run), and `--folds` (train a subset of fold indices):
+Both phases work from the repository root or from inside their own package directory, and the model phase runs the same through either form above. The model entry accepts `--dry-run` (log the plan and exit), `--resume` (continue the latest run), `--folds` (train a subset of fold indices), and the opt-in locked-holdout entry:
 
 ```bash
 # Plan only — no writes, same phases as a full run
@@ -63,7 +63,32 @@ python -m packages.ml.model.main --folds 0,2
 # Continue the latest run, reusing complete per-fold sidecars and training
 # only the folds that are missing or fail identity/hash verification
 python -m packages.ml.model.main --resume
+
+# After the normal phases, evaluate the already reserved holdout once under
+# the written lock and produce the final report
+python -m packages.ml.model.main --evaluate-holdout
+
+# Re-evaluate an already locked holdout; the reason is appended to the
+# override record (implies --evaluate-holdout)
+python -m packages.ml.model.main --force-holdout "explicit review reason"
 ```
+
+`--evaluate-holdout` is the only path that reads the reserved window; a run
+without it never touches the holdout. The first evaluation writes
+`results/holdout_lock.json` and records it in `run_manifest.json` before any
+holdout metric is computed. The lock is the SHA-256 of the frozen selection
+recipe (hyperparameters plus seed/thread policy), the Phase-2 dataset pin and
+derived `X`/`Y` hashes, the fold-manifest hash, and the recorded holdout
+bounds. The manifest carries the full lock payload and every new run manifest
+carries the latest holdout block forward; the append-only `runs.jsonl` is the
+fallback if a manifest lost it. Losing the results lock therefore does not
+silently un-evaluate the holdout: it is restored from the manifest or the last
+holdout-bearing log record and remains binding. A second evaluation raises
+`HoldoutLockError`; a post-lock
+`--resume --evaluate-holdout` records a skipped holdout instead of re-scoring.
+Only `--force-holdout <reason>` bypasses the already-evaluated refusal, and it
+appends the reason to `results/holdout_overrides.jsonl` while still refusing a
+changed config, dataset pin, input hash, fold hash, or bounds.
 
 `--resume` reads `packages/ml/model/artifacts/run_manifest.json` and requires the manifest's `run_id`, `config_hash`, `fold_manifest_hash`, and `input_identity` (dataset SHA-256 plus the persisted `X.npy`/`Y.npy` hashes). A missing identity, a config/fold-construction mismatch, or a changed dataset/input digest refuses by name instead of silently starting a fresh run; the persisted inputs and fold payload are verified before Phases 2/3 can rewrite them. A fold is skipped only when its checkpoint, parameter sidecar, summary record, and predictions record are all present and match their artifact-registry size/SHA-256 entries, and the summary's recorded predictions hash matches the predictions file. The run manifest records `fold_selection` (`requested`, `trained`, `resumed`) and `partial` for every invocation; a subset run also writes `results/run_selection.json`, while a full run keeps exactly five fold rows. Neither flag changes the no-argument full run.
 
@@ -105,7 +130,7 @@ Phase 1 feature code lives in `packages/ml/dataset/features/` (one family per mo
 | `packages/ml/model/artifacts/inputs/` | 2 | `X.npy`, `Y.npy`, `metadata.pkl` — exactly what training consumes |
 | `packages/ml/model/artifacts/folds/` | 3 | Fold indices and date ranges for temporal validation |
 | `packages/ml/model/artifacts/checkpoints/` | 4 | One trained model per fold plus its `fold_<i>_params.json` hyperparameter sidecar, `fold_<i>_summary.json` metric/identity record, and `fold_<i>_predictions.pkl` resume record, under a run-scoped `<run_id>/` directory; each file is written atomically (tmp + rename), and each kept run directory carries a provenance `README.md` |
-| `packages/ml/model/artifacts/results/` | 1, 4 | `fold_training_summary.json` (per-fold metrics), `har_benchmark.json` (HAR-RV benchmark per fold), `per_row_losses.parquet` (per-row loss vectors), `evaluation_summary.json` (evaluation report statistics), `run_selection.json` (partial/selection record), `regime_characterization.json`, predictions |
+| `packages/ml/model/artifacts/results/` | 1, 4, holdout | `fold_training_summary.json` (per-fold metrics), `har_benchmark.json` (HAR-RV benchmark per fold), `per_row_losses.parquet` (per-row loss vectors), `evaluation_summary.json` (evaluation report statistics), `run_selection.json` (partial/selection record), `regime_characterization.json`, predictions; the opt-in holdout writes `holdout_lock.json`, `holdout_predictions.pkl`, `holdout_model.pkl`, `holdout_report.json`, `SHA256SUMS`, and `holdout_overrides.jsonl` |
 | `packages/ml/model/artifacts/results/seed_sweep.json` | explicit | Seed × fold validation sweep with the determinism policy, environment, and fold-manifest digest (`python -m packages.ml.model.determinism`) |
 | `packages/ml/model/artifacts/` | 2-5 | `runs.jsonl` (append-only run log: one strict-JSON line per run, never pruned), `run_manifest.json` (latest run: identity, config hash, fold selection, environment versions, phase/fold status, durations, artifact hashes, written atomically), `artifact_registry.json` (byte size + sha256 per recorded artifact, updated atomically at write time; every live `joblib.load` verifies against it before loading). Run-scoped directories are pruned to the newest `run.retention` |
 | `data/model_outputs/` | 5 | 14 PNG evaluation charts |
@@ -127,6 +152,8 @@ Six dataset columns are infinite-memory recursions rather than windowed statisti
 One `XGBRegressor` per fold, hyperparameters frozen in `packages/ml/model/config/base.yaml` (`training.hyperparameters`) and derived by the trainer at call time. Keeping one model per fold prevents any fold from being influenced by another fold's evaluation data. Edit hazards in the training path — including a dead early-stopping branch — are listed in AGENTS.md.
 
 The target is modeled as `log(RV)` — the Yang-Zhang variance is closer to log-normal, and QLIKE is the robust loss for it. Exact-zero flat windows are floor artifacts: they are floored at `1e-12` only to keep the log finite, and one floor policy excludes them from fold fitting, model scoring, and the HAR benchmark. Each fold persists the original test indices, the aligned retained-row mask, the scored indices, and reconciled counts, and declares the headline floor-retained row set. R²/MAE/RMSE are computed on the log scale, with sklearn's fold-own-mean R² convention. Every fold also fits the canonical HAR-RV benchmark (Corsi (2009), 1/5/22 trailing variance components) on its training rows only and is scored on the same floor-retained test rows; the comparison lands in `har_benchmark.json`. The evaluation layer persists one loss-vector row per test-block row (`per_row_losses.parquet`, with the persisted floor flag) and writes `evaluation_summary.json` from those rows only: dual OOS-R², DM/CW/GW with Newey-West HAC lag 4, Mincer-Zarnowitz regressions, decile/regime QLIKE, QLIKE mean/median/IQR/top-1% tails, the floor with/without decomposition, the date-clustered gap, expanding-origin loss curves, and the declared no-calibration status.
+
+The optional holdout evaluation is a single final refit on the purged remainder (every floor-retained row before the reserved window whose five-day label window ends before it) plus the canonical HAR-RV benchmark on the same rows, predicting the holdout block once. The protocol, lock identity, holdout metrics, config hash, git sha, environment reference, and artifact hashes are written to `holdout_report.json`; `SHA256SUMS` verifies the report and its sibling holdout artifacts. The headline edge carries single-seed, floor-policy, holdout, and no-calibration caveats.
 
 ## Evaluation
 
