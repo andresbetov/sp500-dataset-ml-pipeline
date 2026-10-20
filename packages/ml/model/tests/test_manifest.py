@@ -21,6 +21,7 @@ This file also runs standalone:
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import re
 import tempfile
@@ -100,12 +101,20 @@ def _write_synthetic_artifacts(root: Path) -> None:
     X[:, 0] = np.arange(N_ROWS, dtype=np.float64)
     dates = np.datetime64("2000-01-03") + np.arange(N_ROWS)
 
+    dataset_path = root / "dataset.parquet"
+    dataset_bytes = b"synthetic manifest dataset"
+    dataset_path.write_bytes(dataset_bytes)
+
     metadata = {
         "ticker": np.array([f"T{row % 3}" for row in range(N_ROWS)]),
         "date": dates,
         "regime": (np.arange(N_ROWS) % 7).astype(np.int8),
         "n_indicators": N_INDICATORS,
         "n_ticker_features": N_TICKER_FEATURES,
+        "dataset": {
+            "path": str(dataset_path),
+            "sha256": hashlib.sha256(dataset_bytes).hexdigest(),
+        },
     }
 
     folds_metadata = {}
@@ -297,6 +306,31 @@ def test_persisted_paths_are_repo_relative_and_resolvable() -> None:
         assert loaded.is_file()
 
 
+def test_resume_dataset_identity_path_is_repo_relative_and_resolvable() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = _prepared_root(tmpdir)
+        _exercise_run(root)
+        from packages.ml.model import run_log
+
+        manifest = json.loads(
+            (root / "run_manifest.json").read_text(encoding="utf-8")
+        )
+        identity = manifest["input_identity"]
+        stored = identity["dataset_path"]
+        dataset_path = root / "dataset.parquet"
+
+        assert stored is not None
+        assert not Path(stored).is_absolute(), stored
+        assert stored == run_log.to_repo_relative(dataset_path)
+        assert run_log.resolve_stored_path(stored) == dataset_path.resolve()
+
+        runs_text = (root / "runs.jsonl").read_text(encoding="utf-8")
+        run_record = json.loads(runs_text.splitlines()[-1])
+        assert run_record["input_identity"]["dataset_path"] == stored
+        assert not run_record["input_identity"]["dataset_path"].startswith("/")
+        assert "/home/" not in runs_text
+
+
 def test_second_run_appends_without_truncating_the_first_line() -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         root = _prepared_root(tmpdir)
@@ -334,8 +368,9 @@ def test_phase_4_records_folds_and_artifacts_into_the_caller_run() -> None:
         ]
         assert record["phases"] == [], "phase timing belongs to the orchestrator"
         # 5 checkpoints + 5 parameter sidecars + the three training results +
-        # the per-row loss vectors and the evaluation summary.
-        assert len(record["artifacts"]) == 15, record["artifacts"]
+        # the per-row loss vectors, the evaluation summary, and the run
+        # selection marker.
+        assert len(record["artifacts"]) == 16, record["artifacts"]
         assert any(
             key.endswith(f"checkpoints/{run['run_id']}/fold_0.pkl")
             for key in record["artifacts"]

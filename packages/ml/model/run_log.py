@@ -39,6 +39,13 @@ appended to ``artifacts/runs.jsonl`` (one line per run, never truncated). Both
 writers use ``allow_nan=False``, so a NaN fails the write instead of leaking a
 non-standard token into the log.
 
+The manifest is also written at run start and after each fold (``new_run`` /
+``write_run_state``), without appending a log line, so a hard interruption
+still leaves the identity, fold hash, and fold selection a ``--resume`` needs.
+Manifest writes are atomic (sibling ``*.tmp`` + ``os.replace``); the JSONL log
+is append-only. After appending the finalized line, ``finish_run`` applies
+run-directory retention (``run.retention``) without touching the log.
+
 Persisted paths are repo-relative (``to_repo_relative``); readers resolve them
 back to absolute with ``resolve_stored_path``, which also accepts the legacy
 absolute form stored before this module existed.
@@ -49,6 +56,7 @@ from __future__ import annotations
 import hashlib
 import importlib.metadata
 import json
+import logging
 import os
 import platform
 import re
@@ -58,11 +66,19 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from packages.ml.model import atomic
 from packages.ml.model import config as model_config
 from packages.ml.model.utils import get_project_paths
 
 RUNS_FILENAME = "runs.jsonl"
 MANIFEST_FILENAME = "run_manifest.json"
+
+logger = logging.getLogger(__name__)
+
+
+class ResumeError(RuntimeError):
+    """A resume request lacks the run identity or sidecar prerequisites."""
+
 
 # Key libraries whose versions are recorded with every run.
 _KEY_LIBRARIES = (
@@ -86,11 +102,21 @@ def config_hash(config: Mapping | None = None) -> str:
     """First 8 hex digits of the canonical config's SHA-256.
 
     ``None`` hashes the loaded default config; callers may pass an explicit
-    mapping (e.g. a test's changed config) to get its digest instead.
+    mapping (e.g. a test's changed config) to get its digest instead. The
+    operational ``run`` section (retention count, log path) is excluded: those
+    keys change where/how run history is kept, not what a fold trains under,
+    so they must not invalidate a resume of the same training recipe.
     """
     loaded = model_config.get_config() if config is None else config
+    training_config = {
+        key: value for key, value in loaded.items() if key != "run"
+    }
     payload = json.dumps(
-        loaded, sort_keys=True, separators=(",", ":"), default=str, allow_nan=False
+        training_config,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+        allow_nan=False,
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:8]
 
@@ -99,6 +125,93 @@ def make_run_id(config_digest: str, now: datetime | None = None) -> str:
     """UTC timestamp plus the 8-hex config hash, e.g. ``20260101T000000Z-1a2b3c4d``."""
     stamp = (now if now is not None else _utc_now()).strftime("%Y%m%dT%H%M%SZ")
     return f"{stamp}-{config_digest}"
+
+
+def load_manifest(
+    artifacts_dir: Path | str | None = None,
+    manifest_path: Path | str | None = None,
+) -> dict[str, Any]:
+    """Load the latest run manifest, refusing a missing or malformed document.
+
+    ``--resume`` reads this manifest for the run id and identity hashes; a
+    missing manifest is a named resume failure, never a silent fresh run.
+    """
+    if manifest_path is not None:
+        target = Path(manifest_path)
+    else:
+        root = (
+            Path(artifacts_dir)
+            if artifacts_dir is not None
+            else get_project_paths()["artifacts_dir"]
+        )
+        target = root / MANIFEST_FILENAME
+    if not target.is_file():
+        raise ResumeError(
+            f"cannot resume: run manifest {target} is missing; a resumable run "
+            "must have completed at least its run-start manifest write"
+        )
+    try:
+        with open(target, "r", encoding="utf-8") as handle:
+            manifest = json.load(handle)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ResumeError(
+            f"cannot resume: run manifest {target} is unreadable: {exc}"
+        ) from exc
+    if not isinstance(manifest, dict):
+        raise ResumeError(
+            f"cannot resume: run manifest {target} is not a JSON object"
+        )
+    return manifest
+
+
+def resume_identity(
+    artifacts_dir: Path | str | None = None,
+    *,
+    config_hash_value: str | None = None,
+    manifest_path: Path | str | None = None,
+) -> dict[str, Any]:
+    """The manifest identity a resume depends on, validated by name.
+
+    A resumable manifest must name its ``run_id``, the ``config_hash`` the run
+    trained under, and the ``fold_manifest_hash`` of the fold construction. The
+    current config hash must equal the recorded one. Any missing key or
+    mismatch raises :class:`ResumeError` naming the offending identity field.
+    """
+    manifest = load_manifest(artifacts_dir, manifest_path)
+    required = ("run_id", "config_hash", "fold_manifest_hash")
+    missing = [key for key in required if not manifest.get(key)]
+    if missing:
+        target = (
+            Path(manifest_path)
+            if manifest_path is not None
+            else (
+                Path(artifacts_dir)
+                if artifacts_dir is not None
+                else get_project_paths()["artifacts_dir"]
+            )
+            / MANIFEST_FILENAME
+        )
+        raise ResumeError(
+            f"cannot resume: run manifest {target} is missing required "
+            f"identity key(s): {', '.join(missing)}"
+        )
+
+    current = config_hash() if config_hash_value is None else config_hash_value
+    if manifest["config_hash"] != current:
+        raise ResumeError(
+            "cannot resume: config hash mismatch — the run manifest records "
+            f"{manifest['config_hash']}, the current config is {current}; "
+            "resume only a run trained under the same config"
+        )
+
+    if artifacts_dir is not None:
+        root = Path(artifacts_dir)
+    elif manifest_path is not None:
+        root = Path(manifest_path).parent
+    else:
+        root = get_project_paths()["artifacts_dir"]
+    _verify_resume_inputs(manifest, root)
+    return manifest
 
 
 def selection_context() -> dict | None:
@@ -270,6 +383,137 @@ def sha256_file(path: Path | str) -> str:
     return digest.hexdigest()
 
 
+INPUT_IDENTITY_KEYS = (
+    "dataset_sha256",
+    "dataset_path",
+    "x_sha256",
+    "y_sha256",
+)
+
+
+def input_identity(
+    artifacts_dir: Path | str | None = None,
+    metadata: Mapping | None = None,
+) -> dict[str, Any]:
+    """The Phase-2 data identity a resume must match.
+
+    Records the dataset content digest pinned in the Phase-2 metadata plus the
+    byte hashes of the persisted ``X.npy``/``Y.npy`` inputs. ``dataset_path``
+    and ``dataset_sha256`` are ``None`` for synthetic/legacy callers without a
+    dataset pin; production Phase 2 always records both.
+    """
+    root = (
+        Path(artifacts_dir)
+        if artifacts_dir is not None
+        else get_project_paths()["artifacts_dir"]
+    )
+    pin = (metadata or {}).get("dataset") or {}
+    dataset_path = pin.get("path") if isinstance(pin, Mapping) else None
+    dataset_sha = pin.get("sha256") if isinstance(pin, Mapping) else None
+    if dataset_sha is None and dataset_path:
+        candidate = Path(dataset_path)
+        if candidate.is_file():
+            dataset_sha = sha256_file(candidate)
+    return {
+        "dataset_sha256": dataset_sha,
+        # Persist the same repo-relative path contract as every other stored
+        # manifest path; absolute machine paths never enter runs.jsonl.
+        "dataset_path": (
+            to_repo_relative(dataset_path) if dataset_path else None
+        ),
+        "x_sha256": sha256_file(root / "inputs" / "X.npy"),
+        "y_sha256": sha256_file(root / "inputs" / "Y.npy"),
+    }
+
+
+def _verify_resume_inputs(manifest: Mapping[str, Any], artifacts_dir: Path) -> None:
+    """Verify persisted inputs and fold construction before any rewrite.
+
+    ``--resume`` must not let Phase 2/3 overwrite the data/identity a run is
+    being resumed against before the mismatch is known. This checks the
+    manifest's ``input_identity`` against the on-disk dataset and input arrays,
+    then loads the persisted fold payload through the artifact registry and
+    recomputes its manifest hash. Every failure is a named
+    :class:`ResumeError`.
+    """
+    expected = manifest.get("input_identity")
+    if not isinstance(expected, Mapping):
+        raise ResumeError(
+            "cannot resume: run manifest is missing input_identity "
+            "(dataset digest + X/Y hashes); start a fresh run to record it"
+        )
+    missing = [key for key in INPUT_IDENTITY_KEYS if key not in expected]
+    if missing:
+        raise ResumeError(
+            "cannot resume: run manifest input_identity is missing key(s): "
+            + ", ".join(missing)
+        )
+
+    inputs_dir = artifacts_dir / "inputs"
+    for key, filename in (("x_sha256", "X.npy"), ("y_sha256", "Y.npy")):
+        path = inputs_dir / filename
+        if not path.is_file():
+            raise ResumeError(
+                f"cannot resume: persisted input {path} is missing; the run's "
+                "Phase-2 inputs are required to reuse its folds"
+            )
+        actual = sha256_file(path)
+        if actual != expected[key]:
+            raise ResumeError(
+                f"cannot resume: input digest mismatch for {path} — manifest "
+                f"records {expected[key]}, file has {actual}"
+            )
+
+    dataset_sha = expected.get("dataset_sha256")
+    if dataset_sha:
+        dataset_path = expected.get("dataset_path")
+        candidate = (
+            resolve_stored_path(dataset_path)
+            if dataset_path
+            else get_project_paths()["dataset_path"]
+        )
+        if not candidate.is_file():
+            raise ResumeError(
+                f"cannot resume: dataset {candidate} is missing; the run's "
+                "dataset identity cannot be verified"
+            )
+        actual = sha256_file(candidate)
+        if actual != dataset_sha:
+            raise ResumeError(
+                f"cannot resume: dataset digest mismatch for {candidate} — "
+                f"manifest records {dataset_sha}, file has {actual}; the "
+                "dataset changed since the run's folds were built"
+            )
+
+    folds_path = artifacts_dir / "folds" / "folds_metadata.pkl"
+    if not folds_path.is_file():
+        raise ResumeError(
+            f"cannot resume: persisted fold metadata {folds_path} is missing; "
+            "the run's fold construction cannot be verified"
+        )
+    from packages.ml.model.artifact_integrity import load_verified
+    from packages.ml.model.cross_validation.cross_validator import (
+        fold_manifest_hash,
+    )
+
+    registry_path = artifacts_dir / "artifact_registry.json"
+    try:
+        folds_metadata = load_verified(folds_path, registry_path=registry_path)
+        actual_hash = fold_manifest_hash(folds_metadata)
+    except Exception as exc:
+        raise ResumeError(
+            f"cannot resume: persisted fold metadata {folds_path} failed "
+            f"verification: {type(exc).__name__}: {exc}"
+        ) from exc
+    expected_hash = manifest["fold_manifest_hash"]
+    if actual_hash != expected_hash:
+        raise ResumeError(
+            "cannot resume: fold manifest mismatch — the run manifest records "
+            f"{expected_hash}, the persisted folds hash to {actual_hash}; "
+            "refusing before Phase 2/3 rewrites the source artifacts"
+        )
+
+
 def to_repo_relative(
     path: Path | str, project_root: Path | str | None = None
 ) -> str:
@@ -309,19 +553,21 @@ def new_run(
     phase: str,
     artifacts_dir: Path | str | None = None,
     config: Mapping | None = None,
+    run_id: str | None = None,
 ) -> dict[str, Any]:
     """Start a run record: identity, config hash, environment, and start time.
 
-    The returned dict is the mutable record handed to the ``record_*`` helpers
-    and finalized by ``finish_run``. Keys prefixed with ``_`` are internal state
-    and never reach the manifest.
+    ``run_id`` reuses a prior run's identity for ``--resume``; omitting it
+    mints a new UTC-stamped id. The returned dict is the mutable record handed
+    to the ``record_*`` helpers and finalized by ``finish_run``. Keys prefixed
+    with ``_`` are internal state and never reach the manifest.
     """
     paths = get_project_paths()
     loaded = model_config.get_config() if config is None else config
     digest = config_hash(loaded)
     environment = environment_manifest(paths["project_root"], config=loaded)
-    return {
-        "run_id": make_run_id(digest),
+    record = {
+        "run_id": run_id if run_id is not None else make_run_id(digest),
         "phase": phase,
         "status": "running",
         "git_sha": environment["git_sha"],
@@ -341,6 +587,14 @@ def new_run(
         "_started_monotonic": time.monotonic(),
         "_pending_artifacts": [],
     }
+    # Persist a run-start manifest for a fresh run so a hard interruption
+    # before finish_run still leaves the identity a later --resume needs. A
+    # resumed run keeps the existing manifest until its state write, so the
+    # identity it is being resumed from is never overwritten with a start
+    # record that lacks the fold hash.
+    if run_id is None:
+        write_run_state(record)
+    return record
 
 
 def record_phase(
@@ -377,17 +631,42 @@ def record_artifacts(run: dict[str, Any], paths: Iterable[Path | str]) -> None:
 def write_manifest(
     record: Mapping[str, Any], manifest_path: Path | str | None = None
 ) -> Path:
-    """Write the pretty-printed manifest (strict JSON) and return its path."""
+    """Write the pretty-printed manifest (strict JSON) atomically.
+
+    The document goes through a sibling ``*.tmp`` file and ``os.replace``, so
+    a mid-write failure leaves the previous manifest byte-identical and no
+    ``*.tmp`` residue behind.
+    """
     target = (
         Path(manifest_path)
         if manifest_path is not None
         else get_project_paths()["artifacts_dir"] / MANIFEST_FILENAME
     )
-    target.parent.mkdir(parents=True, exist_ok=True)
-    with open(target, "w", encoding="utf-8") as handle:
-        json.dump(record, handle, indent=2, sort_keys=True, allow_nan=False, default=str)
-        handle.write("\n")
+
+    def _write(tmp_path: Path) -> None:
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            json.dump(
+                record, handle, indent=2, sort_keys=True, allow_nan=False, default=str
+            )
+            handle.write("\n")
+
+    atomic.write_via_tmp(target, _write)
     return target
+
+
+def write_run_state(run: Mapping[str, Any]) -> Path:
+    """Persist the current public run record without finalizing it.
+
+    Used at run start and after each fold so a hard interruption still leaves
+    the identity, fold hash, and fold selection a later ``--resume`` needs.
+    Internal ``_`` state and pending-artifact hashes stay in memory until
+    :func:`finish_run`.
+    """
+    artifacts_dir = run.get("_artifacts_dir")
+    if artifacts_dir is None:
+        artifacts_dir = get_project_paths()["artifacts_dir"]
+    public = {key: value for key, value in run.items() if not key.startswith("_")}
+    return write_manifest(public, Path(artifacts_dir) / MANIFEST_FILENAME)
 
 
 def append_run(
@@ -422,4 +701,17 @@ def finish_run(
     }
     write_manifest(run, artifacts_dir / MANIFEST_FILENAME)
     append_run(run, artifacts_dir / RUNS_FILENAME)
+    # Run-directory retention is a directory policy only: runs.jsonl has just
+    # been appended and is never rewritten or truncated. A retention failure
+    # must not mask the run's own outcome (or the exception being handled).
+    from packages.ml.model.retention import prune_run_directories
+
+    try:
+        prune_run_directories(artifacts_dir, current_run=run)
+    except Exception:
+        logger.exception(
+            "Retention failed after run %s; the run record and runs.jsonl "
+            "line are preserved",
+            run.get("run_id"),
+        )
     return run

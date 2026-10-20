@@ -4,9 +4,9 @@ import hashlib
 import logging
 from pathlib import Path
 
-import joblib
 import numpy as np
 import pandas as pd
+from packages.ml.model import atomic
 from packages.ml.model.artifact_integrity import REGISTRY_FILENAME, record_artifact
 from packages.ml.model.config import get_config
 from packages.ml.model.utils import ARTIFACTS_DIR, get_project_paths, normalize_dates
@@ -251,6 +251,30 @@ def _extract_inputs(df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray, dict]:
     return X, Y, metadata
 
 
+def write_inputs_atomically(
+    X: np.ndarray,
+    Y: np.ndarray,
+    metadata: dict,
+    inputs_dir: Path,
+) -> tuple[Path, Path, Path]:
+    """Write the Phase-2 inputs (``X.npy``, ``Y.npy``, ``metadata.pkl``).
+
+    Every file is written through a sibling ``*.tmp`` + ``os.replace``. The
+    metadata pickle is written last: a completed metadata write is the intended
+    end of the Phase-2 sequence, while a failure leaves each prior file intact.
+    The three files are individually atomic, not one transaction; a failed
+    Phase 2 is re-run rather than consumed half-written.
+    """
+    inputs_dir.mkdir(parents=True, exist_ok=True)
+    X_path = inputs_dir / "X.npy"
+    y_path = inputs_dir / "Y.npy"
+    metadata_path = inputs_dir / "metadata.pkl"
+    atomic.write_npy_atomically(X_path, X)
+    atomic.write_npy_atomically(y_path, Y)
+    atomic.write_pickle_atomically(metadata_path, metadata)
+    return X_path, y_path, metadata_path
+
+
 def phase_2_feature_selection() -> tuple[np.ndarray, np.ndarray, dict, None]:
     """
     Load dataset and select technical indicators only (no ticker encoding).
@@ -281,14 +305,12 @@ def phase_2_feature_selection() -> tuple[np.ndarray, np.ndarray, dict, None]:
     (ARTIFACTS_DIR / "inputs").mkdir(parents=True, exist_ok=True)
     (ARTIFACTS_DIR / "legacy").mkdir(parents=True, exist_ok=True)
 
-    # Save X, Y, metadata to inputs
-    X_path = ARTIFACTS_DIR / "inputs" / "X.npy"
-    y_path = ARTIFACTS_DIR / "inputs" / "Y.npy"
-    metadata_path = ARTIFACTS_DIR / "inputs" / "metadata.pkl"
-
-    np.save(X_path, X)
-    np.save(y_path, Y)
-    joblib.dump(metadata, metadata_path)
+    # Save X, Y, metadata to inputs through the shared atomic writer; the
+    # metadata pickle lands last, but the three files are separate atomic
+    # writes (a failed Phase 2 is re-run, never resumed half-written).
+    X_path, y_path, metadata_path = write_inputs_atomically(
+        X, Y, metadata, ARTIFACTS_DIR / "inputs"
+    )
     # Record the hash at write time so Phases 3 and 4 can verify this artifact
     # before loading it (the run manifest is finalized only at the end).
     record_artifact(metadata_path, registry_path=ARTIFACTS_DIR / REGISTRY_FILENAME)

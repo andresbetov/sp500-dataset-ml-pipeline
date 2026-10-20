@@ -51,7 +51,27 @@ python -m packages.ml.model.main
 # writes model artifacts and charts (see Outputs)
 ```
 
-Both phases work from the repository root or from inside their own package directory, and the model phase runs the same through either form above. The model entry accepts one optional flag, `--dry-run`, which logs the planned phases and exits without running them.
+Both phases work from the repository root or from inside their own package directory, and the model phase runs the same through either form above. The model entry accepts `--dry-run` (log the plan and exit), `--resume` (continue the latest run), and `--folds` (train a subset of fold indices):
+
+```bash
+# Plan only — no writes, same phases as a full run
+python -m packages.ml.model.main --dry-run
+
+# Train only folds 0 and 2 into the normal artifact tree
+python -m packages.ml.model.main --folds 0,2
+
+# Continue the latest run, reusing complete per-fold sidecars and training
+# only the folds that are missing or fail identity/hash verification
+python -m packages.ml.model.main --resume
+```
+
+`--resume` reads `packages/ml/model/artifacts/run_manifest.json` and requires the manifest's `run_id`, `config_hash`, `fold_manifest_hash`, and `input_identity` (dataset SHA-256 plus the persisted `X.npy`/`Y.npy` hashes). A missing identity, a config/fold-construction mismatch, or a changed dataset/input digest refuses by name instead of silently starting a fresh run; the persisted inputs and fold payload are verified before Phases 2/3 can rewrite them. A fold is skipped only when its checkpoint, parameter sidecar, summary record, and predictions record are all present and match their artifact-registry size/SHA-256 entries, and the summary's recorded predictions hash matches the predictions file. The run manifest records `fold_selection` (`requested`, `trained`, `resumed`) and `partial` for every invocation; a subset run also writes `results/run_selection.json`, while a full run keeps exactly five fold rows. Neither flag changes the no-argument full run.
+
+### Retention and run history
+
+Run-scoped checkpoint directories live under `packages/ml/model/artifacts/checkpoints/<run_id>/`. After each run, retention keeps the newest `run.retention` directories (configured in `packages/ml/model/config/base.yaml`) and removes older ones; each kept directory carries a `README.md` with its identity, selection, contents, and retention rule. `packages/ml/model/artifacts/runs.jsonl` is append-only and is never truncated or pruned, so run history survives directory retention. The inputs, fold metadata, results, run manifest, and each per-fold sidecar and PNG are written individually through tmp + rename; the fold summary records the predictions file's size and SHA-256 so a stale pair is detected and recomputed rather than accepted.
+
+A `--folds` run is explicitly partial: its summary and evaluation artifacts contain only the selected folds, `run_manifest.json` carries `partial: true` plus the selection, and `results/run_selection.json` restates the requested/trained/resumed folds. Phase 5 diagnostics render the emitted fold records (no missing-fold indexing), so a subset run records normal per-plot statuses instead of silent plot failures.
 
 Determinism evidence is opt-in and cheap:
 
@@ -84,10 +104,10 @@ Phase 1 feature code lives in `packages/ml/dataset/features/` (one family per mo
 | `data/processed/dataset.parquet` | 1 | Cleaned survivors-only panel: raw OHLCV columns plus the retained adjusted OHLC columns (`_adj_open`, `_adj_high`, `_adj_low`), per-ticker features plus `log_price`, `realized_volatility_5d`, `market_regime` |
 | `packages/ml/model/artifacts/inputs/` | 2 | `X.npy`, `Y.npy`, `metadata.pkl` — exactly what training consumes |
 | `packages/ml/model/artifacts/folds/` | 3 | Fold indices and date ranges for temporal validation |
-| `packages/ml/model/artifacts/checkpoints/` | 4 | One trained model per fold plus its `fold_<i>_params.json` hyperparameter sidecar, under a run-scoped `<run_id>/` directory; each file is written atomically (tmp + rename) |
-| `packages/ml/model/artifacts/results/` | 1, 4 | `fold_training_summary.json` (per-fold metrics), `har_benchmark.json` (HAR-RV benchmark per fold), `per_row_losses.parquet` (per-row loss vectors), `evaluation_summary.json` (evaluation report statistics), `regime_characterization.json`, predictions |
+| `packages/ml/model/artifacts/checkpoints/` | 4 | One trained model per fold plus its `fold_<i>_params.json` hyperparameter sidecar, `fold_<i>_summary.json` metric/identity record, and `fold_<i>_predictions.pkl` resume record, under a run-scoped `<run_id>/` directory; each file is written atomically (tmp + rename), and each kept run directory carries a provenance `README.md` |
+| `packages/ml/model/artifacts/results/` | 1, 4 | `fold_training_summary.json` (per-fold metrics), `har_benchmark.json` (HAR-RV benchmark per fold), `per_row_losses.parquet` (per-row loss vectors), `evaluation_summary.json` (evaluation report statistics), `run_selection.json` (partial/selection record), `regime_characterization.json`, predictions |
 | `packages/ml/model/artifacts/results/seed_sweep.json` | explicit | Seed × fold validation sweep with the determinism policy, environment, and fold-manifest digest (`python -m packages.ml.model.determinism`) |
-| `packages/ml/model/artifacts/` | 2-5 | `runs.jsonl` (append-only run log: one strict-JSON line per run), `run_manifest.json` (latest run: identity, config hash, environment versions, phase/fold status, durations, artifact hashes), `artifact_registry.json` (byte size + sha256 per recorded artifact, updated atomically at write time; every live `joblib.load` verifies against it before loading) |
+| `packages/ml/model/artifacts/` | 2-5 | `runs.jsonl` (append-only run log: one strict-JSON line per run, never pruned), `run_manifest.json` (latest run: identity, config hash, fold selection, environment versions, phase/fold status, durations, artifact hashes, written atomically), `artifact_registry.json` (byte size + sha256 per recorded artifact, updated atomically at write time; every live `joblib.load` verifies against it before loading). Run-scoped directories are pruned to the newest `run.retention` |
 | `data/model_outputs/` | 5 | 14 PNG evaluation charts |
 
 Everything in the table is generated output and gitignored.

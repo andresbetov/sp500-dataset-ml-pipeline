@@ -14,7 +14,10 @@ from packages.ml.model.visualization.data_loader import (
     extract_qlike_stats,
     load_fold_training_summary,
 )
-from packages.ml.model.visualization.plotting import render_plot
+from packages.ml.model.visualization.plotting import (
+    render_plot,
+    save_figure_atomically,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -215,7 +218,7 @@ def plot_metrics_comparison(summary_df: pd.DataFrame, output_path: Path | None =
     )
 
     fig.tight_layout(rect=(0, 0, 1, 0.95))
-    plt.savefig(output_path, dpi=300, bbox_inches="tight")
+    save_figure_atomically(output_path, dpi=300, bbox_inches="tight")
     logger.info(f"Saved metrics comparison plot to {output_path}")
     plt.close()
 
@@ -280,7 +283,7 @@ def plot_timing_breakdown(summary_df: pd.DataFrame, output_path: Path | None = N
     ax.grid(axis="x", alpha=0.3)
 
     plt.tight_layout()
-    plt.savefig(output_path, dpi=300, bbox_inches="tight")
+    save_figure_atomically(output_path, dpi=300, bbox_inches="tight")
     logger.info(f"Saved timing breakdown plot to {output_path}")
     plt.close()
 
@@ -333,7 +336,7 @@ def plot_sample_distribution(summary_df: pd.DataFrame, output_path: Path | None 
     ax.grid(axis="y", alpha=0.3)
 
     plt.tight_layout()
-    plt.savefig(output_path, dpi=300, bbox_inches="tight")
+    save_figure_atomically(output_path, dpi=300, bbox_inches="tight")
     logger.info(f"Saved sample distribution plot to {output_path}")
     plt.close()
 
@@ -390,7 +393,7 @@ def plot_feature_count_summary(summary_df: pd.DataFrame, output_path: Path | Non
         ax.grid(axis="x", alpha=0.3)
 
     plt.tight_layout()
-    plt.savefig(output_path, dpi=300, bbox_inches="tight")
+    save_figure_atomically(output_path, dpi=300, bbox_inches="tight")
     logger.info(f"Saved feature count summary plot to {output_path}")
     plt.close()
 

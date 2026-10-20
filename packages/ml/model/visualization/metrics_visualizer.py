@@ -18,7 +18,10 @@ import numpy as np
 import pandas as pd
 
 from packages.ml.model.visualization.data_loader import load_fold_training_summary
-from packages.ml.model.visualization.plotting import render_plot
+from packages.ml.model.visualization.plotting import (
+    render_plot,
+    save_figure_atomically,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -146,7 +149,7 @@ def plot_r2_scores(summary_df: pd.DataFrame, output_path: Path | None = None) ->
     ax.legend()
 
     plt.tight_layout()
-    plt.savefig(output_path, dpi=300, bbox_inches="tight")
+    save_figure_atomically(output_path, dpi=300, bbox_inches="tight")
     logger.info(f"Saved R² scores plot to {output_path}")
     plt.close()
 
@@ -223,7 +226,7 @@ def plot_mae_rmse_comparison(summary_df: pd.DataFrame, output_path: Path | None 
     ax2.legend()
 
     plt.tight_layout()
-    plt.savefig(output_path, dpi=300, bbox_inches="tight")
+    save_figure_atomically(output_path, dpi=300, bbox_inches="tight")
     logger.info(f"Saved MAE/RMSE comparison plot to {output_path}")
     plt.close()
 
@@ -286,7 +289,7 @@ def plot_metric_heatmap(summary_df: pd.DataFrame, output_path: Path | None = Non
     )
 
     plt.tight_layout()
-    plt.savefig(output_path, dpi=300, bbox_inches="tight")
+    save_figure_atomically(output_path, dpi=300, bbox_inches="tight")
     logger.info(f"Saved metrics heatmap to {output_path}")
     plt.close()
 

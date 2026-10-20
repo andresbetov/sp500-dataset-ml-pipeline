@@ -29,6 +29,7 @@ from packages.ml.model.artifact_integrity import (
 	REGISTRY_FILENAME,
 	load_verified,
 	record_artifact,
+	verify_artifact,
 )
 from packages.ml.model.config import get_config
 from packages.ml.model.cross_validation import cross_validator
@@ -61,6 +62,7 @@ from packages.ml.model.training.har_benchmark import (
 from packages.ml.model.training.model_trainer import train_xgboost_model
 from packages.ml.model.training.qlike_objective import qlike_eval_metric, qlike_mean
 from packages.ml.model.run_log import (
+	ResumeError,
 	environment_versions,
 	finish_run,
 	git_sha,
@@ -68,8 +70,11 @@ from packages.ml.model.run_log import (
 	record_artifacts,
 	record_fold,
 	record_phase,
+	resume_identity,
 	selection_context,
 	to_repo_relative,
+	write_run_state,
+	input_identity,
 )
 from packages.ml.model.utils import ARTIFACTS_DIR
 
@@ -506,9 +511,35 @@ def fold_params_path(fold_idx: int, run_id: str) -> Path:
 	return ARTIFACTS_DIR / "checkpoints" / run_id / f"fold_{fold_idx}_params.json"
 
 
+def fold_summary_path(fold_idx: int, run_id: str) -> Path:
+	"""Run-scoped per-fold summary record.
+
+	The JSON record carries the fold's metric block plus the identity
+	(``run_id``, config hash, fold-manifest hash, coefficient setting) a resume
+	must match before trusting it. It is written last, after the predictions
+	pickle, so its presence marks a complete fold record.
+	"""
+	return ARTIFACTS_DIR / "checkpoints" / run_id / f"fold_{fold_idx}_summary.json"
+
+
+def fold_predictions_path(fold_idx: int, run_id: str) -> Path:
+	"""Run-scoped per-fold predictions record used to rebuild final results."""
+	return (
+		ARTIFACTS_DIR
+		/ "checkpoints"
+		/ run_id
+		/ f"fold_{fold_idx}_predictions.pkl"
+	)
+
+
 # Version keys recorded in every fold's params sidecar: the interpreter plus
 # the model stack whose behavior the recorded hyperparameters describe.
 SIDECAR_VERSION_KEYS = ("python", "xgboost", "numpy", "pandas", "scikit-learn")
+
+# The per-run selection record: partial/subset runs name the fold rows the
+# summary emits in a separate strict-JSON artifact, so the five-row summary
+# contract for a full run is untouched.
+RUN_SELECTION_FILENAME = "run_selection.json"
 
 
 def sidecar_value(value: object) -> object:
@@ -600,6 +631,304 @@ def write_fold_params_atomically(model: object, params_path: Path) -> None:
 		sort_keys=True,
 		allow_nan=False,
 	)
+
+
+def parse_fold_selection(values) -> list[int] | None:
+	"""Normalize a ``--folds`` selection to ascending unique integers.
+
+	Accepts ``None`` (all folds), an ``int``, a comma-separated string
+	(``"0,2"``), or an iterable of integers. An empty selection, a negative
+	index, or a duplicate raises a named ``ValueError`` before any fit runs.
+	"""
+	if values is None:
+		return None
+	if isinstance(values, str):
+		items = [item.strip() for item in values.split(",")]
+		if not items or any(not item for item in items):
+			raise ValueError(
+				f"--folds must be a comma-separated list of fold indices, got {values!r}"
+			)
+	elif isinstance(values, (int, np.integer)):
+		items = [values]
+	else:
+		items = list(values)
+		if not items:
+			raise ValueError("--folds must select at least one fold")
+
+	indices: list[int] = []
+	for item in items:
+		try:
+			index = int(item)
+		except (TypeError, ValueError) as exc:
+			raise ValueError(
+				f"--folds entries must be integers, got {item!r}"
+			) from exc
+		if index < 0:
+			raise ValueError(f"--folds entries must be non-negative, got {index}")
+		if index in indices:
+			raise ValueError(f"--folds lists fold {index} more than once")
+		indices.append(index)
+	return sorted(indices)
+
+
+def _fold_record_identity(
+	fold_idx: int,
+	run_id: str,
+	config_hash_value: str,
+	fold_manifest_hash: str,
+	coefficient_interpretation: bool,
+) -> dict:
+	"""The identity every complete per-fold sidecar set must match."""
+	return {
+		"fold": f"fold_{fold_idx}",
+		"run_id": run_id,
+		"config_hash": config_hash_value,
+		"fold_manifest_hash": fold_manifest_hash,
+		"coefficient_interpretation": bool(coefficient_interpretation),
+	}
+
+
+def write_fold_record_atomically(
+	fold_idx: int,
+	run_id: str,
+	summary: dict,
+	predictions: dict,
+	har_result: dict,
+	*,
+	config_hash_value: str,
+	fold_manifest_hash: str,
+	coefficient_interpretation: bool,
+) -> tuple[Path, Path]:
+	"""Write one fold's summary record and predictions sidecar atomically.
+
+	Each file is individually atomic (sibling ``*.tmp`` + ``os.replace``). The
+	predictions pickle is written first; the summary JSON is written last and
+	records the predictions file's byte size and SHA-256, so a stale summary
+	left beside a newer predictions file is detected and the fold is
+	recomputed rather than accepted. Both files carry the same identity block
+	and both are recorded in the artifact registry.
+	"""
+	identity = _fold_record_identity(
+		fold_idx,
+		run_id,
+		config_hash_value,
+		fold_manifest_hash,
+		coefficient_interpretation,
+	)
+	summary_path = fold_summary_path(fold_idx, run_id)
+	predictions_path = fold_predictions_path(fold_idx, run_id)
+
+	predictions_payload = {
+		"identity": identity,
+		"summary": sanitize_json(summary),
+		"predictions": predictions,
+		"har_result": sanitize_json(har_result),
+	}
+	_write_atomically(
+		predictions_path,
+		lambda tmp_path: joblib.dump(predictions_payload, tmp_path),
+	)
+	prediction_entry = record_artifact(
+		predictions_path, registry_path=ARTIFACTS_DIR / REGISTRY_FILENAME
+	)
+
+	# Each file is individually atomic. The summary also records the
+	# predictions file's size and SHA-256, so a summary left over from an
+	# earlier pair cannot be accepted alongside a newer predictions file.
+	write_json_atomically(
+		summary_path,
+		{
+			"identity": identity,
+			"predictions_size": prediction_entry["size"],
+			"predictions_sha256": prediction_entry["sha256"],
+			"summary": sanitize_json(summary),
+		},
+		trailing_newline=True,
+		indent=2,
+		sort_keys=True,
+		allow_nan=False,
+	)
+	record_artifact(summary_path, registry_path=ARTIFACTS_DIR / REGISTRY_FILENAME)
+	return summary_path, predictions_path
+
+
+REQUIRED_RESUMED_PREDICTION_KEYS = (
+	"test_pred",
+	"test_true",
+	"test_pred_all",
+	"test_indices",
+	"test_floor_mask",
+	"har_pred_all",
+	"fold_model_path",
+	"train_date_range",
+	"test_date_range",
+	"n_train_samples",
+	"n_inner_val_samples",
+	"n_inner_purge_rows",
+	"best_iteration",
+	"eval_history",
+	"n_test_samples",
+	"n_test_total",
+	"n_test_floor_excluded",
+	"n_test_scored",
+	"n_train_floor_excluded",
+	"n_warmup_excluded",
+	"headline_row_set",
+	"n_features",
+	"test_r2",
+	"test_mae",
+	"test_rmse",
+	"test_qlike",
+	"oos_r2_prevailing_mean",
+	"oos_r2_vs_har",
+	"oos_r2_scale",
+	"oos_r2_row_set",
+	"har_r2",
+	"har_qlike",
+	"har_forecast_log",
+	"clip_count",
+	"clip_rate",
+	"train_time_seconds",
+	"inference_time_seconds",
+	"har_time_seconds",
+	"fold_time_seconds",
+	"quarantine",
+)
+REQUIRED_RESUMED_HAR_KEYS = (
+	"n_test",
+	"clip_count",
+	"clip_rate",
+	"har_r2",
+	"har_qlike",
+)
+
+
+def _load_complete_fold_record(
+	fold_idx: int,
+	run_id: str,
+	*,
+	config_hash_value: str,
+	fold_manifest_hash: str,
+	coefficient_interpretation: bool,
+	artifacts_dir: Path | None = None,
+) -> dict | None:
+	"""Return a verified complete fold record, or ``None`` when incomplete.
+
+	A complete record requires the checkpoint, parameter sidecar, summary
+	JSON, and predictions pickle, each present and matching its artifact-registry
+	size/SHA-256 entry; the summary must name the predictions file's size and
+	hash and repeat its summary block; the identity block must match this run,
+	config, fold manifest, and coefficient setting; and every key the resumed
+	path later reads must be present. Any miss — including a torn pickle, a
+	foreign object, or a tampered checkpoint — returns ``None`` so the caller
+	recomputes the fold.
+	"""
+	root = Path(artifacts_dir) if artifacts_dir is not None else ARTIFACTS_DIR
+	run_dir = root / "checkpoints" / run_id
+	checkpoint_path = run_dir / f"fold_{fold_idx}.pkl"
+	params_path = run_dir / f"fold_{fold_idx}_params.json"
+	summary_path = run_dir / f"fold_{fold_idx}_summary.json"
+	predictions_path = run_dir / f"fold_{fold_idx}_predictions.pkl"
+	registry_path = root / REGISTRY_FILENAME
+
+	for path in (checkpoint_path, params_path, summary_path, predictions_path):
+		if not path.is_file():
+			logger.info(
+				"Fold %s: resume record incomplete (missing %s); recomputing",
+				fold_idx,
+				path.name,
+			)
+			return None
+
+	try:
+		for path in (checkpoint_path, params_path, summary_path):
+			verify_artifact(path, registry_path=registry_path)
+		prediction_entry = verify_artifact(
+			predictions_path, registry_path=registry_path
+		)
+		record = load_verified(predictions_path, registry_path=registry_path)
+		summary_document = json.loads(summary_path.read_text(encoding="utf-8"))
+	except Exception as exc:
+		# A corrupt pickle can surface as EOFError, UnpicklingError,
+		# AttributeError, ImportError, ValueError, or a registry error; all are
+		# "this record is unusable", so the fold is recomputed rather than
+		# aborting the resume.
+		logger.info(
+			"Fold %s: resume record failed verification "
+			"(%s: %s); recomputing",
+			fold_idx,
+			type(exc).__name__,
+			exc,
+		)
+		return None
+
+	expected_identity = _fold_record_identity(
+		fold_idx,
+		run_id,
+		config_hash_value,
+		fold_manifest_hash,
+		coefficient_interpretation,
+	)
+	if not isinstance(record, dict) or not isinstance(summary_document, dict):
+		return None
+	if record.get("identity") != expected_identity:
+		logger.info(
+			"Fold %s: resume identity mismatch (sidecar %r); recomputing",
+			fold_idx,
+			record.get("identity"),
+		)
+		return None
+	if summary_document.get("identity") != expected_identity:
+		return None
+	predictions = record.get("predictions")
+	har_result = record.get("har_result")
+	if not isinstance(predictions, dict) or not isinstance(har_result, dict):
+		return None
+	if (
+		summary_document.get("predictions_sha256") != prediction_entry["sha256"]
+		or summary_document.get("predictions_size") != prediction_entry["size"]
+	):
+		logger.info(
+			"Fold %s: summary does not match the predictions record; recomputing",
+			fold_idx,
+		)
+		return None
+	missing_prediction_keys = [
+		key for key in REQUIRED_RESUMED_PREDICTION_KEYS if key not in predictions
+	]
+	missing_har_keys = [
+		key for key in REQUIRED_RESUMED_HAR_KEYS if key not in har_result
+	]
+	if missing_prediction_keys or missing_har_keys:
+		logger.info(
+			"Fold %s: resume record is missing key(s) %s; recomputing",
+			fold_idx,
+			sorted(missing_prediction_keys + missing_har_keys),
+		)
+		return None
+	try:
+		expected_summary = sanitize_json(_fold_summary_from_prediction(predictions))
+		summary_matches = (
+			record.get("summary") == expected_summary
+			and summary_document.get("summary") == expected_summary
+		)
+	except Exception as exc:
+		logger.info(
+			"Fold %s: persisted summary block cannot be rebuilt from the "
+			"predictions record (%s: %s); recomputing",
+			fold_idx,
+			type(exc).__name__,
+			exc,
+		)
+		return None
+	if not summary_matches:
+		logger.info(
+			"Fold %s: persisted summary block disagrees with predictions; "
+			"recomputing",
+			fold_idx,
+		)
+		return None
+	return record
 
 
 def write_checkpoint_atomically(model: object, model_path: Path) -> None:
@@ -829,9 +1158,62 @@ def _train_fold_model(
 	return model, predictions_dict
 
 
-def _aggregate_fold_results(fold_predictions_list: list) -> tuple[dict, dict]:
+def _fold_summary_from_prediction(pred_dict: dict) -> dict:
+	"""The per-fold summary row projected from a prediction record.
+
+	Shared by fresh fits and resumed folds: both paths persist this exact
+	projection, so a resumed final summary is built from the same fields as a
+	full run.
 	"""
-	Aggregate predictions and metrics across all folds.
+	return {
+		"train_date_min": pred_dict["train_date_range"][0],
+		"train_date_max": pred_dict["train_date_range"][1],
+		"test_date_min": pred_dict["test_date_range"][0],
+		"test_date_max": pred_dict["test_date_range"][1],
+		"n_train_samples": int(pred_dict["n_train_samples"]),
+		"n_inner_val_samples": int(pred_dict["n_inner_val_samples"]),
+		"n_inner_purge_rows": int(pred_dict["n_inner_purge_rows"]),
+		"best_iteration": pred_dict["best_iteration"],
+		"eval_history": pred_dict["eval_history"],
+		"n_test_samples": int(pred_dict["n_test_samples"]),
+		"n_test_total": int(pred_dict["n_test_total"]),
+		"n_test_floor_excluded": int(pred_dict["n_test_floor_excluded"]),
+		"n_test_scored": int(pred_dict["n_test_scored"]),
+		"n_train_floor_excluded": int(pred_dict["n_train_floor_excluded"]),
+		"n_warmup_excluded": int(pred_dict["n_warmup_excluded"]),
+		"headline_row_set": pred_dict["headline_row_set"],
+		"n_features": int(pred_dict["n_features"]),
+		"model_path": pred_dict["fold_model_path"],
+		"test_r2": pred_dict["test_r2"],
+		"test_mae": pred_dict["test_mae"],
+		"test_rmse": pred_dict["test_rmse"],
+		"test_qlike": pred_dict["test_qlike"],
+		"oos_r2_prevailing_mean": pred_dict["oos_r2_prevailing_mean"],
+		"oos_r2_vs_har": pred_dict["oos_r2_vs_har"],
+		"oos_r2_scale": pred_dict["oos_r2_scale"],
+		"oos_r2_row_set": pred_dict["oos_r2_row_set"],
+		"har_r2": pred_dict["har_r2"],
+		"har_qlike": pred_dict["har_qlike"],
+		"clip_count": int(pred_dict["clip_count"]),
+		"clip_rate": float(pred_dict["clip_rate"]),
+		"train_time_seconds": pred_dict["train_time_seconds"],
+		"inference_time_seconds": pred_dict["inference_time_seconds"],
+		"har_time_seconds": pred_dict["har_time_seconds"],
+		"fold_time_seconds": pred_dict["fold_time_seconds"],
+	}
+
+
+def _aggregate_fold_results(
+	fold_predictions_list: list,
+	fold_indices: list[int] | None = None,
+) -> tuple[dict, dict]:
+	"""
+	Aggregate predictions and metrics across the folds actually produced.
+
+	``fold_indices`` names each prediction record's fold index; when omitted
+	the records are contiguous from fold 0 (the full-run and direct-caller
+	case). A selected or resumed run passes its sparse fold indices so fold
+	keys are never renumbered by list position.
 
 	Returns:
 		(validation_predictions, fold_training_summary)
@@ -839,46 +1221,21 @@ def _aggregate_fold_results(fold_predictions_list: list) -> tuple[dict, dict]:
 	validation_predictions = {}
 	fold_training_summary = {}
 
-	for fold_idx, pred_dict in enumerate(fold_predictions_list):
+	indices = (
+		list(range(len(fold_predictions_list)))
+		if fold_indices is None
+		else list(fold_indices)
+	)
+	if len(indices) != len(fold_predictions_list):
+		raise ValueError(
+			f"_aggregate_fold_results received {len(fold_predictions_list)} "
+			f"records for {len(indices)} fold indices"
+		)
+
+	for fold_idx, pred_dict in zip(indices, fold_predictions_list):
 		fold_key = f"fold_{fold_idx}"
 		validation_predictions[fold_key] = pred_dict
-
-		fold_training_summary[fold_key] = {
-			"train_date_min": pred_dict["train_date_range"][0],
-			"train_date_max": pred_dict["train_date_range"][1],
-			"test_date_min": pred_dict["test_date_range"][0],
-			"test_date_max": pred_dict["test_date_range"][1],
-			"n_train_samples": int(pred_dict["n_train_samples"]),
-			"n_inner_val_samples": int(pred_dict["n_inner_val_samples"]),
-			"n_inner_purge_rows": int(pred_dict["n_inner_purge_rows"]),
-			"best_iteration": pred_dict["best_iteration"],
-			"eval_history": pred_dict["eval_history"],
-			"n_test_samples": int(pred_dict["n_test_samples"]),
-			"n_test_total": int(pred_dict["n_test_total"]),
-			"n_test_floor_excluded": int(pred_dict["n_test_floor_excluded"]),
-			"n_test_scored": int(pred_dict["n_test_scored"]),
-			"n_train_floor_excluded": int(pred_dict["n_train_floor_excluded"]),
-			"n_warmup_excluded": int(pred_dict["n_warmup_excluded"]),
-			"headline_row_set": pred_dict["headline_row_set"],
-			"n_features": int(pred_dict["n_features"]),
-			"model_path": pred_dict["fold_model_path"],
-			"test_r2": pred_dict["test_r2"],
-			"test_mae": pred_dict["test_mae"],
-			"test_rmse": pred_dict["test_rmse"],
-			"test_qlike": pred_dict["test_qlike"],
-			"oos_r2_prevailing_mean": pred_dict["oos_r2_prevailing_mean"],
-			"oos_r2_vs_har": pred_dict["oos_r2_vs_har"],
-			"oos_r2_scale": pred_dict["oos_r2_scale"],
-			"oos_r2_row_set": pred_dict["oos_r2_row_set"],
-			"har_r2": pred_dict["har_r2"],
-			"har_qlike": pred_dict["har_qlike"],
-			"clip_count": int(pred_dict["clip_count"]),
-			"clip_rate": float(pred_dict["clip_rate"]),
-			"train_time_seconds": pred_dict["train_time_seconds"],
-			"inference_time_seconds": pred_dict["inference_time_seconds"],
-			"har_time_seconds": pred_dict["har_time_seconds"],
-			"fold_time_seconds": pred_dict["fold_time_seconds"],
-		}
+		fold_training_summary[fold_key] = _fold_summary_from_prediction(pred_dict)
 
 	return validation_predictions, fold_training_summary
 
@@ -1127,6 +1484,9 @@ def _save_training_results(
 def phase_4_training(
 	coefficient_interpretation: bool = False,
 	run: dict | None = None,
+	*,
+	resume: bool = False,
+	folds: list[int] | None = None,
 ) -> tuple[dict, dict, list]:
 	"""
 	Orchestrate Phase 4: Train one fold-specific XGBoost model per configured
@@ -1170,10 +1530,26 @@ def phase_4_training(
 	``run`` is the caller's run record when the pipeline orchestrator owns the
 	run (one manifest and one JSONL line per pipeline run). When omitted, the
 	phase starts and finalizes its own run on success.
+
+	``resume`` reuses the latest manifest's run id after validating its config
+	hash and fold-manifest hash, and skips every selected fold whose verified
+	sidecar set is complete (checkpoint + params + summary + predictions).
+	``folds`` limits the run to the named fold indices. The manifest records
+	``fold_selection`` (requested/trained/resumed) either way; omitting both
+	arguments preserves the full-run default.
 	"""
 	standalone = run is None
 	if standalone:
-		run = new_run("phase_4_training", ARTIFACTS_DIR)
+		if resume:
+			identity = resume_identity(ARTIFACTS_DIR)
+			run = new_run(
+				"phase_4_training", ARTIFACTS_DIR, run_id=identity["run_id"]
+			)
+			run["resumed"] = True
+			run["fold_manifest_hash"] = identity["fold_manifest_hash"]
+			run["input_identity"] = identity["input_identity"]
+		else:
+			run = new_run("phase_4_training", ARTIFACTS_DIR)
 	# The frozen tuning selection this run trains under is named in the run
 	# record for provenance; the selection artifact remains the source of truth
 	# for the parameters frozen under training.hyperparameters. A config
@@ -1197,8 +1573,42 @@ def phase_4_training(
 	folds_metadata = load_folds_metadata()
 	# Pin the manifest identity for this run: two generations from the same
 	# metadata produce the same digest, so a run record names the exact fold
-	# construction it trained under.
-	run["fold_manifest_hash"] = cross_validator.fold_manifest_hash(folds_metadata)
+	# construction it trained under. A resume must match the recorded identity
+	# exactly; a missing or mismatched hash refuses by name before any fit.
+	fold_manifest_hash = cross_validator.fold_manifest_hash(folds_metadata)
+	if resume:
+		identity = resume_identity(
+			ARTIFACTS_DIR, config_hash_value=run["config_hash"]
+		)
+		if identity["run_id"] != run["run_id"]:
+			raise ResumeError(
+				"cannot resume: run id mismatch — the run record names "
+				f"{run['run_id']}, the manifest names {identity['run_id']}"
+			)
+		current_inputs = input_identity(ARTIFACTS_DIR, metadata)
+		if identity["input_identity"] != current_inputs:
+			raise ResumeError(
+				"cannot resume: input identity mismatch — the run manifest "
+				f"records {identity['input_identity']}, the loaded inputs hash "
+				f"to {current_inputs}"
+			)
+		if identity["fold_manifest_hash"] != fold_manifest_hash:
+			raise ResumeError(
+				"cannot resume: fold manifest mismatch — the run manifest records "
+				f"{identity['fold_manifest_hash']}, the current folds hash to "
+				f"{fold_manifest_hash}; rebuild or resume the matching inputs"
+			)
+		run["fold_manifest_hash"] = fold_manifest_hash
+		run["resumed"] = True
+		logger.info(
+			"Resuming run %s (config %s, folds %s)",
+			run["run_id"],
+			run["config_hash"],
+			fold_manifest_hash[:12],
+		)
+	else:
+		run["fold_manifest_hash"] = fold_manifest_hash
+		run["input_identity"] = input_identity(ARTIFACTS_DIR, metadata)
 
 	logger.info(f"Loaded X: {X.shape}, y: {y.shape}")
 	logger.info(f"Features: {metadata['n_indicators']} indicators + {metadata['n_ticker_features']} ticker = {X.shape[1]} total")
@@ -1227,10 +1637,71 @@ def phase_4_training(
 	# instead of by stored row order.
 	_, date_pos = np.unique(metadata["date"], return_inverse=True)
 
-	# Train one model per fold (the persisted payload's fold keys) with strict
-	# temporal separation.
-	fold_key_list = fold_keys(folds_metadata)
+	# Train the selected folds (all folds by default) with strict temporal
+	# separation. A resume reuses only complete, verified sidecar sets; every
+	# other selected fold is recomputed.
+	all_fold_keys = fold_keys(folds_metadata)
+	all_fold_indices = [
+		int(fold_key.split("_", 1)[1]) for fold_key in all_fold_keys
+	]
+	selected_indices = (
+		list(all_fold_indices)
+		if folds is None
+		else parse_fold_selection(folds)
+	)
+	unknown_folds = sorted(set(selected_indices) - set(all_fold_indices))
+	if unknown_folds:
+		raise ValueError(
+			f"--folds selected unknown fold index(es) {unknown_folds}; "
+			f"the persisted run has folds {all_fold_indices}"
+		)
+	if not selected_indices:
+		raise ValueError("--folds must select at least one fold")
+
+	complete_records: dict[int, dict] = {}
+	pending_indices: list[int] = list(selected_indices)
+	if resume:
+		pending_indices = []
+		for fold_idx in selected_indices:
+			record = _load_complete_fold_record(
+				fold_idx,
+				run_id,
+				config_hash_value=run["config_hash"],
+				fold_manifest_hash=fold_manifest_hash,
+				coefficient_interpretation=coefficient_interpretation,
+				artifacts_dir=ARTIFACTS_DIR,
+			)
+			if record is None:
+				pending_indices.append(fold_idx)
+			else:
+				complete_records[fold_idx] = record
+	run["partial"] = len(selected_indices) != len(all_fold_indices)
+	run["fold_selection"] = {
+		"requested": list(selected_indices),
+		"trained": list(pending_indices),
+		"resumed": sorted(complete_records),
+		"n_folds_total": len(all_fold_indices),
+		"n_folds_selected": len(selected_indices),
+	}
+	logger.info(
+		"Fold selection: requested %s, trained %s, resumed %s",
+		selected_indices,
+		pending_indices,
+		sorted(complete_records),
+	)
+
+	# Every run directory carries its provenance README, written atomically.
+	from packages.ml.model.retention import ensure_run_readme
+
+	ensure_run_readme(
+		ARTIFACTS_DIR / "checkpoints" / run_id, run=run, overwrite=True
+	)
+	# Persist the fold selection and identity before the first fit, so an
+	# interrupted run is resumable from the manifest alone.
+	write_run_state(run)
+
 	fold_predictions_list = []
+	fold_indices_list = []
 	fold_model_paths = []
 	har_benchmark_results = {}
 	# Per-fold frames for the persisted per-row loss vectors: one row per
@@ -1242,12 +1713,59 @@ def phase_4_training(
 	# Fold key -> quarantine record ({"error": ...}) for every fold whose
 	# metric computation failed; recorded in the run manifest/record, never in
 	# the five-row fold summary.
-	quarantined_folds = {}
+	quarantined_folds = {
+		f"fold_{fold_idx}": record["predictions"]["quarantine"]
+		for fold_idx, record in complete_records.items()
+		if record["predictions"].get("quarantine") is not None
+	}
 
-	for fold_key in fold_key_list:
-		fold_started = time.time()
-		fold_idx = int(fold_key.split("_", 1)[1])
+	for fold_idx in selected_indices:
+		fold_key = f"fold_{fold_idx}"
+		if fold_idx in complete_records:
+			record = complete_records[fold_idx]
+			predictions_dict = record["predictions"]
+			har_benchmark_results[fold_key] = record["har_result"]
+			fold_predictions_list.append(predictions_dict)
+			fold_indices_list.append(fold_idx)
+			fold_model_paths.append(predictions_dict["fold_model_path"])
+
+			# Rebuild the fold's loss vectors from the persisted full-block
+			# forecasts, so the evaluation report covers resumed and fresh folds
+			# identically without refitting anything.
+			test_indices = np.asarray(predictions_dict["test_indices"])
+			test_floor_mask = np.asarray(
+				predictions_dict["test_floor_mask"], dtype=bool
+			)
+			loss_vector_frames.append(
+				loss_vector_frame(
+					[
+						{
+							"fold": fold_key,
+							"row_idx": test_indices,
+							"date": metadata["date"][test_indices],
+							"ticker": metadata["ticker"][test_indices],
+							"y_true": y_log[test_indices],
+							"y_pred_model": predictions_dict["test_pred_all"],
+							"y_pred_har": predictions_dict["har_pred_all"],
+							"is_floor": ~test_floor_mask,
+						}
+					]
+				)
+			)
+			record_fold(
+				run,
+				fold_key,
+				"quarantined" if fold_key in quarantined_folds else "resumed",
+				0.0,
+			)
+			write_run_state(run)
+			logger.info(
+				"  Fold %s: resumed from complete verified sidecars", fold_key
+			)
+			continue
+
 		fold_data = folds_metadata[fold_key]
+		fold_started = time.time()
 
 		# Extract fold-specific data under the single floor policy: the same
 		# floor-retained rows feed model fitting, model scoring, and the HAR
@@ -1443,6 +1961,9 @@ def phase_4_training(
 		y_pred_har_all = np.empty(n_test_total, dtype=np.float64)
 		y_pred_har_all[test_floor_mask] = har_forecast_scored
 		y_pred_har_all[floor_rows] = har_forecast_floor
+		# Persist the full-block HAR forecasts alongside the model's so a resume
+		# can rebuild this fold's loss vectors without refitting the benchmark.
+		predictions_dict["har_pred_all"] = y_pred_har_all
 		try:
 			loss_vector_frames.append(
 				loss_vector_frame(
@@ -1491,6 +2012,22 @@ def phase_4_training(
 		predictions_dict["har_time_seconds"] = har_time_seconds
 		predictions_dict["fold_time_seconds"] = time.time() - fold_started
 
+		# Persist the complete fold record (summary + predictions + HAR result).
+		# Each file is individually atomic; the summary also records the
+		# predictions hash so a crash between the two writes is detected on
+		# resume and the fold is recomputed rather than half-accepted.
+		fold_summary = _fold_summary_from_prediction(predictions_dict)
+		write_fold_record_atomically(
+			fold_idx,
+			run_id,
+			fold_summary,
+			predictions_dict,
+			har_result,
+			config_hash_value=run["config_hash"],
+			fold_manifest_hash=fold_manifest_hash,
+			coefficient_interpretation=coefficient_interpretation,
+		)
+
 		if quarantine is not None:
 			quarantined_folds[fold_key] = quarantine
 			record_fold(
@@ -1500,11 +2037,36 @@ def phase_4_training(
 			record_fold(
 				run, fold_key, "completed", predictions_dict["fold_time_seconds"]
 			)
+		write_run_state(run)
 		fold_predictions_list.append(predictions_dict)
+		fold_indices_list.append(fold_idx)
 		fold_model_paths.append(predictions_dict["fold_model_path"])
 
-	# Aggregate predictions and metrics across all folds
-	validation_predictions, fold_training_summary = _aggregate_fold_results(fold_predictions_list)
+	# Aggregate predictions and metrics across the selected folds.
+	validation_predictions, fold_training_summary = _aggregate_fold_results(
+		fold_predictions_list, fold_indices_list
+	)
+
+	# Persist the explicit partial/selection marker beside the summary. A full
+	# run keeps exactly five fold rows; a subset run is declared here instead
+	# of pretending the missing folds were evaluated.
+	run_selection_path = ARTIFACTS_DIR / "results" / RUN_SELECTION_FILENAME
+	write_json_atomically(
+		run_selection_path,
+		{
+			"schema_version": 1,
+			"partial": bool(run["partial"]),
+			**run["fold_selection"],
+			"fold_keys": [f"fold_{idx}" for idx in selected_indices],
+		},
+		trailing_newline=True,
+		indent=2,
+		sort_keys=True,
+		allow_nan=False,
+	)
+	record_artifact(
+		run_selection_path, registry_path=ARTIFACTS_DIR / REGISTRY_FILENAME
+	)
 
 	# Add feature breakdown (indicators vs ticker one-hot) from metadata
 	for fold_key in fold_training_summary:
@@ -1600,6 +2162,7 @@ def phase_4_training(
 			ARTIFACTS_DIR / "results" / "har_benchmark.json",
 			ARTIFACTS_DIR / "results" / "per_row_losses.parquet",
 			ARTIFACTS_DIR / "results" / "evaluation_summary.json",
+			run_selection_path,
 		],
 	)
 

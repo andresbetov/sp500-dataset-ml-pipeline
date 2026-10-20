@@ -140,18 +140,19 @@ def record_artifact(
     return entry
 
 
-def load_verified(
+def verify_artifact(
     path: Path | str,
     *,
     registry_path: Path | str | None = None,
     project_root: Path | str | None = None,
-) -> Any:
-    """Verify ``path`` against its registry entry, then ``joblib.load`` it.
+) -> dict[str, Any]:
+    """Verify a file against its registry entry without deserializing it.
 
     The registry entry must exist, the file must be present, and its byte size
-    and SHA-256 must both match before the pickle is deserialized; any
-    deviation raises ``ArtifactIntegrityError`` and no load call happens. The
-    hashing time is logged.
+    and SHA-256 must both match. Any deviation raises
+    ``ArtifactIntegrityError``. Returns the recorded ``{"size", "sha256"}``
+    entry. Resume completeness checks use this to verify a checkpoint or
+    sidecar without loading it.
     """
     resolved = resolve_stored_path(path, project_root)
     target = Path(registry_path) if registry_path is not None else _default_registry_path()
@@ -195,6 +196,26 @@ def load_verified(
         actual_size,
         actual_digest[:12],
         elapsed_ms,
+    )
+    return entry
+
+
+def load_verified(
+    path: Path | str,
+    *,
+    registry_path: Path | str | None = None,
+    project_root: Path | str | None = None,
+) -> Any:
+    """Verify ``path`` against its registry entry, then ``joblib.load`` it.
+
+    The registry entry must exist, the file must be present, and its byte size
+    and SHA-256 must both match before the pickle is deserialized; any
+    deviation raises ``ArtifactIntegrityError`` and no load call happens. The
+    hashing time is logged.
+    """
+    resolved = resolve_stored_path(path, project_root)
+    verify_artifact(
+        resolved, registry_path=registry_path, project_root=project_root
     )
     return joblib.load(resolved)
 
