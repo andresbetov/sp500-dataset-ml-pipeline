@@ -382,6 +382,8 @@ def test_writer_sites_record_verifiable_entries() -> None:
             # The evaluation report's per-row loss vectors and summary.
             artifacts / "results" / "per_row_losses.parquet",
             artifacts / "results" / "evaluation_summary.json",
+            # The explicit selection marker (full runs record partial: false).
+            artifacts / "results" / "run_selection.json",
         }
         expected |= {
             artifacts / "checkpoints" / run_id / f"fold_{fold_idx}.pkl"
@@ -389,6 +391,16 @@ def test_writer_sites_record_verifiable_entries() -> None:
         }
         expected |= {
             artifacts / "checkpoints" / run_id / f"fold_{fold_idx}_params.json"
+            for fold_idx in range(5)
+        }
+        # Per-fold resume records: the summary JSON records the predictions
+        # hash, and the predictions pickle lets a resume rebuild the results.
+        expected |= {
+            artifacts / "checkpoints" / run_id / f"fold_{fold_idx}_summary.json"
+            for fold_idx in range(5)
+        }
+        expected |= {
+            artifacts / "checkpoints" / run_id / f"fold_{fold_idx}_predictions.pkl"
             for fold_idx in range(5)
         }
 

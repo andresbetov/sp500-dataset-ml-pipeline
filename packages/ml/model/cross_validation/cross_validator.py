@@ -8,6 +8,7 @@ from collections.abc import Mapping, Sequence
 import joblib
 import numpy as np
 import pandas as pd
+from packages.ml.model import atomic
 from packages.ml.model.artifact_integrity import (
     REGISTRY_FILENAME,
     load_verified,
@@ -334,6 +335,20 @@ def build_fold_payload(
     }
 
 
+def write_folds_metadata_atomically(payload: dict, path: Path) -> None:
+    """Persist the fold payload through a sibling ``*.tmp`` + rename.
+
+    A failure while pickling or renaming removes the temporary file and
+    leaves any previous fold metadata byte-identical; no ``*.tmp`` residue
+    remains. Phase 3 is the only caller.
+    """
+
+    def _write(tmp_path: Path) -> None:
+        joblib.dump(payload, tmp_path)
+
+    atomic.write_via_tmp(path, _write)
+
+
 def phase_3_cross_validation() -> dict:
     """
     Date-group cross-validation with a train-only purge and a holdout reserve.
@@ -434,7 +449,7 @@ def phase_3_cross_validation() -> dict:
     folds_metadata_path = ARTIFACTS_DIR / "folds" / "folds_metadata.pkl"
 
     holdout_bounds = holdout["bounds"]
-    joblib.dump(payload, folds_metadata_path)
+    write_folds_metadata_atomically(payload, folds_metadata_path)
     # Record the hash at write time so the Phase 4 reader (and any later
     # reader) can verify this artifact before loading it.
     record_artifact(

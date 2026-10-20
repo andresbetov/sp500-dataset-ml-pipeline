@@ -10,7 +10,10 @@ import matplotlib.patches as mpatches
 import pandas as pd
 
 from packages.ml.model.visualization.data_loader import load_fold_training_summary
-from packages.ml.model.visualization.plotting import render_plot
+from packages.ml.model.visualization.plotting import (
+    render_plot,
+    save_figure_atomically,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +90,7 @@ def plot_temporal_fold_ranges(summary_df: pd.DataFrame, output_path: Path | None
     plt.xticks(rotation=45, ha="right")
 
     plt.tight_layout()
-    plt.savefig(output_path, dpi=300, bbox_inches="tight")
+    save_figure_atomically(output_path, dpi=300, bbox_inches="tight")
     logger.info(f"Saved temporal fold ranges plot to {output_path}")
     plt.close()
 
@@ -139,7 +142,7 @@ def plot_fold_sample_distribution(summary_df: pd.DataFrame, output_path: Path | 
     ax.grid(axis="y", alpha=0.3)
 
     plt.tight_layout()
-    plt.savefig(output_path, dpi=300, bbox_inches="tight")
+    save_figure_atomically(output_path, dpi=300, bbox_inches="tight")
     logger.info(f"Saved fold sample distribution plot to {output_path}")
     plt.close()
 
@@ -199,7 +202,7 @@ def plot_temporal_metric_trend(summary_df: pd.DataFrame, output_path: Path | Non
         axes[2].text(x, y, f"{y:.6f}", ha="center", va="bottom", fontsize=9)
 
     plt.tight_layout()
-    plt.savefig(output_path, dpi=300, bbox_inches="tight")
+    save_figure_atomically(output_path, dpi=300, bbox_inches="tight")
     logger.info(f"Saved temporal metric trend plot to {output_path}")
     plt.close()
 

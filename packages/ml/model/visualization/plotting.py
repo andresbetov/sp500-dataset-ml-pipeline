@@ -55,6 +55,32 @@ def _record(category: str, plot: str, status: str, error: str | None) -> None:
     )
 
 
+def save_figure_atomically(
+    output_path: Path | str,
+    *,
+    savefig: Callable[..., object] | None = None,
+    **savefig_kwargs,
+) -> Path:
+    """Save a matplotlib figure through a sibling ``*.tmp`` + ``os.replace``.
+
+    The output format is taken from the target suffix; the temporary file's
+    ``.tmp`` suffix never reaches matplotlib. A failure while saving removes
+    the temporary file, so the prior PNG stays intact and no ``*.tmp``
+    residue remains.
+    """
+    target = Path(output_path)
+    fmt = target.suffix.lstrip(".") or "png"
+    writer = savefig if savefig is not None else plt.savefig
+
+    def _save(tmp_path: Path) -> None:
+        writer(tmp_path, format=fmt, **savefig_kwargs)
+
+    from packages.ml.model import atomic
+
+    atomic.write_via_tmp(target, _save)
+    return target
+
+
 def render_plot(
     category: str,
     plot: str,

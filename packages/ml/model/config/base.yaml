@@ -47,6 +47,9 @@ paths:
   outputs: data/model_outputs
 run:
   log_path: runs.jsonl
+  # Run-scoped checkpoint directories kept under artifacts/checkpoints/. The
+  # newest N directories survive; runs.jsonl remains append-only forever.
+  retention: 5
 tuning:
   select_on: validation_qlike
   # Provenance of the frozen selection above: the campaign run and the winning

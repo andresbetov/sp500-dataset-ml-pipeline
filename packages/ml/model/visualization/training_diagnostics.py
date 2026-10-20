@@ -22,7 +22,10 @@ from packages.ml.model.features.feature_engineering import INDICATORS
 from packages.ml.model.run_log import resolve_stored_path
 from packages.ml.model.utils import ARTIFACTS_DIR
 from packages.ml.model.visualization.data_loader import load_fold_training_summary
-from packages.ml.model.visualization.plotting import render_plot
+from packages.ml.model.visualization.plotting import (
+    render_plot,
+    save_figure_atomically,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +52,29 @@ _FEATURE_IMPORTANCE_STATS: ContextVar[dict | None] = ContextVar(
     "feature_importance_stats", default=None
 )
 
+# The fold keys the current diagnostics batch should render. A full run keeps
+# every configured fold; a subset run narrows this so feature importance does
+# not resolve/prune fold checkpoints that were never selected.
+_SELECTED_FOLDS: ContextVar[tuple[str, ...] | None] = ContextVar(
+    "selected_fold_names", default=None
+)
+
+
+@contextmanager
+def selected_fold_names(fold_names: list[str]) -> Iterator[None]:
+    """Render diagnostics for exactly these fold keys inside the context."""
+    token = _SELECTED_FOLDS.set(tuple(fold_names))
+    try:
+        yield
+    finally:
+        _SELECTED_FOLDS.reset(token)
+
+
+def _context_fold_names() -> list[str]:
+    """The context's selected folds, or every configured fold."""
+    selected = _SELECTED_FOLDS.get()
+    return list(FOLD_NAMES) if selected is None else list(selected)
+
 
 @contextmanager
 def collect_feature_importance_stats() -> Iterator[dict]:
@@ -61,14 +87,16 @@ def collect_feature_importance_stats() -> Iterator[dict]:
         _FEATURE_IMPORTANCE_STATS.reset(token)
 
 
-def _record_feature_importance_stats(*, n_models_loaded: int) -> None:
+def _record_feature_importance_stats(
+    *, n_models_loaded: int, n_folds: int | None = None
+) -> None:
     """Publish the load count to the active collector, when one is open."""
     stats = _FEATURE_IMPORTANCE_STATS.get()
     if stats is None:
         return
     stats.update(
         n_models_loaded=n_models_loaded,
-        n_folds=len(FOLD_NAMES),
+        n_folds=len(FOLD_NAMES) if n_folds is None else int(n_folds),
         n_features=len(INDICATORS),
     )
 
@@ -82,6 +110,26 @@ def _fold_panel_grid(fold_count: int) -> tuple[int, int]:
     """
     columns = 3
     return math.ceil((fold_count + 1) / columns), columns
+
+
+def _available_fold_names(predictions_dict: dict) -> list[str]:
+    """The configured fold names present in a (possibly partial) run.
+
+    A subset run emits only its selected fold records; diagnostics must render
+    those instead of indexing every configured fold and failing per plot.
+    """
+    names = [name for name in FOLD_NAMES if name in predictions_dict]
+    if not names:
+        raise ValueError(
+            "no configured fold records in predictions_dict; "
+            f"expected some of {FOLD_NAMES}"
+        )
+    return names
+
+
+def _fold_index(fold_name: str) -> int:
+    """The integer index behind a ``fold_<i>`` name."""
+    return int(fold_name.split("_", 1)[1])
 
 
 def load_validation_predictions(predictions_path: Path | None = None) -> dict:
@@ -132,7 +180,8 @@ def plot_actual_vs_predicted(predictions_dict: dict, output_path: Path | None = 
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    rows, columns = _fold_panel_grid(len(FOLD_NAMES))
+    fold_names = _available_fold_names(predictions_dict)
+    rows, columns = _fold_panel_grid(len(fold_names))
     fig, axes = plt.subplots(rows, columns, figsize=(18, 6 * rows))
     axes_flat = axes.flatten()
 
@@ -140,7 +189,8 @@ def plot_actual_vs_predicted(predictions_dict: dict, output_path: Path | None = 
     all_pred = []
     all_fold = []
 
-    for i, fold_name in enumerate(FOLD_NAMES):
+    for i, fold_name in enumerate(fold_names):
+        fold_idx = _fold_index(fold_name)
         ax = axes_flat[i]
         fold_data = predictions_dict[fold_name]
         y_true = fold_data["test_true"]
@@ -148,9 +198,9 @@ def plot_actual_vs_predicted(predictions_dict: dict, output_path: Path | None = 
 
         all_true.append(y_true)
         all_pred.append(y_pred)
-        all_fold.extend([i] * len(y_true))
+        all_fold.extend([fold_idx] * len(y_true))
 
-        ax.scatter(y_true, y_pred, c=FOLD_COLORS[i], alpha=0.5, s=10, edgecolors="none")
+        ax.scatter(y_true, y_pred, c=FOLD_COLORS[fold_idx], alpha=0.5, s=10, edgecolors="none")
 
         # Diagonal reference line
         min_val = min(y_true.min(), y_pred.min())
@@ -164,7 +214,7 @@ def plot_actual_vs_predicted(predictions_dict: dict, output_path: Path | None = 
 
         ax.set_xlabel("Actual", fontsize=11, fontweight="bold")
         ax.set_ylabel("Predicted", fontsize=11, fontweight="bold")
-        ax.set_title(f"Fold {i} — Actual vs Predicted", fontsize=13, fontweight="bold")
+        ax.set_title(f"Fold {fold_idx} — Actual vs Predicted", fontsize=13, fontweight="bold")
         ax.grid(alpha=0.3)
 
     # Combined plot (last subplot)
@@ -172,11 +222,11 @@ def plot_actual_vs_predicted(predictions_dict: dict, output_path: Path | None = 
     all_pred = np.concatenate(all_pred)
     all_fold = np.array(all_fold)
 
-    ax_combined = axes_flat[len(FOLD_NAMES)]
-    for i in range(len(FOLD_NAMES)):
-        mask = all_fold == i
-        ax_combined.scatter(all_true[mask], all_pred[mask], c=FOLD_COLORS[i],
-                           alpha=0.4, s=8, edgecolors="none", label=f"Fold {i}")
+    ax_combined = axes_flat[len(fold_names)]
+    for fold_idx in sorted(set(all_fold.tolist())):
+        mask = all_fold == fold_idx
+        ax_combined.scatter(all_true[mask], all_pred[mask], c=FOLD_COLORS[fold_idx],
+                           alpha=0.4, s=8, edgecolors="none", label=f"Fold {fold_idx}")
 
     min_val = min(all_true.min(), all_pred.min())
     max_val = max(all_true.max(), all_pred.max())
@@ -190,13 +240,13 @@ def plot_actual_vs_predicted(predictions_dict: dict, output_path: Path | None = 
     # single convention.
     combined_r2 = r2_score(all_true, all_pred)
     combined_label = f"pooled $R^2$ vs pooled mean = {combined_r2:.4f}"
-    if all("har_forecast_log" in predictions_dict[name] for name in FOLD_NAMES):
+    if all("har_forecast_log" in predictions_dict[name] for name in fold_names):
         from packages.ml.model.training.training import oos_r2_vs_har
 
         all_har = np.concatenate(
             [
                 np.asarray(predictions_dict[name]["har_forecast_log"])
-                for name in FOLD_NAMES
+                for name in fold_names
             ]
         )
         combined_label += (
@@ -214,7 +264,7 @@ def plot_actual_vs_predicted(predictions_dict: dict, output_path: Path | None = 
     ax_combined.legend(fontsize=9, loc="upper left")
 
     plt.tight_layout()
-    plt.savefig(output_path, dpi=300, bbox_inches="tight")
+    save_figure_atomically(output_path, dpi=300, bbox_inches="tight")
     logger.info("Saved actual vs predicted plot to %s", output_path)
     plt.close()
 
@@ -237,20 +287,22 @@ def plot_residuals(predictions_dict: dict, output_path: Path | None = None) -> P
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    rows, columns = _fold_panel_grid(len(FOLD_NAMES))
+    fold_names = _available_fold_names(predictions_dict)
+    rows, columns = _fold_panel_grid(len(fold_names))
     fig, axes = plt.subplots(rows, columns, figsize=(18, 6 * rows))
     axes_flat = axes.flatten()
 
     all_residuals = []
 
-    for i, fold_name in enumerate(FOLD_NAMES):
+    for i, fold_name in enumerate(fold_names):
+        fold_idx = _fold_index(fold_name)
         ax = axes_flat[i]
         fold_data = predictions_dict[fold_name]
         residuals = fold_data["test_true"] - fold_data["test_pred"]
 
         all_residuals.append(residuals)
 
-        ax.hist(residuals, bins=80, color=FOLD_COLORS[i], alpha=0.7, density=True, edgecolor="white", linewidth=0.5)
+        ax.hist(residuals, bins=80, color=FOLD_COLORS[fold_idx], alpha=0.7, density=True, edgecolor="white", linewidth=0.5)
 
         # Normal distribution fit
         mu, std = residuals.mean(), residuals.std()
@@ -264,17 +316,18 @@ def plot_residuals(predictions_dict: dict, output_path: Path | None = None) -> P
 
         ax.set_xlabel("Residual (Actual - Predicted)", fontsize=11, fontweight="bold")
         ax.set_ylabel("Density", fontsize=11, fontweight="bold")
-        ax.set_title(f"Fold {i} — Residual Distribution", fontsize=13, fontweight="bold")
+        ax.set_title(f"Fold {fold_idx} — Residual Distribution", fontsize=13, fontweight="bold")
         ax.grid(alpha=0.3)
         ax.legend(fontsize=9)
 
     # Combined histogram (last subplot)
-    ax_combined = axes_flat[len(FOLD_NAMES)]
+    ax_combined = axes_flat[len(fold_names)]
     all_residuals_concat = np.concatenate(all_residuals)
 
-    for i, fold_residuals in enumerate(all_residuals):
-        ax_combined.hist(fold_residuals, bins=80, color=FOLD_COLORS[i], alpha=0.3, density=True,
-                        edgecolor="white", linewidth=0.5, label=f"Fold {i}")
+    for fold_name, fold_residuals in zip(fold_names, all_residuals):
+        fold_idx = _fold_index(fold_name)
+        ax_combined.hist(fold_residuals, bins=80, color=FOLD_COLORS[fold_idx], alpha=0.3, density=True,
+                        edgecolor="white", linewidth=0.5, label=f"Fold {fold_idx}")
 
     mu_all, std_all = all_residuals_concat.mean(), all_residuals_concat.std()
     x_range = np.linspace(all_residuals_concat.min(), all_residuals_concat.max(), 200)
@@ -288,7 +341,7 @@ def plot_residuals(predictions_dict: dict, output_path: Path | None = None) -> P
     ax_combined.legend(fontsize=8, loc="upper right")
 
     plt.tight_layout()
-    plt.savefig(output_path, dpi=300, bbox_inches="tight")
+    save_figure_atomically(output_path, dpi=300, bbox_inches="tight")
     logger.info("Saved residuals distribution plot to %s", output_path)
     plt.close()
 
@@ -451,6 +504,10 @@ def plot_feature_importance(output_path: Path | None = None) -> Path:
     fold contributes zeros with a warning, preserving the pre-existing behavior
     so the remaining folds still render.
 
+    A subset run narrows the rendered folds through the
+    ``generate_training_diagnostics`` context; a direct call renders every
+    configured fold. The docstring's guards still apply per rendered fold.
+
     Guards:
         Before any positional mapping, the model's importance width must equal
         ``len(INDICATORS)`` — the pinned 37 features. Both a narrower and a
@@ -488,16 +545,21 @@ def plot_feature_importance(output_path: Path | None = None) -> Path:
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    fold_names = _context_fold_names()
+    if not fold_names:
+        raise ValueError("plot_feature_importance received no fold names")
+    fold_indices = [_fold_index(name) for name in fold_names]
+
     all_importances = []
     n_models_loaded = 0
 
     try:
         _assert_feature_name_order(_load_persisted_feature_names())
 
-        for i in range(len(FOLD_NAMES)):
-            model_path = resolve_fold_checkpoint(i)
+        for fold_idx in fold_indices:
+            model_path = resolve_fold_checkpoint(fold_idx)
             if not model_path.exists():
-                logger.warning("Model not found at %s, skipping fold %d", model_path, i)
+                logger.warning("Model not found at %s, skipping fold %d", model_path, fold_idx)
                 all_importances.append(np.zeros(len(INDICATORS)))
                 continue
 
@@ -510,30 +572,32 @@ def plot_feature_importance(output_path: Path | None = None) -> Path:
             all_importances.append(importances)
             n_models_loaded += 1
     finally:
-        _record_feature_importance_stats(n_models_loaded=n_models_loaded)
+        _record_feature_importance_stats(
+            n_models_loaded=n_models_loaded, n_folds=len(fold_names)
+        )
 
-    if n_models_loaded < len(FOLD_NAMES):
+    if n_models_loaded < len(fold_names):
         logger.warning(
             "Feature importance loaded n_models_loaded=%d of %d checkpoints; "
             "missing checkpoints contribute zeros (aggregate scaled by %.2f)",
             n_models_loaded,
-            len(FOLD_NAMES),
-            n_models_loaded / len(FOLD_NAMES),
+            len(fold_names),
+            n_models_loaded / len(fold_names),
         )
     else:
         logger.info(
             "Feature importance loaded n_models_loaded=%d of %d checkpoints",
             n_models_loaded,
-            len(FOLD_NAMES),
+            len(fold_names),
         )
 
     all_importances = np.array(all_importances)
 
-    rows, columns = _fold_panel_grid(len(FOLD_NAMES))
+    rows, columns = _fold_panel_grid(len(fold_names))
     fig, axes = plt.subplots(rows, columns, figsize=(22, 7 * rows))
     axes_flat = axes.flatten()
 
-    for i in range(len(FOLD_NAMES)):
+    for i, fold_idx in enumerate(fold_indices):
         ax = axes_flat[i]
         importances = all_importances[i]
 
@@ -542,20 +606,20 @@ def plot_feature_importance(output_path: Path | None = None) -> Path:
         top_names = [INDICATORS[idx] for idx in top_indices]
         top_values = importances[top_indices]
 
-        ax.barh(range(len(top_indices)), top_values, color=FOLD_COLORS[i], alpha=0.8, edgecolor="black", linewidth=0.5)
+        ax.barh(range(len(top_indices)), top_values, color=FOLD_COLORS[fold_idx], alpha=0.8, edgecolor="black", linewidth=0.5)
         ax.set_yticks(range(len(top_indices)))
         ax.set_yticklabels(top_names, fontsize=9)
         ax.invert_yaxis()
         ax.set_xlabel("Importance", fontsize=11, fontweight="bold")
         ax.set_title(
-            f"Fold {i} — Top 15 of {len(INDICATORS)} Features",
+            f"Fold {fold_idx} — Top 15 of {len(INDICATORS)} Features",
             fontsize=13,
             fontweight="bold",
         )
         ax.grid(axis="x", alpha=0.3)
 
     # Aggregate importance (last subplot)
-    ax_agg = axes_flat[len(FOLD_NAMES)]
+    ax_agg = axes_flat[len(fold_names)]
     avg_importances = all_importances.mean(axis=0)
     top_indices = np.argsort(avg_importances)[-15:][::-1]
     top_names = [INDICATORS[idx] for idx in top_indices]
@@ -580,8 +644,8 @@ def plot_feature_importance(output_path: Path | None = None) -> Path:
     ax_agg.text(
         0.99,
         0.02,
-        f"Loaded {n_models_loaded}/{len(FOLD_NAMES)} checkpoints "
-        f"({n_models_loaded / len(FOLD_NAMES):.1f}× aggregate); "
+        f"Loaded {n_models_loaded}/{len(fold_names)} checkpoints "
+        f"({n_models_loaded / len(fold_names):.1f}× aggregate); "
         f"{len(INDICATORS)} features",
         transform=ax_agg.transAxes,
         ha="right",
@@ -591,7 +655,7 @@ def plot_feature_importance(output_path: Path | None = None) -> Path:
     ax_agg.grid(axis="x", alpha=0.3)
 
     plt.tight_layout()
-    plt.savefig(output_path, dpi=300, bbox_inches="tight")
+    save_figure_atomically(output_path, dpi=300, bbox_inches="tight")
     logger.info("Saved feature importance plot to %s", output_path)
     plt.close()
 
@@ -735,7 +799,9 @@ def plot_error_by_volatility_bin(predictions_dict: dict, output_path: Path | Non
 
     fig, (ax, ax_sigma) = plt.subplots(1, 2, figsize=(20, 8))
 
-    for i, fold_name in enumerate(FOLD_NAMES):
+    fold_names = _available_fold_names(predictions_dict)
+    for fold_name in fold_names:
+        fold_idx = _fold_index(fold_name)
         fold_data = predictions_dict[fold_name]
         y_true = fold_data["test_true"]
         y_pred = fold_data["test_pred"]
@@ -780,8 +846,8 @@ def plot_error_by_volatility_bin(predictions_dict: dict, output_path: Path | Non
         bin_stds = np.array(bin_stds)
 
         ax.errorbar(bin_centers, bin_means, yerr=bin_stds,
-                    color=FOLD_COLORS[i], marker="o", capsize=4, linewidth=2,
-                    markersize=6, label=f"Fold {i}", alpha=0.8)
+                    color=FOLD_COLORS[fold_idx], marker="o", capsize=4, linewidth=2,
+                    markersize=6, label=f"Fold {fold_idx}", alpha=0.8)
 
     ax.set_xlabel(
         f"Actual {LOG_SIGMA_UNIT}; decile mean",
@@ -832,7 +898,7 @@ def plot_error_by_volatility_bin(predictions_dict: dict, output_path: Path | Non
         _plot_sigma_decile_panel(ax_sigma, evaluation_summary)
 
     plt.tight_layout()
-    plt.savefig(output_path, dpi=300, bbox_inches="tight")
+    save_figure_atomically(output_path, dpi=300, bbox_inches="tight")
     logger.info("Saved error by log σ decile plot to %s", output_path)
     plt.close()
 
@@ -869,6 +935,7 @@ def generate_training_diagnostics(
         output_dir = get_project_paths()["outputs_dir"]
 
     output_dir.mkdir(parents=True, exist_ok=True)
+    fold_names = _available_fold_names(predictions_dict)
 
     plots = [
         (
@@ -894,7 +961,7 @@ def generate_training_diagnostics(
     ]
 
     paths = []
-    with collect_feature_importance_stats() as importance_stats:
+    with selected_fold_names(fold_names), collect_feature_importance_stats() as importance_stats:
         for plot_name, plot_function in plots:
             path = render_plot("diagnostics", plot_name, plot_function, output_dir)
             if path is not None:
