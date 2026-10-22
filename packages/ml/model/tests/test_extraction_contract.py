@@ -20,7 +20,10 @@ from __future__ import annotations
 import ast
 import hashlib
 import re
+import tempfile
 import traceback
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from unittest import mock
 
@@ -78,6 +81,21 @@ def _feature_engineering():
     from packages.ml.model.features import feature_engineering
 
     return feature_engineering
+
+
+@contextmanager
+def _synthetic_dataset_pin() -> Iterator[None]:
+    """Point the dataset pin at a temporary file for synthetic extractions.
+
+    These contract checks feed synthetic frames; the pin must not require the
+    generated dataset that the static CI job does not produce.
+    """
+    feature_engineering = _feature_engineering()
+    with tempfile.TemporaryDirectory(prefix="dataset-pin-") as tmp:
+        dataset = Path(tmp) / "dataset.parquet"
+        dataset.write_bytes(b"synthetic dataset for hermetic extraction tests")
+        with mock.patch.object(feature_engineering, "DATASET_PATH", dataset):
+            yield
 
 
 def _require_dataset() -> None:
@@ -330,7 +348,9 @@ def test_degenerate_mass_warns_and_records() -> None:
     frame.loc[0, "realized_volatility_5d"] = 0.0
     frame.loc[1, "realized_volatility_5d"] = floor
 
-    with mock.patch.object(feature_engineering.logger, "warning") as warning:
+    with _synthetic_dataset_pin(), mock.patch.object(
+        feature_engineering.logger, "warning"
+    ) as warning:
         _, _, metadata = feature_engineering._extract_inputs(frame)
 
     record = metadata["input_checks"]
@@ -423,7 +443,8 @@ def test_input_checks_record_constant_column_and_duplicated_pair() -> None:
     frame["rsi_14"] = 7.0
     duplicated = pd.concat([frame, frame.iloc[[0]]], ignore_index=True)
 
-    _, _, metadata = feature_engineering._extract_inputs(duplicated)
+    with _synthetic_dataset_pin():
+        _, _, metadata = feature_engineering._extract_inputs(duplicated)
 
     record = metadata["input_checks"]
     assert record["n_rows"] == duplicated.shape[0] == 5
