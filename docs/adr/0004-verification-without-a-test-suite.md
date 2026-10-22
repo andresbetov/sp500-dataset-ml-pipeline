@@ -62,3 +62,12 @@ regressions have no tripwire.
   baseline SHA-256 hashes of the dataset parquet, the ingestion manifest,
   and the regime characterization, plus a normalized-log diff expected to
   show exactly one changed line (the intentional rename).
+
+## Supersession (2026-10-18)
+
+The model package now has a pytest suite at `packages/ml/model/tests/`, and
+the `static` job in `.github/workflows/checks.yml` runs it with
+`uv run --frozen python -m pytest packages/ml/model/tests -q` after the
+byte-compile step. The original decision still governs the dataset phase and
+any model behavior the suite does not cover: run the phase you touched and
+quote the output. "No evidence, no done" is unchanged.

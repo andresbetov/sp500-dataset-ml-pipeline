@@ -46,10 +46,67 @@ python packages/ml/dataset/main.py
 
 # Phases 2-5 — feature selection, temporal validation, training, evaluation
 python packages/ml/model/main.py
+# ... or the module form:
+python -m packages.ml.model.main
 # writes model artifacts and charts (see Outputs)
 ```
 
-Both scripts accept no arguments and read no environment variables, and both work from the repository root or from inside their own package directory.
+Both phases work from the repository root or from inside their own package directory, and the model phase runs the same through either form above. The model entry accepts `--dry-run` (log the plan and exit), `--resume` (continue the latest run), `--folds` (train a subset of fold indices), and the opt-in locked-holdout entry:
+
+```bash
+# Plan only — no writes, same phases as a full run
+python -m packages.ml.model.main --dry-run
+
+# Train only folds 0 and 2 into the normal artifact tree
+python -m packages.ml.model.main --folds 0,2
+
+# Continue the latest run, reusing complete per-fold sidecars and training
+# only the folds that are missing or fail identity/hash verification
+python -m packages.ml.model.main --resume
+
+# After the normal phases, evaluate the already reserved holdout once under
+# the written lock and produce the final report
+python -m packages.ml.model.main --evaluate-holdout
+
+# Re-evaluate an already locked holdout; the reason is appended to the
+# override record (implies --evaluate-holdout)
+python -m packages.ml.model.main --force-holdout "explicit review reason"
+```
+
+`--evaluate-holdout` is the only path that reads the reserved window; a run
+without it never touches the holdout. The first evaluation writes
+`results/holdout_lock.json` and records it in `run_manifest.json` before any
+holdout metric is computed. The lock is the SHA-256 of the frozen selection
+recipe (hyperparameters plus seed/thread policy), the Phase-2 dataset pin and
+derived `X`/`Y` hashes, the fold-manifest hash, and the recorded holdout
+bounds. The manifest carries the full lock payload and every new run manifest
+carries the latest holdout block forward; the append-only `runs.jsonl` is the
+fallback if a manifest lost it. Losing the results lock therefore does not
+silently un-evaluate the holdout: it is restored from the manifest or the last
+holdout-bearing log record and remains binding. A second evaluation raises
+`HoldoutLockError`; a post-lock
+`--resume --evaluate-holdout` records a skipped holdout instead of re-scoring.
+Only `--force-holdout <reason>` bypasses the already-evaluated refusal, and it
+appends the reason to `results/holdout_overrides.jsonl` while still refusing a
+changed config, dataset pin, input hash, fold hash, or bounds.
+
+`--resume` reads `packages/ml/model/artifacts/run_manifest.json` and requires the manifest's `run_id`, `config_hash`, `fold_manifest_hash`, and `input_identity` (dataset SHA-256 plus the persisted `X.npy`/`Y.npy` hashes). A missing identity, a config/fold-construction mismatch, or a changed dataset/input digest refuses by name instead of silently starting a fresh run; the persisted inputs and fold payload are verified before Phases 2/3 can rewrite them. A fold is skipped only when its checkpoint, parameter sidecar, summary record, and predictions record are all present and match their artifact-registry size/SHA-256 entries, and the summary's recorded predictions hash matches the predictions file. The run manifest records `fold_selection` (`requested`, `trained`, `resumed`) and `partial` for every invocation; a subset run also writes `results/run_selection.json`, while a full run keeps exactly five fold rows. Neither flag changes the no-argument full run.
+
+### Retention and run history
+
+Run-scoped checkpoint directories live under `packages/ml/model/artifacts/checkpoints/<run_id>/`. After each run, retention keeps the newest `run.retention` directories (configured in `packages/ml/model/config/base.yaml`) and removes older ones; each kept directory carries a `README.md` with its identity, selection, contents, and retention rule. `packages/ml/model/artifacts/runs.jsonl` is append-only and is never truncated or pruned, so run history survives directory retention. The inputs, fold metadata, results, run manifest, and each per-fold sidecar and PNG are written individually through tmp + rename; the fold summary records the predictions file's size and SHA-256 so a stale pair is detected and recomputed rather than accepted.
+
+A `--folds` run is explicitly partial: its summary and evaluation artifacts contain only the selected folds, `run_manifest.json` carries `partial: true` plus the selection, and `results/run_selection.json` restates the requested/trained/resumed folds. Phase 5 diagnostics render the emitted fold records (no missing-fold indexing), so a subset run records normal per-plot statuses instead of silent plot failures.
+
+Determinism evidence is opt-in and cheap:
+
+```bash
+# At least three seeds per fold on the validation views; tiny fits
+python -m packages.ml.model.determinism
+# writes packages/ml/model/artifacts/results/seed_sweep.json
+```
+
+The sweep uses the validation-only fold views (never a test block or the holdout window), records per-seed/per-fold validation QLIKE plus model/prediction hashes, and carries the thread/seed policy, environment versions, `PYTHONHASHSEED`, git sha, lock hash, and fold-manifest digest. The pipeline itself pins `training.n_jobs` and `OMP_NUM_THREADS` to 1 and records the effective values in every run manifest.
 
 Phase 2 fails immediately if Phase 1 has not been run first. Because generated data is gitignored, a fresh clone always starts with Phase 1.
 
@@ -72,8 +129,10 @@ Phase 1 feature code lives in `packages/ml/dataset/features/` (one family per mo
 | `data/processed/dataset.parquet` | 1 | Cleaned survivors-only panel: raw OHLCV columns plus the retained adjusted OHLC columns (`_adj_open`, `_adj_high`, `_adj_low`), per-ticker features plus `log_price`, `realized_volatility_5d`, `market_regime` |
 | `packages/ml/model/artifacts/inputs/` | 2 | `X.npy`, `Y.npy`, `metadata.pkl` — exactly what training consumes |
 | `packages/ml/model/artifacts/folds/` | 3 | Fold indices and date ranges for temporal validation |
-| `packages/ml/model/artifacts/checkpoints/` | 4 | One trained model per fold |
-| `packages/ml/model/artifacts/results/` | 1, 4 | `fold_training_summary.json` (per-fold metrics), `har_benchmark.json` (HAR-RV benchmark per fold), `regime_characterization.json`, predictions |
+| `packages/ml/model/artifacts/checkpoints/` | 4 | One trained model per fold plus its `fold_<i>_params.json` hyperparameter sidecar, `fold_<i>_summary.json` metric/identity record, and `fold_<i>_predictions.pkl` resume record, under a run-scoped `<run_id>/` directory; each file is written atomically (tmp + rename), and each kept run directory carries a provenance `README.md` |
+| `packages/ml/model/artifacts/results/` | 1, 4, holdout | `fold_training_summary.json` (per-fold metrics), `har_benchmark.json` (HAR-RV benchmark per fold), `per_row_losses.parquet` (per-row loss vectors), `evaluation_summary.json` (evaluation report statistics), `run_selection.json` (partial/selection record), `regime_characterization.json`, predictions; the opt-in holdout writes `holdout_lock.json`, `holdout_predictions.pkl`, `holdout_model.pkl`, `holdout_report.json`, `SHA256SUMS`, and `holdout_overrides.jsonl` |
+| `packages/ml/model/artifacts/results/seed_sweep.json` | explicit | Seed × fold validation sweep with the determinism policy, environment, and fold-manifest digest (`python -m packages.ml.model.determinism`) |
+| `packages/ml/model/artifacts/` | 2-5 | `runs.jsonl` (append-only run log: one strict-JSON line per run, never pruned), `run_manifest.json` (latest run: identity, config hash, fold selection, environment versions, phase/fold status, durations, artifact hashes, written atomically), `artifact_registry.json` (byte size + sha256 per recorded artifact, updated atomically at write time; every live `joblib.load` verifies against it before loading). Run-scoped directories are pruned to the newest `run.retention` |
 | `data/model_outputs/` | 5 | 14 PNG evaluation charts |
 
 Everything in the table is generated output and gitignored.
@@ -82,7 +141,7 @@ Everything in the table is generated output and gitignored.
 
 Temporal validation uses date-group folds with expanding training windows: the sorted unique trading dates are split into six contiguous blocks, and each of the five folds trains on every block before its test block and is scored only on later rows.
 
-Each fold applies a two-sided purge of the 5-day forward target's label overlap — training rows whose label window reaches into the test block and test rows whose label window overlaps the last training row's window are both dropped — so at least five complete trading days separate the kept train and test dates. The per-fold guard in `packages/ml/model/cross_validation/cross_validator.py` enforces this in unique-trading-date index space.
+Each fold applies a train-only purge of the 5-day forward target's label overlap — training rows whose label window reaches into the test block are dropped, while test blocks are kept whole — so exactly five complete trading days separate the last kept training date from the first kept test date. The per-fold guard in `packages/ml/model/cross_validation/cross_validator.py` enforces this in unique-trading-date index space.
 
 Most price-derived features are computed per ticker and shifted one day, so they never see their own bar. A handful of model inputs deliberately carry the close of day t: `simple_return` is a same-bar return, and the `price_vs_sma_*` and `zscore_*` families divide a current-bar value by a lagged statistic. For those inputs the documented contract is the close of t — they are anchored to the bar being predicted, not to the previous close. `log_return` stays in the dataset as the target's input but is not a model input. The target is the single deliberate exception: it looks five days forward.
 
@@ -90,9 +149,11 @@ Six dataset columns are infinite-memory recursions rather than windowed statisti
 
 ## Model
 
-One `XGBRegressor` per fold, hyperparameters in `packages/ml/model/training/model_trainer.py`. Keeping one model per fold prevents any fold from being influenced by another fold's evaluation data. Edit hazards in the training path — including a dead early-stopping branch — are listed in AGENTS.md.
+One `XGBRegressor` per fold, hyperparameters frozen in `packages/ml/model/config/base.yaml` (`training.hyperparameters`) and derived by the trainer at call time. Keeping one model per fold prevents any fold from being influenced by another fold's evaluation data. Edit hazards in the training path — including a dead early-stopping branch — are listed in AGENTS.md.
 
-The target is modeled as `log(RV)` — the Yang-Zhang variance is closer to log-normal, and QLIKE is the robust loss for it. Exact-zero flat windows are degenerate labels: they are floored at `1e-12` for the log (so test scoring stays finite), kept in the test sets, and excluded from the fold training sets. R²/MAE/RMSE are computed on the log scale, with sklearn's fold-own-mean R² convention. Every fold also fits the canonical HAR-RV benchmark (Corsi 2008, 1/5/22 trailing variance components) on its training rows only and is scored on the same test rows; the comparison lands in `har_benchmark.json`.
+The target is modeled as `log(RV)` — the Yang-Zhang variance is closer to log-normal, and QLIKE is the robust loss for it. Exact-zero flat windows are floor artifacts: they are floored at `1e-12` only to keep the log finite, and one floor policy excludes them from fold fitting, model scoring, and the HAR benchmark. Each fold persists the original test indices, the aligned retained-row mask, the scored indices, and reconciled counts, and declares the headline floor-retained row set. R²/MAE/RMSE are computed on the log scale, with sklearn's fold-own-mean R² convention. Every fold also fits the canonical HAR-RV benchmark (Corsi (2009), 1/5/22 trailing variance components) on its training rows only and is scored on the same floor-retained test rows; the comparison lands in `har_benchmark.json`. The evaluation layer persists one loss-vector row per test-block row (`per_row_losses.parquet`, with the persisted floor flag) and writes `evaluation_summary.json` from those rows only: dual OOS-R², DM/CW/GW with Newey-West HAC lag 4, Mincer-Zarnowitz regressions, decile/regime QLIKE, QLIKE mean/median/IQR/top-1% tails, the floor with/without decomposition, the date-clustered gap, expanding-origin loss curves, and the declared no-calibration status.
+
+The optional holdout evaluation is a single final refit on the purged remainder (every floor-retained row before the reserved window whose five-day label window ends before it) plus the canonical HAR-RV benchmark on the same rows, predicting the holdout block once. The protocol, lock identity, holdout metrics, config hash, git sha, environment reference, and artifact hashes are written to `holdout_report.json`; `SHA256SUMS` verifies the report and its sibling holdout artifacts. The headline edge carries single-seed, floor-policy, holdout, and no-calibration caveats.
 
 ## Evaluation
 
@@ -111,13 +172,13 @@ For the numbers, read `packages/ml/model/artifacts/results/fold_training_summary
 - **Price and volume only.** No macro data, fundamentals, sentiment, or cross-ticker features.
 - **No sector information.** The source data carries no sector labels, so sector dynamics cannot be learned.
 - **`market_regime` is a hardcoded calendar label**, not something derived from the data. Seven calendar buckets span 2000-2007 through 2026; a date past 2026 raises instead of joining the last bucket.
-- **Squared-error training predicts conditional means.** Predictions are compressed toward the centre of the historical range by construction; tail-risk use requires post-hoc calibration.
-- **No automated test or lint suite.** Changes are verified by running the affected phase and reading the logs.
+- **QLIKE training targets conditional sigma.** The fold models minimize QLIKE on log daily sigma, the same loss reported in evaluation; the log-scale R²/MAE/RMSE remain diagnostic, and tail-risk use still requires out-of-sample evaluation.
+- **Model tests, no lint suite.** `packages/ml/model/tests/` runs under pytest; other changes are verified by running the affected phase and reading the logs.
 - **A fresh clone needs Phase 1 first.** Nothing downstream can run without the generated parquet file.
 
 ## Contributing
 
-Read [AGENTS.md](AGENTS.md) before editing. It covers the two entry points and their order, the invariants that silently break saved artifacts, and known dead code. Run the phase covering your change — Phase 1 for `packages/ml/dataset`, Phases 2-5 otherwise — and confirm it completes. Repo-wide rationale lives in [docs/adr/](docs/adr/); check whether your change needs a new record before editing an accepted one.
+Read [AGENTS.md](AGENTS.md) before editing. It covers the two entry points and their order, the invariants that silently break saved artifacts, and known dead code. Run the model tests with `uv run --frozen python -m pytest packages/ml/model/tests -q` (checks that need generated data are skipped on a fresh clone). Run the phase covering your change — Phase 1 for `packages/ml/dataset`, Phases 2-5 otherwise — and confirm it completes. Repo-wide rationale lives in [docs/adr/](docs/adr/); check whether your change needs a new record before editing an accepted one.
 
 ## License
 

@@ -60,3 +60,13 @@ normalizes PEP 366 identity while the model phase does not — which is why
   `[build-system]`, no console entry points.
 - `packages/ml/dataset/main.py:7-12`: the PEP 366 `__package__`
   normalization block.
+
+## Supersession note — 2026-10-18
+
+The model phase now also normalizes its package identity on direct execution
+(`packages/ml/model/main.py`, PEP 366) and uses package-absolute imports
+throughout; the dataset entry keeps package-relative imports. The model phase
+also documents a `python -m packages.ml.model.main` entry form. The rest of the
+decision above — plain script entry points, no build system, no console
+scripts, `__main__` guard — stands; the context and alternatives that describe
+the model phase as flat-imported are historical.
