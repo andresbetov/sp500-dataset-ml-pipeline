@@ -22,7 +22,6 @@ from conftest import ARTIFACTS_DIR
 
 from packages.ml.model.visualization.data_loader import load_fold_training_summary
 
-LIVE_SUMMARY = ARTIFACTS_DIR / "results" / "fold_training_summary.json"
 
 
 def _fold(index: int, **overrides) -> dict:
@@ -125,11 +124,3 @@ def test_reversed_key_order_yields_the_same_fold_sorted_frame(tmp_path: Path) ->
     pd.testing.assert_frame_equal(forward, reversed_frame)
 
 
-def test_live_summary_loads_in_fold_order() -> None:
-    if not LIVE_SUMMARY.is_file():
-        pytest.skip("requires the live fold training summary absent from this checkout")
-
-    frame = load_fold_training_summary(LIVE_SUMMARY)
-
-    assert list(frame["fold"]) == [f"fold_{index}" for index in range(len(frame))]
-    assert len(frame) == 5

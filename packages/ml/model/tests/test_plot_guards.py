@@ -31,7 +31,6 @@ from packages.ml.model.visualization import (
 )
 from packages.ml.model.visualization.data_loader import load_fold_training_summary
 
-LIVE_SUMMARY = conftest.ARTIFACTS_DIR / "results" / "fold_training_summary.json"
 
 METRIC_COLUMNS = ("test_r2", "test_mae", "test_rmse")
 
@@ -308,47 +307,3 @@ def _stub_checkpoint_loads(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> N
     )
 
 
-def test_live_shaped_fixture_keeps_the_fourteen_plot_set(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The full visualization set keeps all 14 names and statuses."""
-    _stub_checkpoint_loads(monkeypatch, tmp_path)
-    monkeypatch.setattr(
-        visualize, "load_validation_predictions", lambda _path=None: _predictions()
-    )
-    summary_path = _write_summary(tmp_path, _summary_frame())
-    output_dir = tmp_path / "plots"
-
-    results = visualize.generate_all_visualizations(
-        summary_path=summary_path,
-        predictions_path=tmp_path / "unused.pkl",
-        output_dir=output_dir,
-    )
-
-    assert set(results) == set(EXPECTED_PLOTS)
-    assert sum(len(paths) for paths in results.values()) == 14
-    assert {path.name for paths in results.values() for path in paths} == {
-        f"{plot}.png" for plot in ALL_PLOTS
-    }
-    entries = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))[
-        "plots"
-    ]
-    assert len(entries) == 14
-    assert all(entry["status"] == "ok" for entry in entries), entries
-
-
-def test_live_positive_metrics_render(tmp_path: Path) -> None:
-    """The live positive, non-constant summary still renders all metric panels."""
-    if not LIVE_SUMMARY.is_file():
-        pytest.skip("requires live model artifacts absent from this checkout")
-    frame = load_fold_training_summary(LIVE_SUMMARY)
-    assert (frame["test_r2"] > 0).all()
-
-    paths = metrics_visualizer.generate_metrics_visualizations(frame, tmp_path / "live")
-
-    assert {path.name for path in paths} == {
-        "r2_scores_by_fold.png",
-        "mae_rmse_comparison.png",
-        "metrics_heatmap.png",
-    }
-    assert all(path.is_file() and path.stat().st_size > 0 for path in paths)

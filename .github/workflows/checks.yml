@@ -26,8 +26,8 @@ jobs:
         run: uv sync --frozen
       - name: Byte-compile packages (syntax only, no execution)
         run: uv run --frozen python -m compileall -q packages
-      - name: pytest (model)
-        run: uv run --frozen python -m pytest packages/ml/model/tests -q
+      - name: pytest (model, hermetic unit suite)
+        run: uv run --frozen python -m pytest packages/ml/model/tests -q --ignore=packages/ml/model/tests/live
 
   dataset-smoke:
     runs-on: ubuntu-latest

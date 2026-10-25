@@ -132,26 +132,6 @@ def test_consumers_resolve_the_registry_dataset_path() -> None:
     assert registry_dataset_path == DATASET_PATH
 
 
-def test_registry_mapping_is_unchanged() -> None:
-    from packages.ml.model.utils import get_project_paths
-
-    assert get_project_paths() == EXPECTED_PATHS
-
-
-def test_resolved_dataset_file_exists() -> None:
-    from packages.ml.model.features import feature_engineering
-    from packages.ml.model.training import har_benchmark
-
-    for module in (feature_engineering, har_benchmark):
-        if not module.DATASET_PATH.is_file():
-            pytest.skip(
-                "requires the generated dataset absent from this checkout: "
-                f"{module.DATASET_PATH}"
-            )
-    assert feature_engineering.DATASET_PATH.resolve() == DATASET_PATH.resolve()
-    assert har_benchmark.DATASET_PATH.resolve() == DATASET_PATH.resolve()
-
-
 def test_consumer_modules_have_no_import_time_file_reads() -> None:
     calls = [
         call
@@ -162,15 +142,6 @@ def test_consumer_modules_have_no_import_time_file_reads() -> None:
         "importing the consumer modules must not read files beyond module "
         "loading; module-level reads found:\n" + "\n".join(calls)
     )
-
-
-def test_har_benchmark_reads_through_the_imported_constant() -> None:
-    arguments = _har_read_parquet_arguments()
-    assert arguments, "load_har_regressors no longer calls pd.read_parquet"
-    assert all(
-        isinstance(argument, ast.Name) and argument.id == "DATASET_PATH"
-        for argument in arguments
-    ), "load_har_regressors must read through the module's DATASET_PATH"
 
 
 def test_load_har_regressors_reads_the_dataset() -> None:

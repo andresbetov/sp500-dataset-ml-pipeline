@@ -403,56 +403,6 @@ def test_vector_writer_creates_the_results_dir_and_leaves_no_tmp() -> None:
         assert not list(Path(tmpdir).rglob("*.tmp"))
 
 
-def test_live_loss_vector_counts_and_alignment() -> None:
-    """Read-only: the live expected counts reconcile; vectors verified if present."""
-    requires_live_artifacts(ARTIFACTS_DIR)
-    folds_path = ARTIFACTS_DIR / "folds" / "folds_metadata.pkl"
-    predictions_path = ARTIFACTS_DIR / "results" / "validation_predictions.pkl"
-    if not (folds_path.is_file() and predictions_path.is_file()):
-        pytest.skip("requires the live fold metadata and stored predictions")
-
-    folds_metadata = joblib.load(folds_path)
-    predictions = joblib.load(predictions_path)
-    expected = {}
-    for fold_key in sorted(
-        key for key in folds_metadata if key.startswith("fold_")
-    ):
-        test_indices = np.asarray(folds_metadata[fold_key]["test_indices"])
-        expected[fold_key] = len(test_indices)
-        assert expected[fold_key] == int(folds_metadata[fold_key]["n_test"])
-        prediction = predictions[fold_key]
-        assert prediction["n_test_total"] == expected[fold_key]
-        assert prediction["n_test_total"] == (
-            prediction["n_test_scored"] + prediction["n_test_floor_excluded"]
-        )
-        assert len(prediction["test_floor_mask"]) == expected[fold_key]
-
-    vectors_path = ARTIFACTS_DIR / "results" / "per_row_losses.parquet"
-    if not vectors_path.is_file():
-        pytest.skip(
-            "live per-row loss vectors are absent until the next artifact "
-            "regeneration; the expected counts above still reconcile"
-        )
-
-    vectors = pd.read_parquet(vectors_path)
-    counts = {
-        fold_key: int(len(_fold_frame(vectors, fold_key))) for fold_key in expected
-    }
-    assert counts == expected
-    for fold_key in expected:
-        frame = _fold_frame(vectors, fold_key)
-        prediction = predictions[fold_key]
-        assert np.array_equal(
-            frame["is_floor"].to_numpy(),
-            ~np.asarray(prediction["test_floor_mask"], dtype=bool),
-        )
-        assert np.isfinite(
-            frame[
-                ["y_true", "y_pred_model", "y_pred_har", "loss_model", "loss_har"]
-            ].to_numpy(dtype=np.float64)
-        ).all()
-
-
 if __name__ == "__main__":
     failures = 0
     skipped = 0

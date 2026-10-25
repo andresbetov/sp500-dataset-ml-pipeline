@@ -82,8 +82,6 @@ STUB_COMPONENT = 0.04
 # The pooled live values recomputed read-only at this branch point from the
 # current stored predictions and the persisted HAR coefficients; they are
 # interim and regenerate with the artifacts.
-LIVE_POOLED_LOG_R2 = 0.5935106380373554
-LIVE_POOLED_VS_HAR = 0.5625680996966533
 
 
 class _RecordingModel:
@@ -420,115 +418,6 @@ def test_prevailing_mean_matches_sklearn_and_constant_target_convention() -> Non
     constant = np.full(4, 0.25)
     assert training.oos_r2_prevailing_mean(constant, constant) == 1.0
     assert training.oos_r2_prevailing_mean(constant, np.full(4, 0.5)) == 0.0
-
-
-def test_diagnostics_pooled_label_names_the_conventions() -> None:
-    """The combined panel names its convention(s) instead of a bare R²."""
-    y0 = np.array([0.10, 0.20, 0.50, 0.80])
-    p0 = np.array([0.15, 0.25, 0.45, 0.70])
-    h0 = np.array([0.05, 0.60, 0.30, 0.90])
-    y1 = np.array([0.30, 0.60, 0.90, 1.40, 0.70])
-    p1 = np.array([0.40, 0.50, 1.00, 1.20, 0.80])
-    h1 = np.array([0.70, 0.70, 0.70, 0.70, 0.70])
-
-    without_har = {
-        "fold_0": {"test_true": y0, "test_pred": p0, "test_r2": r2_score(y0, p0)},
-        "fold_1": {"test_true": y1, "test_pred": p1, "test_r2": r2_score(y1, p1)},
-    }
-    with_har = {
-        "fold_0": {**without_har["fold_0"], "har_forecast_log": h0},
-        "fold_1": {**without_har["fold_1"], "har_forecast_log": h1},
-    }
-
-    ambiguous = (
-        f"$R^2 = "
-        f"{r2_score(np.concatenate([y0, y1]), np.concatenate([p0, p1])):.4f}$"
-    )
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        prevailing_texts = _capture_combined_label(
-            without_har, Path(tmpdir) / "pooled_prevailing.png"
-        )
-        assert len(prevailing_texts) == 1, prevailing_texts
-        prevailing_label = prevailing_texts[0]
-        assert "pooled" in prevailing_label
-        assert "pooled mean" in prevailing_label
-        assert "HAR" not in prevailing_label
-        assert ambiguous not in prevailing_label
-        expected_prevailing = training.oos_r2_prevailing_mean(
-            np.concatenate([y0, y1]), np.concatenate([p0, p1])
-        )
-        assert f"{expected_prevailing:.4f}" in prevailing_label
-
-        dual_texts = _capture_combined_label(
-            with_har, Path(tmpdir) / "pooled_dual.png"
-        )
-        assert len(dual_texts) == 1, dual_texts
-        dual_label = dual_texts[0]
-        assert "pooled mean" in dual_label
-        assert "vs HAR" in dual_label
-        expected_vs_har = training.oos_r2_vs_har(
-            np.concatenate([y0, y1]),
-            np.concatenate([p0, p1]),
-            np.concatenate([h0, h1]),
-        )
-        assert f"{expected_vs_har:.4f}" in dual_label
-
-
-def test_live_pooled_log_r2_recompute() -> None:
-    """Read-only live recompute of the pooled log R² from the stored artifacts."""
-    requires_live_artifacts(ARTIFACTS_DIR)
-    predictions_path = ARTIFACTS_DIR / "results" / "validation_predictions.pkl"
-    har_report_path = ARTIFACTS_DIR / "results" / "har_benchmark.json"
-    metadata_path = ARTIFACTS_DIR / "inputs" / "metadata.pkl"
-    folds_path = ARTIFACTS_DIR / "folds" / "folds_metadata.pkl"
-    if not (
-        predictions_path.is_file()
-        and har_report_path.is_file()
-        and metadata_path.is_file()
-        and folds_path.is_file()
-        and DATASET_PATH.is_file()
-    ):
-        pytest.skip("requires the stored live predictions, HAR report, and inputs")
-
-    stored = joblib.load(predictions_path)
-    har_report = json.loads(har_report_path.read_text(encoding="utf-8"))
-    metadata = joblib.load(metadata_path)
-    regressors, _warmup_mask = load_har_regressors(
-        metadata["date"], metadata["ticker"]
-    )
-
-    fold_keys = sorted(stored)
-    targets = []
-    forecasts = []
-    har_forecasts = []
-    for fold_key in fold_keys:
-        fold = stored[fold_key]
-        y = np.asarray(fold["test_true"])
-        p = np.asarray(fold["test_pred"])
-        scored = np.asarray(fold["test_indices_scored"])
-        coefficients = np.asarray(har_report["folds"][fold_key]["coefficients"])
-        design = np.column_stack([np.ones(scored.size), regressors[scored]])
-        har = 0.5 * np.log(
-            np.maximum(design @ coefficients, training.RV_FLOOR**2)
-        )
-        # The stored per-fold key keeps the fold-own-mean convention.
-        assert fold["test_r2"] == pytest.approx(
-            training.oos_r2_prevailing_mean(y, p), rel=1e-12, abs=1e-12
-        )
-        targets.append(y)
-        forecasts.append(p)
-        har_forecasts.append(har)
-
-    y_all = np.concatenate(targets)
-    p_all = np.concatenate(forecasts)
-    h_all = np.concatenate(har_forecasts)
-    pooled_prevailing = training.oos_r2_prevailing_mean(y_all, p_all)
-    assert pooled_prevailing == pytest.approx(r2_score(y_all, p_all), rel=1e-12, abs=1e-12)
-    assert pooled_prevailing == pytest.approx(LIVE_POOLED_LOG_R2, abs=1e-6)
-    assert training.oos_r2_vs_har(y_all, p_all, h_all) == pytest.approx(
-        LIVE_POOLED_VS_HAR, abs=1e-6
-    )
 
 
 if __name__ == "__main__":

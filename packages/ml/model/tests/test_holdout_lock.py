@@ -830,24 +830,6 @@ def test_no_tuning_trial_view_touches_the_declared_holdout() -> None:
         assert not list(output_dir.rglob(holdout.REPORT_FILENAME))
 
 
-def test_live_holdout_reservation_is_disjoint_and_purged() -> None:
-    """Read-only live check: the persisted window matches the fold schema."""
-    requires_live_artifacts(ARTIFACTS_DIR)
-    metadata_path = ARTIFACTS_DIR / "inputs" / "metadata.pkl"
-    folds_path = ARTIFACTS_DIR / "folds" / "folds_metadata.pkl"
-    y_path = ARTIFACTS_DIR / "inputs" / "Y.npy"
-    if not (metadata_path.is_file() and folds_path.is_file() and y_path.is_file()):
-        pytest.skip("live holdout reservation inputs are absent from this checkout")
-
-    reservation = holdout.validate_holdout_reservation(
-        joblib.load(metadata_path)["date"],
-        np.load(y_path),
-        joblib.load(folds_path),
-    )
-    assert reservation["n_holdout_dates"] == HOLDOUT_N_DATES
-    assert reservation["separation"] >= cross_validator.SEPARATION_MIN
-
-
 def test_cli_exposes_the_holdout_entry_and_override_flags() -> None:
     result = subprocess.run(
         [sys.executable, "-B", "-m", "packages.ml.model.main", "--help"],

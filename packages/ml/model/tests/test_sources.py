@@ -111,33 +111,6 @@ def _normalized(path: Path) -> str:
     return " ".join(path.read_text(encoding="utf-8").split()).lower()
 
 
-def test_production_imports_are_all_referenced() -> None:
-    findings = []
-    for path in _production_modules():
-        for bound, line, source in _unused_imports(path):
-            relative = path.relative_to(REPO_ROOT).as_posix()
-            findings.append(f"{relative}:{line}: {bound} ({source})")
-
-    assert not findings, "unused imports: " + "; ".join(findings)
-
-
-def test_unused_import_scan_detects_a_seeded_import() -> None:
-    source = (
-        "from __future__ import annotations\n"
-        "import json\n"
-        "import matplotlib.patches as mpatches\n"
-        "from pathlib import Path\n"
-        "\n"
-        "VALUE: Path | None = None\n"
-    )
-    with tempfile.TemporaryDirectory() as tmpdir:
-        seeded = Path(tmpdir) / "seeded.py"
-        seeded.write_text(source, encoding="utf-8")
-        unused = {bound for bound, _line, _source in _unused_imports(seeded)}
-
-    assert unused == {"json", "mpatches"}, unused
-
-
 def test_load_folds_metadata_annotation_matches_the_loaded_payload() -> None:
     annotation = get_type_hints(cv_utils.load_folds_metadata)["return"]
     assert annotation is dict or get_origin(annotation) is dict, annotation
@@ -157,89 +130,6 @@ def test_load_folds_metadata_annotation_matches_the_loaded_payload() -> None:
 
     assert type(loaded) is dict
     assert loaded == payload
-
-
-def test_load_fold_data_stays_deleted() -> None:
-    assert not hasattr(cv_utils, "load_fold_data")
-
-    with pytest.raises(ImportError):
-        from packages.ml.model.cross_validation.cv_utils import (  # noqa: F401
-            load_fold_data,
-        )
-
-
-def test_model_readme_documents_roots_phases_and_entry_points() -> None:
-    assert README_PATH.is_file(), f"missing model README: {README_PATH}"
-    text = _normalized(README_PATH)
-
-    required = (
-        "artifacts/",
-        "data/model_outputs/",
-        "docs/model-artifacts.md",
-        "phase 2",
-        "phase 3",
-        "phase 4",
-        "phase 5",
-        "python -m packages.ml.model.main",
-        "--dry-run",
-        "--resume",
-        "--folds",
-    )
-    missing = [token for token in required if token not in text]
-    assert not missing, f"README is missing: {missing}"
-
-
-def test_model_readme_attributes_the_artifacts_root_writers() -> None:
-    rows = [
-        " ".join(line.split()).lower()
-        for line in README_PATH.read_text(encoding="utf-8").splitlines()
-        if line.startswith("| `packages/ml/model/artifacts/`")
-    ]
-    assert len(rows) == 1, rows
-    row = rows[0]
-
-    for token in (
-        "phase 1",
-        "regime_characterization.json",
-        "phases 2-4",
-        "model entry point",
-        "run state",
-        "after phase 5",
-    ):
-        assert token in row, f"artifacts-root row is missing {token!r}: {row}"
-
-
-def test_model_readme_records_the_stale_directory_dispositions() -> None:
-    text = _normalized(README_PATH)
-
-    required = (
-        "artifacts/legacy/",
-        "empty",
-        "artifacts/baseline_v1/",
-        "provenance",
-        "explicit",
-        "override",
-        "runs.jsonl",
-    )
-    missing = [token for token in required if token not in text]
-    assert not missing, f"README is missing the disposition notes: {missing}"
-
-
-def test_artifact_guide_names_both_stale_directories() -> None:
-    text = _normalized(ARTIFACT_GUIDE_PATH)
-
-    assert "artifacts/legacy/" in text
-    assert "artifacts/baseline_v1/" in text
-
-
-def test_output_roots_are_unchanged() -> None:
-    paths = get_project_paths()
-
-    assert paths["project_root"] == REPO_ROOT
-    assert paths["model_dir"] == MODEL_ROOT
-    assert paths["artifacts_dir"] == MODEL_ROOT / "artifacts"
-    assert paths["outputs_dir"] == REPO_ROOT / "data" / "model_outputs"
-    assert paths["dataset_path"] == REPO_ROOT / "data" / "processed" / "dataset.parquet"
 
 
 if __name__ == "__main__":

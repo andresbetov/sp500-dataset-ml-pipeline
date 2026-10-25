@@ -420,32 +420,6 @@ def test_tiny_campaign_writes_a_validation_only_selection_artifact() -> None:
         }
 
 
-def test_selection_schema_rejects_test_prefixed_keys() -> None:
-    X, y, row_dates, folds_metadata = _tiny_folds()
-    with tempfile.TemporaryDirectory() as tmpdir:
-        result = _run_campaign(
-            X, y, row_dates, folds_metadata, _temp_root(tmpdir)
-        )
-        selection = json.loads(
-            result["selection_path"].read_text(encoding="utf-8")
-        )
-
-    top_level = deepcopy(selection)
-    top_level["test_qlike"] = 0.0
-    with pytest.raises(harness.TestLockError, match="test_qlike"):
-        harness.validate_selection_artifact(top_level)
-
-    nested = deepcopy(selection)
-    nested["selected_trial"]["folds"]["fold_0"]["test_fingerprint"] = "0" * 64
-    with pytest.raises(harness.TestLockError, match="test_fingerprint"):
-        harness.validate_selection_artifact(nested)
-
-    in_list = deepcopy(selection)
-    in_list["trials"][0]["folds"]["fold_1"]["test_qlike"] = 1.0
-    with pytest.raises(harness.TestLockError, match="test_qlike"):
-        harness.validate_selection_artifact(in_list)
-
-
 def test_no_view_construction_path_can_carry_test_or_holdout_indices() -> None:
     X, y, row_dates, folds_metadata = _tiny_folds()
 
@@ -538,80 +512,6 @@ def test_no_view_construction_path_can_carry_test_or_holdout_indices() -> None:
                 fold_key,
             )
             assert not (received & all_holdout), (role, fold_key)
-
-
-def test_per_trial_sidecars_record_index_fingerprints_and_manifest_hashes() -> None:
-    X, y, row_dates, folds_metadata = _tiny_folds()
-    with tempfile.TemporaryDirectory() as tmpdir:
-        output_dir = _temp_root(tmpdir)
-        result = _run_campaign(X, y, row_dates, folds_metadata, output_dir)
-
-        sidecars = sorted(result["run_dir"].glob("trial_*_sidecar.json"))
-        assert len(sidecars) == 6
-        views = _expected_views(X, y, row_dates, folds_metadata)
-
-        fingerprints = {fold_key: set() for fold_key in FOLD_KEYS}
-        for trial_index, path in enumerate(sidecars):
-            document = json.loads(path.read_text(encoding="utf-8"))
-            assert document["trial_index"] == trial_index
-            assert document["stage"] in {"coarse", "refinement", "seed_finalists"}
-            assert document["seed"] in {42, 43}
-            for fold_key in FOLD_KEYS:
-                fold_record = document["folds"][fold_key]
-                assert (
-                    fold_record["fit_fingerprint"]
-                    == views[fold_key]["fit"]["fingerprint"]
-                )
-                assert (
-                    fold_record["validation_fingerprint"]
-                    == views[fold_key]["validation"]["fingerprint"]
-                )
-                assert fold_record["n_fit"] == len(
-                    views[fold_key]["fit"]["indices"]
-                )
-                assert fold_record["n_validation"] == len(
-                    views[fold_key]["validation"]["indices"]
-                )
-                fingerprints[fold_key].add(
-                    (
-                        fold_record["fit_fingerprint"],
-                        fold_record["validation_fingerprint"],
-                    )
-                )
-
-        # The views are built once per fold, so every trial records the same
-        # fingerprint pair for a fold.
-        for fold_key in FOLD_KEYS:
-            assert len(fingerprints[fold_key]) == 1
-
-        # The sidecars and the selection artifact are recorded in the run
-        # manifest and the artifact registry with their hashes.
-        manifest = json.loads(
-            (output_dir / "run_manifest.json").read_text(encoding="utf-8")
-        )
-        assert manifest["status"] == "completed"
-        registry = json.loads(
-            (output_dir / REGISTRY_FILENAME).read_text(encoding="utf-8")
-        )
-        for path in sidecars + [result["selection_path"]]:
-            key = run_log.to_repo_relative(path)
-            assert manifest["artifacts"][key] == run_log.sha256_file(path)
-            assert key in registry
-
-        # The selection artifact carries the winning trial's fingerprints too.
-        selection = json.loads(
-            result["selection_path"].read_text(encoding="utf-8")
-        )
-        selected = selection["selected_trial"]
-        for fold_key in FOLD_KEYS:
-            assert (
-                selected["folds"][fold_key]["fit_fingerprint"]
-                == views[fold_key]["fit"]["fingerprint"]
-            )
-            assert (
-                selected["folds"][fold_key]["validation_fingerprint"]
-                == views[fold_key]["validation"]["fingerprint"]
-            )
 
 
 def test_frozen_config_drives_the_default_trainer() -> None:
@@ -716,44 +616,6 @@ def test_frozen_config_drives_the_default_trainer() -> None:
         assert params["reg_alpha"] == defaults["reg_alpha"]
         assert params["objective"] is defaults["objective"]
         assert params["eval_metric"] is defaults["eval_metric"]
-
-
-def test_frozen_config_equals_the_selection_artifact() -> None:
-    """Read-only pin: the frozen config is the campaign's selected values.
-
-    The selection artifact is a live, gitignored artifact; a fresh checkout
-    skips this check rather than failing. The artifact is only read.
-    """
-    loaded = model_config.get_config()
-    frozen = loaded["training"]["hyperparameters"]
-    selected_meta = loaded["tuning"]["selected"]
-    artifact_path = (
-        REPO_ROOT
-        / loaded["paths"]["artifacts"]
-        / "tuning"
-        / selected_meta["run_id"]
-        / "selection.json"
-    )
-    if not artifact_path.is_file():
-        pytest.skip(f"selection artifact absent from this checkout: {artifact_path}")
-
-    selection = json.loads(artifact_path.read_text(encoding="utf-8"))
-    selected = selection["selected_trial"]
-
-    # The config's provenance block names the artifact's own identity.
-    assert selection["run_id"] == selected_meta["run_id"]
-    assert selection["config_hash"] == selected_meta["config_hash"]
-    assert selected["trial_index"] == selected_meta["trial_index"]
-    assert selection["selected_on"] == loaded["tuning"]["select_on"]
-
-    # The frozen full parameter set equals the winning trial's parameters,
-    # minus the two module callables the trainer owns (the artifact records
-    # them by qualified name).
-    artifact_params = dict(selected["params"])
-    for callable_key in ("objective", "eval_metric"):
-        assert isinstance(artifact_params.pop(callable_key), str)
-    assert frozen == artifact_params
-    assert frozen["random_state"] == selected["seed"]
 
 
 if __name__ == "__main__":

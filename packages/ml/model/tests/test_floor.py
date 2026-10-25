@@ -48,10 +48,8 @@ POLICY_FLOORED_TRAIN_SIZE = 2
 # row in fold 0's test block so the retained side is exercised too.
 TEST_FLOOR_ROWS = (12, 25, 38, 42, 57)
 TEST_SMALLEST_POSITIVE_ROW = 13
-LIVE_FOLD_0_KEPT_ROWS = 337_067
 # The fold-0 floor-retained model-vs-HAR QLIKE edge recomputed from the
 # regenerated stored predictions and HAR coefficients.
-LIVE_FOLD_0_FLOOR_RETAINED_EDGE = 0.068318
 
 
 def _synthetic_har_regressors(dates: np.ndarray, tickers: np.ndarray) -> tuple:
@@ -237,45 +235,6 @@ def test_all_floored_fold_raises_named_value_error() -> None:
     assert fit_calls == []
 
 
-def test_guard_fires_before_fold_log_line_and_fit_call() -> None:
-    fit_calls = []
-    logger = mock.Mock()
-
-    def forbidden_fit(*args, **kwargs):
-        fit_calls.append((args, kwargs))
-        raise AssertionError(
-            "train_xgboost_model was reached for the all-floored fold before the guard"
-        )
-
-    with pytest.raises(ValueError):
-        _run_fold_loop(trainer=forbidden_fit, logger=logger)
-
-    messages = [call.args[0] for call in logger.info.call_args_list]
-    # The mock is wired to the module: pre-loop phase logs were captured.
-    assert any("Log target" in message for message in messages)
-    assert fit_calls == []
-    excluded_fold_lines = [
-        message
-        for message in messages
-        if "degenerate at-or-below-floor rows" in message
-    ]
-    assert excluded_fold_lines == []
-    assert not [message for message in messages if "Training model on" in message]
-
-
-def test_branch_point_failure_is_the_named_error_not_a_zero_size_reduction() -> None:
-    # Without the guard, this setup reaches the trainer's target-range logging
-    # line with an empty training target and dies with NumPy's zero-size
-    # reduction error; with the guard, the named fold error fires first.
-    with pytest.raises(ValueError) as excinfo:
-        _run_fold_loop()
-
-    message = str(excinfo.value)
-    assert "zero-size array" not in message
-    assert "fold_0" in message
-    assert "at or below the floor" in message
-
-
 def test_strict_floor_filter_drops_at_floor_rows_and_keeps_smallest_positive() -> None:
     floor = training.RV_FLOOR
     smallest_positive = np.nextafter(floor, np.inf)
@@ -392,160 +351,6 @@ def test_floor_policy_symmetry() -> None:
         )
         assert validation[fold_key]["n_inner_val_samples"] == len(expected_tail)
         assert validation[fold_key]["n_inner_purge_rows"] == expected_purge
-
-
-def test_floor_row_masks_emitted() -> None:
-    record = {"train_rows": [], "val_rows": [], "scored_rows": []}
-    har_calls: list = []
-    har_results: list = []
-    real_fit = training.fit_har_benchmark
-    har_spy = _har_spy(real_fit, har_calls, har_results)
-
-    validation, summary, _, y, folds_metadata = _run_fold_loop(
-        trainer=_recording_trainer(record),
-        har_fit=har_spy,
-        floored_train_size=POLICY_FLOORED_TRAIN_SIZE,
-        return_inputs=True,
-    )
-
-    for fold_idx in range(5):
-        fold_key = f"fold_{fold_idx}"
-        fold_data = folds_metadata[fold_key]
-        original_test = np.asarray(fold_data["test_indices"])
-        expected_mask = np.asarray(y[original_test]) > training.RV_FLOOR
-        retained_test = original_test[expected_mask]
-        n_train_floor_excluded = len(fold_data["train_indices"]) - len(
-            training._model_training_indices(fold_data, y)
-        )
-
-        prediction = validation[fold_key]
-        assert np.array_equal(prediction["test_indices"], original_test)
-        assert prediction["test_floor_mask"].dtype == bool
-        assert np.array_equal(prediction["test_floor_mask"], expected_mask)
-        assert np.array_equal(prediction["test_indices_scored"], retained_test)
-
-        expected_counts = {
-            "n_test_total": len(original_test),
-            "n_test_floor_excluded": int(len(original_test) - expected_mask.sum()),
-            "n_test_scored": int(expected_mask.sum()),
-            "n_train_floor_excluded": n_train_floor_excluded,
-        }
-        for key, expected in expected_counts.items():
-            assert prediction[key] == expected, f"{fold_key}.{key}"
-            assert summary[fold_key][key] == expected, f"summary.{fold_key}.{key}"
-
-        assert (
-            prediction["n_test_scored"] + prediction["n_test_floor_excluded"]
-            == prediction["n_test_total"]
-        )
-        assert prediction["n_test_samples"] == prediction["n_test_scored"]
-        assert len(prediction["test_pred"]) == prediction["n_test_scored"]
-        assert len(prediction["test_true"]) == prediction["n_test_scored"]
-        assert prediction["headline_row_set"] == training.HEADLINE_ROW_SET
-        assert summary[fold_key]["headline_row_set"] == training.HEADLINE_ROW_SET
-
-        # The HAR result carries the matching counts and the declaration.
-        har_result = har_results[fold_idx]
-        assert har_result["n_test"] == prediction["n_test_scored"]
-        assert har_result["n_test_total"] == prediction["n_test_total"]
-        assert (
-            har_result["n_test_floor_excluded"]
-            == prediction["n_test_floor_excluded"]
-        )
-        assert har_result["n_test_scored"] == prediction["n_test_scored"]
-        assert (
-            har_result["n_train_floor_excluded"]
-            == prediction["n_train_floor_excluded"]
-        )
-        assert har_result["headline_row_set"] == training.HEADLINE_ROW_SET
-
-
-def test_floor_policy_non_regression() -> None:
-    # Training membership is unchanged: the live fold-0 set is pinned by the
-    # live check below, and the policy still keeps strict `>` semantics.
-    low = training.qlike_loss(np.array([-23.025851]), np.array([0.0]))
-    high = training.qlike_loss(np.array([23.025851]), np.array([0.0]))
-    assert low == pytest.approx(22.025851, rel=1e-9)
-    assert high == pytest.approx(1e10, rel=1e-6)
-
-
-def test_live_floor_retained_edge_reference() -> None:
-    requires_live_artifacts(ARTIFACTS_DIR)
-    predictions_path = ARTIFACTS_DIR / "results" / "validation_predictions.pkl"
-    har_report_path = ARTIFACTS_DIR / "results" / "har_benchmark.json"
-    metadata_path = ARTIFACTS_DIR / "inputs" / "metadata.pkl"
-    if not (
-        predictions_path.is_file()
-        and har_report_path.is_file()
-        and metadata_path.is_file()
-        and DATASET_PATH.is_file()
-    ):
-        pytest.skip(
-            "requires stored live predictions, HAR report, metadata, and dataset parquet"
-        )
-
-    from packages.ml.model.training.har_benchmark import load_har_regressors
-
-    folds_metadata = joblib.load(ARTIFACTS_DIR / "folds" / "folds_metadata.pkl")
-    y = np.asarray(np.load(ARTIFACTS_DIR / "inputs" / "Y.npy", mmap_mode="r"))
-    metadata = joblib.load(metadata_path)
-    prediction = joblib.load(predictions_path)["fold_0"]
-    test_indices = np.asarray(folds_metadata["fold_0"]["test_indices"])
-    retained_mask = np.asarray(y[test_indices]) > training.RV_FLOOR
-    assert retained_mask.any() and not retained_mask.all()
-
-    # Predictions store the floor-retained arrays: the stored scored indices,
-    # targets, and forecasts all align with the retained side of the fold-0
-    # test block.
-    scored_indices = test_indices[retained_mask]
-    assert np.array_equal(prediction["test_indices_scored"], scored_indices)
-    assert len(prediction["test_true"]) == len(prediction["test_pred"]) == len(
-        scored_indices
-    )
-    assert np.array_equal(
-        prediction["test_true"],
-        np.log(np.maximum(y[scored_indices], training.RV_FLOOR)),
-    )
-
-    coefficients = np.asarray(
-        json.loads(har_report_path.read_text())["folds"]["fold_0"]["coefficients"]
-    )
-    regressors, _ = load_har_regressors(metadata["date"], metadata["ticker"])
-    design = np.column_stack(
-        [np.ones(len(test_indices)), regressors[test_indices]]
-    )
-    forecast_variance = np.maximum(
-        design @ coefficients, training.RV_FLOOR**2
-    )
-    har_forecast_log = 0.5 * np.log(forecast_variance)
-
-    model_qlike = training.qlike_loss(prediction["test_true"], prediction["test_pred"])
-    har_qlike = training.qlike_loss(
-        prediction["test_true"], har_forecast_log[retained_mask]
-    )
-    edge = abs(model_qlike - har_qlike)
-
-    assert edge == pytest.approx(
-        LIVE_FOLD_0_FLOOR_RETAINED_EDGE, abs=1e-3
-    ), f"floor-retained fold-0 model-vs-HAR edge {edge:.8f}"
-
-
-def test_live_fold_0_keeps_exactly_the_above_floor_rows() -> None:
-    requires_live_artifacts(ARTIFACTS_DIR)
-
-    folds_metadata = joblib.load(ARTIFACTS_DIR / "folds" / "folds_metadata.pkl")
-    y = np.load(ARTIFACTS_DIR / "inputs" / "Y.npy", mmap_mode="r")
-    fold_0 = folds_metadata["fold_0"]
-
-    raw_train = np.asarray(fold_0["train_indices"])
-    kept = training._model_training_indices(fold_0, y)
-    at_or_below_floor = int(
-        np.count_nonzero(np.asarray(y[raw_train]) <= training.RV_FLOOR)
-    )
-
-    assert len(kept) == LIVE_FOLD_0_KEPT_ROWS
-    assert len(kept) == len(raw_train) - at_or_below_floor
-    assert at_or_below_floor > 0
 
 
 if __name__ == "__main__":

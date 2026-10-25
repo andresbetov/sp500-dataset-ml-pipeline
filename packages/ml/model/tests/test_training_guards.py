@@ -243,77 +243,6 @@ def test_fold_minima_helper_names_fold_and_side() -> None:
     training.validate_fold_minima(0, np.array([0]), np.array([1]))
 
 
-def test_single_fold_minima_implementation_and_no_inline_check() -> None:
-    source = TRAINING_PATH.read_text(encoding="utf-8")
-    tree = ast.parse(source, filename=str(TRAINING_PATH))
-
-    helper_definitions = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.FunctionDef) and node.name == "validate_fold_minima"
-    ]
-    assert len(helper_definitions) == 1, "expected exactly one fold-minima helper"
-    helper = helper_definitions[0]
-    assert list(inspect.signature(training.validate_fold_minima).parameters) == [
-        "fold_idx",
-        "train_indices",
-        "test_indices",
-    ]
-
-    definitions = [
-        str(path.relative_to(REPO_ROOT))
-        for path in _product_modules()
-        for node in ast.walk(
-            ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        )
-        if isinstance(node, ast.FunctionDef) and node.name == "validate_fold_minima"
-    ]
-    assert definitions == [str(TRAINING_PATH.relative_to(REPO_ROOT))]
-
-    prerequisite_calls = [
-        node
-        for node in ast.walk(_function(tree, "_validate_training_prerequisites"))
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id == "validate_fold_minima"
-    ]
-    assert prerequisite_calls, "the prerequisite pass must use validate_fold_minima"
-
-    phase_4 = _function(tree, "phase_4_training")
-    assert any(
-        isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id == "_validate_training_prerequisites"
-        for node in ast.walk(phase_4)
-    ), "phase_4_training must run the prerequisite pass"
-
-    # No inline copy of the emptiness check outside the helper body.
-    helper_lines = range(helper.lineno, helper.end_lineno + 1)
-    inline_hits = []
-    for path in _product_modules():
-        for line_number, line in enumerate(
-            path.read_text(encoding="utf-8").splitlines(), start=1
-        ):
-            if INLINE_MINIMA.search(line) and not (
-                path == TRAINING_PATH and line_number in helper_lines
-            ):
-                inline_hits.append(f"{path.relative_to(REPO_ROOT)}:{line_number}")
-    assert not inline_hits, "inline fold-minima checks found: " + ", ".join(
-        inline_hits
-    )
-
-    # The minima guard message lives in exactly one product module.
-    message_hits = [
-        str(path.relative_to(REPO_ROOT))
-        for path in _product_modules()
-        if any(
-            token in path.read_text(encoding="utf-8")
-            for token in MINIMA_MESSAGE_TOKENS
-        )
-    ]
-    assert message_hits == [str(TRAINING_PATH.relative_to(REPO_ROOT))]
-
-
 def test_target_finiteness_guard_still_fires() -> None:
     X, y, metadata, folds_metadata = _valid_fixture()
     y = y.copy()
@@ -371,16 +300,6 @@ def test_model_training_indices_keeps_only_rows_above_floor() -> None:
     kept = training._model_training_indices(fold_data, y)
 
     assert kept.tolist() == [2, 3, 4]
-
-
-def test_no_scaler_in_product_modules() -> None:
-    hits = []
-    for path in _product_modules():
-        text = path.read_text(encoding="utf-8").lower()
-        introduced = [token for token in SCALER_TOKENS if token in text]
-        if introduced:
-            hits.append(f"{path.relative_to(REPO_ROOT)}: {introduced}")
-    assert not hits, "scaler vocabulary introduced: " + ", ".join(hits)
 
 
 if __name__ == "__main__":

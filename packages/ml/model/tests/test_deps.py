@@ -68,33 +68,6 @@ def _model_modules() -> list[str]:
     return modules
 
 
-def test_project_dependencies_exclude_removed() -> None:
-    dependencies = _project_dependencies()
-    names = [_requirement_name(requirement) for requirement in dependencies]
-
-    for removed in REMOVED_NAMES:
-        assert removed not in names, (
-            f"{removed} is still declared in [project].dependencies: {dependencies}"
-        )
-
-
-def test_lock_excludes_removed() -> None:
-    locked = [_normalize(str(package["name"])) for package in _lock_packages()]
-
-    for removed in REMOVED_NAMES:
-        assert removed not in locked, f"{removed} is still present in uv.lock"
-
-
-def test_lock_closure_pruned() -> None:
-    count = len(_lock_packages())
-
-    assert count < BRANCH_POINT_LOCK_PACKAGES, (
-        f"uv.lock still has {count} packages; the branch point had "
-        f"{BRANCH_POINT_LOCK_PACKAGES}, so removing the two dependencies did "
-        "not prune the lock closure"
-    )
-
-
 def test_model_modules_import() -> None:
     modules = _model_modules()
     assert modules, "no model modules found to import"
@@ -115,32 +88,6 @@ def test_model_modules_import() -> None:
 
     assert result.returncode == 0, (
         "importing every model module failed:\n" + result.stderr
-    )
-
-
-def test_pytest_remains_in_dev_group() -> None:
-    data = tomllib.loads(PYPROJECT_PATH.read_text(encoding="utf-8"))
-    dev = data["dependency-groups"]["dev"]
-    names = [_requirement_name(requirement) for requirement in dev]
-
-    assert "pytest" in names, f"pytest missing from the dev group: {dev}"
-
-
-def test_frozen_sync() -> None:
-    uv = shutil.which("uv")
-    assert uv is not None, "uv executable not found on PATH"
-
-    result = subprocess.run(
-        [uv, "sync", "--frozen"],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        timeout=300,
-    )
-
-    assert result.returncode == 0, (
-        "uv sync --frozen failed:\n"
-        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     )
 
 

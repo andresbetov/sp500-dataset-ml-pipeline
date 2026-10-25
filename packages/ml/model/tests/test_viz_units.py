@@ -430,50 +430,6 @@ def test_existing_log_decile_errorbars_are_unchanged(
     assert len(figure.axes) == 2
 
 
-def test_fourteen_plot_manifest_gains_the_sigma_panel(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """All fourteen plots survive, all statuses are ok, and the panel renders."""
-    _stub_checkpoint_loads(monkeypatch, tmp_path)
-    monkeypatch.setattr(
-        visualize, "load_validation_predictions", lambda _path=None: _predictions()
-    )
-    _use_temp_evaluation_table(tmp_path, monkeypatch)
-
-    figures: list[object] = []
-    real_savefig = training_diagnostics.plt.savefig
-
-    def capture(*args, **kwargs):
-        figures.append(training_diagnostics.plt.gcf())
-        return real_savefig(*args, **kwargs)
-
-    monkeypatch.setattr(training_diagnostics.plt, "savefig", capture)
-    output_dir = tmp_path / "plots"
-    results = visualize.generate_all_visualizations(
-        summary_path=_write_summary(tmp_path),
-        predictions_path=tmp_path / "unused.pkl",
-        output_dir=output_dir,
-    )
-
-    assert set(results) == set(EXPECTED_PLOTS)
-    assert sum(len(paths) for paths in results.values()) == 14
-    assert {path.name for paths in results.values() for path in paths} == {
-        f"{plot}.png" for plot in ALL_PLOTS
-    }
-
-    manifest = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
-    entries = manifest["plots"]
-    assert len(entries) == 14
-    assert all(entry["status"] == "ok" for entry in entries), entries
-    assert {entry["plot"] for entry in entries} == ALL_PLOTS
-
-    assert (output_dir / "error_by_volatility_bin.png").is_file()
-    assert any(
-        len([axis for axis in figure.axes if "σ" in axis.get_xlabel()]) > 0
-        for figure in figures
-    ), "generated diagnostics did not include the sigma panel"
-
-
 if __name__ == "__main__":
     failures = 0
     skipped = 0

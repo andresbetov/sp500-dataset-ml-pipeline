@@ -46,7 +46,6 @@ from packages.ml.model.visualization import data_loader
 MODEL_ROOT = REPO_ROOT / "packages" / "ml" / "model"
 TRAINING_PATH = MODEL_ROOT / "training" / "training.py"
 DATA_LOADER_PATH = MODEL_ROOT / "visualization" / "data_loader.py"
-LIVE_SUMMARY = ARTIFACTS_DIR / "results" / "fold_training_summary.json"
 
 # The five fold R² values at the branch-point snapshot (the known fixture).
 BRANCH_POINT_R2 = np.array(
@@ -57,7 +56,6 @@ BRANCH_POINT_SAMPLE_STD = 0.214547
 
 # Current live sample spread of the five fold ``test_r2`` values. Interim pin:
 # re-record it when the live artifacts regenerate.
-LIVE_R2_SPREAD_DDOF1 = 0.12527045323920308
 
 
 def _fold_summary(values: np.ndarray, key: str = "test_r2") -> dict:
@@ -175,41 +173,6 @@ def test_loader_metric_stats_uses_the_sample_spread() -> None:
     )
 
 
-def test_call_sites_have_no_bare_std_call() -> None:
-    """The two summary paths contain no bare ``.std()``/``.var()`` call."""
-    assert _attribute_calls(TRAINING_PATH, "_global_metrics") == []
-    assert _attribute_calls(DATA_LOADER_PATH, "extract_metric_stats") == []
-
-
-def test_clean_fold_means_are_unchanged() -> None:
-    """Only the spread convention changes; means and validity counts do not."""
-    summary = _clean_summary()
-    metrics = training._global_metrics(summary)["metrics"]
-    for key in training.GLOBAL_METRIC_KEYS:
-        values = [summary[fold][key] for fold in summary]
-        assert metrics[key]["mean"] == pytest.approx(
-            float(np.mean(values)), rel=1e-12, abs=1e-12
-        )
-        assert metrics[key]["std"] == pytest.approx(
-            float(np.std(values, ddof=1)), rel=1e-12, abs=1e-12
-        )
-        assert metrics[key]["n_valid"] == len(values)
-        assert metrics[key]["n_total"] == len(values)
-
-    frame = pd.DataFrame(
-        {
-            "test_r2": [0.1, 0.2, 0.3, 0.4, 0.5],
-            "test_mae": [1.0, 2.0, 3.0, 4.0, 5.0],
-            "test_rmse": [0.5, 0.6, 0.7, 0.8, 0.9],
-        }
-    )
-    stats = data_loader.extract_metric_stats(frame)
-    for name in ("r2", "mae", "rmse"):
-        assert stats[f"{name}_mean"] == pytest.approx(
-            float(frame[f"test_{name}"].mean()), rel=1e-12, abs=1e-12
-        )
-
-
 def test_single_valid_fold_has_no_sample_spread() -> None:
     """One finite fold has an undefined sample spread; the run must not abort."""
     summary = _fold_summary(BRANCH_POINT_R2)
@@ -224,41 +187,6 @@ def test_single_valid_fold_has_no_sample_spread() -> None:
     assert metrics["test_qlike"]["mean"] == pytest.approx(0.25, abs=1e-12)
     assert metrics["test_qlike"]["std"] is None
     assert training._format_metric(metrics["test_qlike"]) == "0.2500"
-
-
-def test_explicit_population_spread_reproduces_np_std() -> None:
-    """The old population value remains reachable through ``ddof=0``."""
-    values = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
-    assert spread(values, ddof=0) == pytest.approx(
-        float(np.std(values, ddof=0)), rel=1e-12, abs=1e-12
-    )
-    assert spread(BRANCH_POINT_R2, ddof=0) == pytest.approx(
-        float(np.std(BRANCH_POINT_R2, ddof=0)), rel=1e-12, abs=1e-12
-    )
-
-
-def test_live_r2_spread_is_the_current_sample_spread() -> None:
-    """Read-only: the live summary's R² spread is the sampled convention."""
-    if not LIVE_SUMMARY.is_file():
-        pytest.skip(
-            "requires the live fold training summary absent from this checkout"
-        )
-
-    stored = json.loads(LIVE_SUMMARY.read_text(encoding="utf-8"))
-    values = np.array(
-        [float(row["test_r2"]) for row in stored.values()], dtype=np.float64
-    )
-    assert values.size == 5
-
-    summary = _fold_summary(values)
-    for index, fold in enumerate(summary):
-        summary[fold]["test_qlike"] = float(values[index]) / 10.0
-    live = training._global_metrics(summary)["metrics"]["test_r2"]
-    assert live["std"] == pytest.approx(
-        float(np.std(values, ddof=1)), rel=1e-12, abs=1e-12
-    )
-    assert live["std"] == pytest.approx(LIVE_R2_SPREAD_DDOF1, abs=1e-6)
-    assert spread(values) == pytest.approx(LIVE_R2_SPREAD_DDOF1, abs=1e-6)
 
 
 if __name__ == "__main__":

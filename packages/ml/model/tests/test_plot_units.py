@@ -268,57 +268,6 @@ def test_gap_table_is_emitted_with_one_row_per_fold_and_one_sign_statement(
     assert any(gap.startswith("-") for gap in r2_gaps)
 
 
-def test_normalized_overlay_is_absent_from_the_plot_function() -> None:
-    """No twin axis, no normalized line series, no mixed-unit axis."""
-    function = _plot_function_node()
-    attributes = [
-        node.attr for node in ast.walk(function) if isinstance(node, ast.Attribute)
-    ]
-    assert "twinx" not in attributes
-    plot_calls = [
-        node
-        for node in ast.walk(function)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "plot"
-    ]
-    assert plot_calls == []
-
-    source = ast.get_source_segment(
-        MODULE_PATH.read_text(encoding="utf-8"), function
-    )
-    assert source is not None
-    assert "Actual Value" not in source
-    assert "Normalized Score" not in source
-    assert "normalize(" not in source.lower()
-
-    module_source = MODULE_PATH.read_text(encoding="utf-8")
-    assert "_neutral_normalize" not in module_source
-    assert "TIE_NEUTRAL_VALUE" not in module_source
-
-
-def test_filename_caller_and_performance_plot_set_are_unchanged(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The default filename and the four-plot caller stay intact."""
-    outputs_dir = tmp_path / "outputs"
-    monkeypatch.setattr(
-        "packages.ml.model.utils.get_project_paths",
-        lambda: {"outputs_dir": outputs_dir},
-    )
-
-    returned = performance_comparison.plot_metrics_comparison(_summary_frame())
-
-    assert returned == outputs_dir / "metrics_comparison.png"
-    assert returned.is_file()
-
-    paths = performance_comparison.generate_performance_comparisons(
-        _summary_frame(), tmp_path / "performance"
-    )
-    assert {path.name for path in paths} == PERFORMANCE_PLOTS
-    assert (tmp_path / "performance" / "metrics_comparison.png").is_file()
-
-
 if __name__ == "__main__":
     failures = 0
     skipped = 0

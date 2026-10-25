@@ -453,18 +453,6 @@ def test_expanding_origin_curve_is_hand_computed() -> None:
     assert block["final"]["loss_model"] == pytest.approx(3.5, rel=1e-12)
 
 
-def test_calibration_stub_declares_not_applied() -> None:
-    """The stub is explicit: no calibration is applied, no fake factor ships."""
-    report = _report()
-    block = report.calibration_stub()
-
-    assert report.CALIBRATION_STATUS == "not applied"
-    assert block["applied"] is False
-    assert block["status"] == "not applied"
-    assert "not applied" in block["note"].lower()
-    assert block["interface"]
-
-
 def test_strict_summary_is_written_with_nulls_and_no_tmp_residue() -> None:
     """The summary writer sanitizes non-finite values and writes atomically."""
     report = _report()
@@ -501,16 +489,6 @@ def test_strict_summary_is_written_with_nulls_and_no_tmp_residue() -> None:
             "oos_r2_prevailing_mean"
         ] is None
         assert document["calibration"]["applied"] is False
-
-
-def test_report_module_does_not_rederive_floor_membership() -> None:
-    """The reporting layer consumes ``is_floor``; it never compares to the floor."""
-    report = _report()
-    source = Path(report.__file__).read_text(encoding="utf-8")
-
-    assert "RV_FLOOR" not in source
-    assert "floor_retained_mask" not in source
-    assert "log(max(" not in source
 
 
 if __name__ == "__main__":

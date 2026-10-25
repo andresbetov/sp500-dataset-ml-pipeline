@@ -368,38 +368,6 @@ def test_sigma_variance_conversions_exact() -> None:
     assert np.array_equal(result["forecast_log"], expected_forecast_log)
 
 
-def test_live_components_not_the_old_build() -> None:
-    """Live components stay finite and are no longer squared close-to-close."""
-    from packages.ml.model.training import har_benchmark
-
-    if not DATASET_PATH.is_file():
-        pytest.skip(
-            "requires the generated dataset absent from this checkout: "
-            f"{DATASET_PATH}"
-        )
-    assert har_benchmark.HAR_WINDOWS == (1, 5, 22)
-
-    columns = pd.read_parquet(DATASET_PATH, columns=["ticker", "date"])
-    components, warmup_mask = har_benchmark.load_har_regressors(
-        columns["date"].to_numpy(), columns["ticker"].to_numpy()
-    )
-    assert components.shape == (len(columns), len(har_benchmark.HAR_WINDOWS))
-    assert np.isfinite(components).all()
-    assert warmup_mask.shape == (len(columns),)
-
-    returns = pd.read_parquet(DATASET_PATH, columns=["log_return"])[
-        "log_return"
-    ].to_numpy()
-    old = _old_squared_close_components(
-        returns, columns["ticker"].to_numpy()
-    )
-    shift = np.abs(components - old).max()
-    assert shift > REBUILD_DIFFERENCE_TOLERANCE, (
-        f"live components still match the squared-close-to-close build "
-        f"(largest change {shift:.3e})"
-    )
-
-
 if __name__ == "__main__":
     failures = 0
     skipped = 0

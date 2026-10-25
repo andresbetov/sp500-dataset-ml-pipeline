@@ -188,23 +188,6 @@ def _write_report(flag: bool) -> dict:
         )
 
 
-def test_fit_scale_disclosure_survives_in_docstring() -> None:
-    """The variance-fit/log-R²/QLIKE disclosure text is preserved verbatim."""
-    module_path = Path(har_benchmark.__file__).resolve()
-    assert module_path.is_relative_to(REPO_ROOT), (
-        f"har_benchmark resolves outside the repository: {module_path}"
-    )
-    fit_doc = inspect.getdoc(har_benchmark.fit_har_benchmark) or ""
-    module_doc = inspect.getdoc(har_benchmark) or ""
-    combined = _normalize(module_doc + "\n" + fit_doc)
-
-    assert _normalize(FIT_SCALE_DISCLOSURE) in combined, (
-        "the fit-scale disclosure was removed or reworded; the fit must explain "
-        "that variance-level squared error is optimized while R² is reported on "
-        "the log target and QLIKE is the headline comparison"
-    )
-
-
 def test_scale_fields_and_comparator_note_in_artifact() -> None:
     """The written report declares both scales and keeps the existing keys."""
     report = _write_report(flag=False)

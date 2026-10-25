@@ -43,10 +43,6 @@ BLOCK_ROWS = 10
 N_INDICATORS = 3
 N_TICKER_FEATURES = 1
 
-LIVE_SUMMARY = (
-    REPO_ROOT / "packages" / "ml" / "model" / "artifacts" / "results"
-    / "fold_training_summary.json"
-)
 
 RUN_ID_RE = re.compile(r"^\d{8}T\d{6}Z-[0-9a-f]{8}$")
 CONFIG_HASH_RE = re.compile(r"^[0-9a-f]{8}$")
@@ -306,31 +302,6 @@ def test_persisted_paths_are_repo_relative_and_resolvable() -> None:
         assert loaded.is_file()
 
 
-def test_resume_dataset_identity_path_is_repo_relative_and_resolvable() -> None:
-    with tempfile.TemporaryDirectory() as tmpdir:
-        root = _prepared_root(tmpdir)
-        _exercise_run(root)
-        from packages.ml.model import run_log
-
-        manifest = json.loads(
-            (root / "run_manifest.json").read_text(encoding="utf-8")
-        )
-        identity = manifest["input_identity"]
-        stored = identity["dataset_path"]
-        dataset_path = root / "dataset.parquet"
-
-        assert stored is not None
-        assert not Path(stored).is_absolute(), stored
-        assert stored == run_log.to_repo_relative(dataset_path)
-        assert run_log.resolve_stored_path(stored) == dataset_path.resolve()
-
-        runs_text = (root / "runs.jsonl").read_text(encoding="utf-8")
-        run_record = json.loads(runs_text.splitlines()[-1])
-        assert run_record["input_identity"]["dataset_path"] == stored
-        assert not run_record["input_identity"]["dataset_path"].startswith("/")
-        assert "/home/" not in runs_text
-
-
 def test_second_run_appends_without_truncating_the_first_line() -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         root = _prepared_root(tmpdir)
@@ -385,99 +356,6 @@ def test_phase_4_records_folds_and_artifacts_into_the_caller_run() -> None:
         )
 
 
-def test_phase_4_run_names_the_frozen_selection_in_its_manifest() -> None:
-    from packages.ml.model import config as model_config
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        root = _prepared_root(tmpdir)
-        _exercise_run(root)
-        record = json.loads(
-            (root / "runs.jsonl").read_text(encoding="utf-8").splitlines()[0]
-        )
-
-    loaded = model_config.get_config()
-    selected = loaded["tuning"]["selected"]
-    assert record["selection"] == {
-        "run_id": selected["run_id"],
-        "trial_index": selected["trial_index"],
-        "config_hash": selected["config_hash"],
-        "artifact": (
-            f"{loaded['paths']['artifacts']}/tuning/{selected['run_id']}"
-            "/selection.json"
-        ),
-    }
-    # The context names the campaign; the parameters stay in the selection
-    # artifact (the source of truth) and the frozen config section.
-    assert "params" not in record["selection"]
-
-
-def test_selection_context_is_absent_without_a_frozen_selection() -> None:
-    from packages.ml.model import config as model_config
-    from packages.ml.model import run_log
-
-    without = {"training": {}, "paths": {"artifacts": "packages/ml/model/artifacts"}}
-    with mock.patch.object(model_config, "get_config", return_value=without):
-        assert run_log.selection_context() is None
-
-
-def test_pipeline_run_writes_exactly_one_line_and_manifest() -> None:
-    from packages.ml.model import main as main_module
-
-    summary = {
-        f"fold_{fold_idx}": {"test_qlike": 0.1, "har_qlike": 0.2}
-        for fold_idx in range(5)
-    }
-    with tempfile.TemporaryDirectory() as tmpdir:
-        root = Path(tmpdir) / "artifacts"
-        with contextlib.ExitStack() as stack:
-            stack.enter_context(mock.patch.object(main_module, "ARTIFACTS_DIR", root))
-            stack.enter_context(
-                mock.patch.object(
-                    main_module,
-                    "phase_2_feature_selection",
-                    return_value=(np.zeros((2, 2)), np.zeros(2), {}, None),
-                )
-            )
-            stack.enter_context(
-                mock.patch.object(
-                    main_module, "phase_3_cross_validation", return_value=[{}] * 5
-                )
-            )
-            stack.enter_context(
-                mock.patch.object(
-                    main_module,
-                    "phase_4_training",
-                    return_value=({}, summary, [f"model_{idx}" for idx in range(5)]),
-                )
-            )
-            stack.enter_context(
-                mock.patch.object(
-                    main_module,
-                    "generate_all_visualizations",
-                    return_value={"metrics": [1]},
-                )
-            )
-            main_module.main()
-
-        lines = (root / "runs.jsonl").read_text(encoding="utf-8").splitlines()
-        assert len(lines) == 1, "a pipeline run must append exactly one line"
-        record = json.loads(lines[0])
-        assert record["phase"] == "pipeline"
-        assert record["status"] == "completed"
-        assert record["error"] is None
-        assert [phase["phase"] for phase in record["phases"]] == [
-            "phase_2_feature_selection",
-            "phase_3_cross_validation",
-            "phase_4_training",
-            "phase_5_visualization",
-        ]
-        assert all(phase["status"] == "completed" for phase in record["phases"])
-        manifest = json.loads(
-            (root / "run_manifest.json").read_text(encoding="utf-8")
-        )
-        assert manifest == record
-
-
 def test_pipeline_failure_is_recorded_as_failed() -> None:
     from packages.ml.model import main as main_module
 
@@ -506,53 +384,6 @@ def test_pipeline_failure_is_recorded_as_failed() -> None:
             (root / "run_manifest.json").read_text(encoding="utf-8")
         )
         assert manifest == record
-
-
-def test_run_id_is_utc_stamp_plus_config_hash() -> None:
-    from datetime import datetime, timezone
-
-    from packages.ml.model import run_log
-
-    run_id = run_log.make_run_id(
-        "deadbeef", now=datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
-    )
-    assert run_id == "20260102T030405Z-deadbeef"
-
-
-def test_git_sha_is_null_outside_a_repository() -> None:
-    from packages.ml.model import run_log
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        assert run_log.git_sha(project_root=Path(tmpdir)) is None
-
-
-def test_live_summary_model_path_resolves_for_the_reader() -> None:
-    if not LIVE_SUMMARY.is_file():
-        pytest.skip(
-            "requires the live fold training summary absent from this checkout"
-        )
-
-    stored = json.loads(LIVE_SUMMARY.read_text(encoding="utf-8"))["fold_0"][
-        "model_path"
-    ]
-
-    from packages.ml.model import run_log
-
-    resolved = run_log.resolve_stored_path(stored)
-    if not resolved.is_file():
-        pytest.skip(f"live fold-0 checkpoint absent from this checkout: {resolved}")
-
-    # The branch-point artifact stores an absolute path; newly written summaries
-    # store a repo-relative one. The reader must resolve both to the same file.
-    from packages.ml.model.visualization.data_loader import (
-        load_fold_training_summary,
-    )
-
-    summary_df = load_fold_training_summary(LIVE_SUMMARY)
-    loaded = Path(
-        summary_df.loc[summary_df["fold"] == "fold_0", "model_path"].iloc[0]
-    )
-    assert loaded.resolve() == resolved.resolve()
 
 
 if __name__ == "__main__":

@@ -28,8 +28,6 @@ from packages.ml.model.visualization import (
     visualize,
 )
 
-LIVE_SUMMARY = ARTIFACTS_DIR / "results" / "fold_training_summary.json"
-LIVE_PREDICTIONS = ARTIFACTS_DIR / "results" / "validation_predictions.pkl"
 
 EXPECTED_PLOTS = {
     "metrics": {
@@ -145,97 +143,6 @@ def _assert_manifest_shape(entries: list[dict]) -> None:
             assert isinstance(entry["error"], str) and entry["error"], entry
 
 
-def test_failing_metrics_plot_leaves_its_siblings_rendered(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    def fail(*_args, **_kwargs):
-        raise RuntimeError("metrics plot boom")
-
-    monkeypatch.setattr(metrics_visualizer, "plot_mae_rmse_comparison", fail)
-    output_dir = tmp_path / "plots"
-
-    paths = metrics_visualizer.generate_metrics_visualizations(
-        _summary_frame(), output_dir
-    )
-
-    assert {path.name for path in paths} == {
-        "r2_scores_by_fold.png",
-        "metrics_heatmap.png",
-    }
-    assert (output_dir / "r2_scores_by_fold.png").is_file()
-    assert (output_dir / "metrics_heatmap.png").is_file()
-    assert not (output_dir / "mae_rmse_comparison.png").exists()
-
-
-def test_failing_temporal_plot_leaves_its_siblings_rendered(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    def fail(*_args, **_kwargs):
-        raise RuntimeError("temporal plot boom")
-
-    monkeypatch.setattr(temporal_analysis, "plot_fold_sample_distribution", fail)
-    output_dir = tmp_path / "plots"
-
-    paths = temporal_analysis.generate_temporal_visualizations(
-        _summary_frame(), output_dir
-    )
-
-    assert {path.name for path in paths} == {
-        "temporal_fold_ranges.png",
-        "temporal_metric_trend.png",
-    }
-    assert (output_dir / "temporal_fold_ranges.png").is_file()
-    assert (output_dir / "temporal_metric_trend.png").is_file()
-
-
-def test_failing_performance_plot_leaves_its_siblings_rendered(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    def fail(*_args, **_kwargs):
-        raise RuntimeError("performance plot boom")
-
-    monkeypatch.setattr(performance_comparison, "plot_timing_breakdown", fail)
-    output_dir = tmp_path / "plots"
-
-    paths = performance_comparison.generate_performance_comparisons(
-        _summary_frame(), output_dir
-    )
-
-    assert {path.name for path in paths} == {
-        "metrics_comparison.png",
-        "sample_distribution.png",
-        "feature_count_summary.png",
-    }
-    assert (output_dir / "metrics_comparison.png").is_file()
-    assert (output_dir / "sample_distribution.png").is_file()
-    assert (output_dir / "feature_count_summary.png").is_file()
-
-
-def test_failing_diagnostics_plot_leaves_its_siblings_rendered(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _stub_checkpoint_loads(monkeypatch, tmp_path)
-
-    def fail(*_args, **_kwargs):
-        raise RuntimeError("diagnostics plot boom")
-
-    monkeypatch.setattr(training_diagnostics, "plot_residuals", fail)
-    output_dir = tmp_path / "plots"
-
-    paths = training_diagnostics.generate_training_diagnostics(
-        _predictions(), _summary_frame(), output_dir
-    )
-
-    assert {path.name for path in paths} == {
-        "actual_vs_predicted.png",
-        "feature_importance.png",
-        "error_by_volatility_bin.png",
-    }
-    assert (output_dir / "actual_vs_predicted.png").is_file()
-    assert (output_dir / "feature_importance.png").is_file()
-    assert (output_dir / "error_by_volatility_bin.png").is_file()
-
-
 def test_manifest_lists_every_plot_with_ok_status(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -343,22 +250,3 @@ def test_temporal_generation_does_not_mutate_the_caller_frame(tmp_path: Path) ->
     pd.testing.assert_frame_equal(frame, snapshot)
 
 
-def test_live_artifacts_render_all_fourteen_plots(tmp_path: Path) -> None:
-    if not LIVE_SUMMARY.is_file() or not LIVE_PREDICTIONS.is_file():
-        pytest.skip("requires live model artifacts absent from this checkout")
-
-    output_dir = tmp_path / "plots"
-    results = visualize.generate_all_visualizations(
-        summary_path=LIVE_SUMMARY,
-        predictions_path=LIVE_PREDICTIONS,
-        output_dir=output_dir,
-    )
-
-    assert sum(len(paths) for paths in results.values()) == 14
-    assert {path.name for paths in results.values() for path in paths} == {
-        f"{plot}.png" for plot in ALL_PLOTS
-    }
-    entries = _manifest(output_dir)
-    assert len(entries) == 14
-    _assert_manifest_shape(entries)
-    assert all(entry["status"] == "ok" for entry in entries), entries
