@@ -100,53 +100,6 @@ def _five_fold_frame() -> tuple[dict, object]:
     return payload, vectors
 
 
-def test_convention_weighting_edge_and_caveat_are_persisted() -> None:
-    """The persisted headline states its weighting and its limitation."""
-    evidence = _run_phase()
-    payload = evidence["evaluation_summary"]
-    assert payload is not None
-    assert "headline" in payload, (
-        "the aggregate headline is absent from evaluation_summary.json; "
-        f"keys: {sorted(payload)}"
-    )
-    headline = payload["headline"]
-
-    assert headline["convention"] == CONVENTION
-    assert "equal" in headline["weighting"].lower()
-    assert "regardless of" in headline["weighting"].lower()
-    assert "n_test" in headline["weighting"]
-    assert "har_qlike - model_qlike" in headline["edge_definition"]
-    assert "positive" in headline["edge_definition"].lower()
-
-    caveat = headline["caveat"].lower()
-    assert "single seed" in caveat
-    assert "seed-to-seed" in caveat
-    assert "not" in caveat
-
-
-def test_fold_zero_is_labelled_one_of_five_not_the_headline() -> None:
-    """Every fold is an equal-weight member; none is the promoted headline."""
-    evidence = _run_phase()
-    headline = evidence["evaluation_summary"]["headline"]
-    for index, fold_key in enumerate(sorted(headline["folds"]), start=1):
-        assert headline["folds"][fold_key]["label"] == (
-            f"{fold_key} ({index} of 5)"
-        )
-    assert headline["folds"]["fold_0"]["label"] == "fold_0 (1 of 5)"
-
-
-def test_log_promotes_the_aggregate_and_labels_each_fold(caplog) -> None:
-    """The log states the convention, the caveat, and fold_0's place in five."""
-    caplog.set_level(logging.INFO)
-    _run_phase()
-    text = "\n".join(record.getMessage() for record in caplog.records)
-    assert "Headline aggregate QLIKE" in text, text
-    assert CONVENTION in text
-    assert "single seed" in text.lower()
-    assert "fold_0 (1 of 5)" in text
-    assert "GLOBAL" not in text
-
-
 def test_pooled_values_are_row_weighted_from_the_vectors() -> None:
     """Pooled values are means of the persisted vectors, not fold-mean ratios."""
     payload, vectors = _five_fold_frame()

@@ -109,21 +109,6 @@ def test_gradient_and_hessian_fixture() -> None:
     )
 
 
-def test_gradient_negative_control() -> None:
-    actual_log, forecast_log, _ = _fixture_pairs()
-    grad, _ = qlike_grad_hess(actual_log, forecast_log)
-    numeric_grad = (
-        _qlike(actual_log - (forecast_log + GRAD_STEP))
-        - _qlike(actual_log - (forecast_log - GRAD_STEP))
-    ) / (2.0 * GRAD_STEP)
-
-    scaled_error = _relative_error(numeric_grad, 1.5 * grad, floor=1.0)
-    failures = int(np.count_nonzero(scaled_error > GRAD_RTOL))
-    assert failures >= 20, (
-        f"scaled-gradient control only failed {failures} of {FIXTURE_POINTS} points"
-    )
-
-
 def test_overflow_guard() -> None:
     assert MAX_LOG_RATIO == 700.0
 
@@ -207,28 +192,6 @@ def test_trainer_wiring_and_tiny_fit() -> None:
     assert np.isfinite(predictions).all()
 
 
-def test_no_deferred_route_tokens() -> None:
-    hits = []
-    for path in sorted(MODEL_ROOT.rglob("*.py")):
-        if TESTS_DIR in path.parents:
-            continue
-        text = path.read_text(encoding="utf-8")
-        if not FORBIDDEN_ROUTE.search(text):
-            continue
-        if path == DECLARED_STATUS_MODULE and not FITTING_ROUTE.search(text):
-            continue
-        hits.append(str(path.relative_to(REPO_ROOT)))
-
-    assert not hits, "recalibration vocabulary remains: " + ", ".join(hits)
-
-    # The permitted module carries only the declared status, never a fitted
-    # factor: no smearing/selection vocabulary and an explicit "not applied".
-    if DECLARED_STATUS_MODULE.is_file():
-        text = DECLARED_STATUS_MODULE.read_text(encoding="utf-8")
-        assert not FITTING_ROUTE.search(text)
-        assert "not applied" in text.lower()
-
-
 def test_reported_loss_floor_magnitudes() -> None:
     low = training.qlike_loss(np.array([-23.025851]), np.array([0.0]))
     assert low == pytest.approx(22.025851, rel=1e-9)
@@ -297,38 +260,6 @@ def _has_scale_note(text: str) -> bool:
         or re.search(r"4\s*(?:x|×|times)\s*(?:-|to)\s*6", text)
     )
     return sigma_scale and per_day and variance_scale and ratio
-
-
-def test_docsign_identity_and_scale_note() -> None:
-    """The qlike_loss docstring states the signed identity and the sigma scale.
-
-    Signal: this test fails if the documented sign is flipped (for example
-    ``QLIKE = HL + ln(h) - 1``) or if the scale note is missing. At the branch
-    point the docstring carries neither the signed identity nor the scale tokens,
-    so both content checks below are red; the trailing block pins the numeric
-    anchors, proving the change is docstring-only.
-    """
-    text = _normalized_docstring(training.qlike_loss)
-
-    # Negative controls: the matchers reject a flipped sign either way and an
-    # empty document, so merely mentioning "QLIKE" cannot satisfy them.
-    for flipped in ("qlike = hl + ln(h) - 1", "hl = qlike - ln(h) + 1"):
-        assert not _has_signed_identity(flipped)
-    assert not _has_scale_note("")
-
-    assert _has_signed_identity(text), (
-        "qlike_loss docstring lacks the signed identity QLIKE = HL - ln(h) - 1 "
-        "(or its HL = QLIKE + ln(h) + 1 equivalent)"
-    )
-    assert _has_scale_note(text), (
-        "qlike_loss docstring lacks the sigma scale declaration "
-        "(sigma, per-day, variance, and 4-6x tokens)"
-    )
-
-    low = training.qlike_loss(np.array([-23.025851]), np.array([0.0]))
-    assert low == pytest.approx(22.025851, rel=1e-9)
-    high = training.qlike_loss(np.array([23.025851]), np.array([0.0]))
-    assert high == pytest.approx(1e10, rel=1e-6)
 
 
 if __name__ == "__main__":

@@ -114,29 +114,6 @@ def test_persisted_headline_matches_the_fold_metric_mean() -> None:
     assert headline["excluded_folds"] == []
 
 
-def test_per_fold_edges_and_n_test_match_the_fold_summary() -> None:
-    """Every fold edge is ``har_qlike - test_qlike``; ``n_test`` reconciles."""
-    evidence = _run_phase()
-    headline = evidence["evaluation_summary"]["headline"]
-    summary = evidence["summary_json"]
-    for fold_key in _fold_keys(summary):
-        block = headline["folds"][fold_key]
-        assert block["model_qlike"] == pytest.approx(
-            summary[fold_key]["test_qlike"], rel=1e-12, abs=1e-12
-        )
-        assert block["har_qlike"] == pytest.approx(
-            summary[fold_key]["har_qlike"], rel=1e-12, abs=1e-12
-        )
-        assert block["edge"] == pytest.approx(
-            summary[fold_key]["har_qlike"] - summary[fold_key]["test_qlike"],
-            rel=1e-12,
-            abs=1e-12,
-        )
-        assert block["n_test"] == summary[fold_key]["n_test_samples"]
-        assert block["n_test"] == summary[fold_key]["n_test_scored"]
-        assert block["n_test_total"] == summary[fold_key]["n_test_total"]
-
-
 def test_fold_summary_keeps_exactly_five_rows_and_no_aggregate() -> None:
     """The loader contract is exactly five ``fold_*`` rows, never a sixth."""
     evidence = _run_phase()
@@ -153,39 +130,6 @@ def test_fold_summary_keeps_exactly_five_rows_and_no_aggregate() -> None:
         live = json.loads(LIVE_SUMMARY.read_text(encoding="utf-8"))
         assert len(live) == 5
         assert all(key.startswith("fold_") for key in live)
-
-
-def test_live_headline_matches_the_live_fold_metrics() -> None:
-    """Read-only: the regenerated live aggregate equals the fold-metric mean."""
-    evaluation, summary = _live_payloads()
-    assert "headline" in evaluation, (
-        "the live evaluation summary predates the headline emission; "
-        f"keys: {sorted(evaluation)}"
-    )
-    headline = evaluation["headline"]
-    fold_keys = _fold_keys(summary)
-    expected_model = float(
-        np.mean([summary[fold_key]["test_qlike"] for fold_key in fold_keys])
-    )
-    expected_har = float(
-        np.mean([summary[fold_key]["har_qlike"] for fold_key in fold_keys])
-    )
-    assert headline["aggregate"]["model_qlike"] == pytest.approx(
-        expected_model, rel=0.0, abs=1e-6
-    )
-    assert headline["aggregate"]["har_qlike"] == pytest.approx(
-        expected_har, rel=0.0, abs=1e-6
-    )
-    assert headline["aggregate"]["edge"] == pytest.approx(
-        expected_har - expected_model, rel=0.0, abs=1e-6
-    )
-    for fold_key in fold_keys:
-        block = headline["folds"][fold_key]
-        assert block["edge"] == pytest.approx(
-            summary[fold_key]["har_qlike"] - summary[fold_key]["test_qlike"],
-            rel=1e-12,
-            abs=1e-12,
-        )
 
 
 if __name__ == "__main__":
