@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import math
 import sys
-import traceback
 from pathlib import Path
 
 import joblib
@@ -13,7 +12,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from conftest import ARTIFACTS_DIR, DATASET_PATH, REPO_ROOT  # noqa: E402
+from conftest import ARTIFACTS_DIR, DATASET_PATH  # noqa: E402
 from conftest import requires_live_artifacts  # noqa: E402
 
 LIVE_SUMMARY = ARTIFACTS_DIR / "results" / "fold_training_summary.json"
@@ -21,7 +20,6 @@ LIVE_HAR_REPORT = ARTIFACTS_DIR / "results" / "har_benchmark.json"
 
 
 def test_live_metrics_have_no_nan_today() -> None:
-    """Read-only: the stored live metrics are strict JSON with finite values."""
     requires_live_artifacts(ARTIFACTS_DIR)
     if not (LIVE_SUMMARY.is_file() and LIVE_HAR_REPORT.is_file()):
         pytest.skip("requires the stored live fold summary and HAR report")
@@ -44,7 +42,6 @@ def test_live_metrics_have_no_nan_today() -> None:
 
 
 def test_live_har_components_are_finite_and_windowed() -> None:
-    """Live HAR components stay finite on the generated dataset."""
     from packages.ml.model.training import har_benchmark
 
     if not DATASET_PATH.is_file():
@@ -61,7 +58,6 @@ def test_live_har_components_are_finite_and_windowed() -> None:
 
 
 def test_live_alignment_covers_the_first_21_dates_per_ticker() -> None:
-    """The warm-up covers exactly the first 21 dates of every ticker."""
     from packages.ml.model.features import feature_engineering
     from packages.ml.model.training import har_benchmark
 
@@ -89,7 +85,6 @@ def test_live_alignment_covers_the_first_21_dates_per_ticker() -> None:
 
 
 def test_live_holdout_reservation_is_disjoint_and_purged() -> None:
-    """Read-only: the persisted window matches the fold schema."""
     from packages.ml.model.cross_validation import cross_validator
     from packages.ml.model.evaluation import holdout
 
@@ -110,7 +105,6 @@ def test_live_holdout_reservation_is_disjoint_and_purged() -> None:
 
 
 def test_live_summary_loads_in_fold_order() -> None:
-    """The live fold summary loads with five folds in index order."""
     from packages.ml.model.visualization.data_loader import (
         load_fold_training_summary,
     )
@@ -120,24 +114,3 @@ def test_live_summary_loads_in_fold_order() -> None:
     frame = load_fold_training_summary(LIVE_SUMMARY)
     assert list(frame["fold"]) == [f"fold_{index}" for index in range(len(frame))]
     assert len(frame) == 5
-
-
-if __name__ == "__main__":
-    failures = 0
-    skipped = 0
-    for _name, _fn in list(globals().items()):
-        if _name.startswith("test_") and callable(_fn):
-            try:
-                _fn()
-                print(f"PASS {_name}")
-            except pytest.skip.Exception as exc:
-                skipped += 1
-                print(f"SKIP {_name}: {exc}")
-            except Exception:
-                failures += 1
-                print(f"FAIL {_name}")
-                traceback.print_exc()
-    if failures:
-        raise SystemExit(f"{failures} test(s) failed")
-    suffix = f" ({skipped} skipped)" if skipped else ""
-    print(f"All tests passed{suffix}")
