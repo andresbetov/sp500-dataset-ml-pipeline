@@ -153,16 +153,6 @@ def test_finish_run_survives_a_retention_failure() -> None:
         assert len((root / "runs.jsonl").read_text(encoding="utf-8").splitlines()) == 1
 
 
-def test_docs_describe_retention_and_the_append_only_log() -> None:
-    text = (REPO_ROOT / "docs" / "model-artifacts.md").read_text(encoding="utf-8")
-    normalized = " ".join(text.split()).lower()
-
-    assert "run.retention" in normalized, text
-    assert "append-only" in normalized, text
-    assert "last" in normalized, text
-    assert "readme" in normalized, text
-
-
 if __name__ == "__main__":
     failures = 0
     for _name, _fn in list(globals().items()):

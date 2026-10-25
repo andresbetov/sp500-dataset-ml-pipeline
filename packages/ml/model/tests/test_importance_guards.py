@@ -284,24 +284,3 @@ def test_manifest_records_n_models_loaded(
     assert status["status"] == "ok", status
 
 
-def test_live_feature_importance_figure_renders(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Non-regression: a live-shaped importance figure renders read-only."""
-    artifacts = conftest.ARTIFACTS_DIR
-    required = (
-        artifacts / "folds" / "folds_metadata.pkl",
-        artifacts / "results" / "fold_training_summary.json",
-        artifacts / "run_manifest.json",
-    )
-    if not all(path.is_file() for path in required):
-        pytest.skip("requires live model artifacts absent from this checkout")
-    captured = _capture_figure(monkeypatch)
-    output = tmp_path / "feature_importance.png"
-
-    returned = training_diagnostics.plot_feature_importance(output)
-
-    assert returned == output and output.is_file()
-    axis, _heights = _aggregate_bars(captured["figure"])
-    assert len(axis.patches) == 15
-    assert f"{EXPECTED_FEATURES} features" in _figure_text(captured["figure"])

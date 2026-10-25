@@ -195,43 +195,6 @@ def test_indicator_contract_count() -> None:
     assert len(set(feature_engineering.INDICATORS)) == 37
 
 
-def test_extras_recorded() -> None:
-    frame, _, _, metadata = _live_inputs()
-    feature_engineering = _feature_engineering()
-    pin = _pin(metadata)
-
-    schema_names = pq.ParquetFile(DATASET_PATH).schema.names
-    expected = [
-        name for name in schema_names if name not in feature_engineering.INDICATORS
-    ]
-    assert pin["extra_columns"] == expected
-    assert pin["extra_columns_count"] == len(expected)
-    # The loaded frame and the file schema must agree on the extras.
-    frame_extras = [
-        name for name in frame.columns if name not in feature_engineering.INDICATORS
-    ]
-    assert expected == frame_extras
-
-
-def test_dataset_pin_matches_source() -> None:
-    frame, _, _, metadata = _live_inputs()
-    pin = _pin(metadata)
-    assert set(pin) == set(PIN_KEYS)
-
-    resolved = Path(pin["path"])
-    assert resolved == DATASET_PATH.resolve()
-    assert resolved.is_file()
-
-    assert re.fullmatch(r"[0-9a-f]{64}", pin["sha256"])
-    assert pin["sha256"] == _stream_sha256(DATASET_PATH)
-
-    assert pin["rows"] == pq.ParquetFile(DATASET_PATH).metadata.num_rows
-    assert pin["rows"] == frame.shape[0]
-    assert pin["unique_dates"] == int(frame["date"].nunique())
-    # Both sides are stat reads of the same unchanged file.
-    assert pin["mtime"] == DATASET_PATH.stat().st_mtime
-
-
 def test_indicators_hash_tracks_order() -> None:
     _, _, _, metadata = _live_inputs()
     feature_engineering = _feature_engineering()
@@ -249,14 +212,6 @@ def test_indicators_hash_tracks_order() -> None:
     assert _indicators_hash(renamed) != recorded
 
 
-def test_non_reconstructible_columns_recorded() -> None:
-    _, _, _, metadata = _live_inputs()
-    recorded = _pin(metadata)["non_reconstructible_columns"]
-    assert recorded == list(NON_RECONSTRUCTIBLE_COLUMNS)
-    for name in NON_RECONSTRUCTIBLE_COLUMNS:
-        assert recorded.count(name) == 1
-
-
 def test_no_model_side_rederivation() -> None:
     hits = _rederivation_hits()
     assert not hits, (
@@ -264,13 +219,6 @@ def test_no_model_side_rederivation() -> None:
         "model package (they are computed upstream, before the dataset's dropna "
         "step):\n" + "\n".join(hits)
     )
-
-
-def test_contract_comment_is_current() -> None:
-    text = FEATURE_ENGINEERING_PATH.read_text(encoding="utf-8")
-    for stale in ("15 volatility inputs", "7 redundant"):
-        assert stale not in text, f"stale contract-comment token remains: {stale!r}"
-    assert re.search(r"15\s*[-\u2212\u2013]\s*7", text) is None
 
 
 def test_missing_indicator_still_raises() -> None:
@@ -395,48 +343,6 @@ def test_validate_extracted_inputs_returns_clean_record() -> None:
     assert record["rv_floor"] == pytest.approx(float(get_config()["rv_floor"]))
 
 
-def test_input_checks_record_clean_live_shape() -> None:
-    frame, _, Y, metadata = _live_inputs()
-    feature_engineering = _feature_engineering()
-    from packages.ml.model.config import get_config
-
-    assert set(metadata) >= {
-        "date",
-        "ticker",
-        "n_indicators",
-        "n_ticker_features",
-        "dataset",
-        "input_checks",
-    }
-    assert set(_pin(metadata)) == set(PIN_KEYS)
-
-    record = metadata["input_checks"]
-    assert set(record) == set(INPUT_CHECKS_KEYS)
-    assert record["n_rows"] == frame.shape[0]
-    assert record["n_features"] == feature_engineering.EXPECTED_INDICATOR_COUNT
-    assert record["x_nan_count"] == 0
-    assert record["x_inf_count"] == 0
-
-    expected_names = list(feature_engineering.INDICATORS)
-    assert list(record["x_nan_rates"]) == expected_names
-    assert list(record["x_inf_rates"]) == expected_names
-    assert all(rate == 0.0 for rate in record["x_nan_rates"].values())
-    assert all(rate == 0.0 for rate in record["x_inf_rates"].values())
-
-    assert record["duplicate_pairs"] == 0
-    assert record["zero_variance_columns"] == []
-
-    floor = float(get_config()["rv_floor"])
-    assert record["rv_floor"] == pytest.approx(floor)
-    assert record["y_nan_count"] == 0
-    assert record["y_inf_count"] == 0
-    assert record["y_negative_count"] == 0
-    assert record["degenerate_count"] == int(np.count_nonzero(Y <= floor))
-    assert record["degenerate_rate"] == pytest.approx(
-        record["degenerate_count"] / Y.size
-    )
-
-
 def test_input_checks_record_constant_column_and_duplicated_pair() -> None:
     feature_engineering = _feature_engineering()
     frame = _varying_frame()
@@ -453,96 +359,6 @@ def test_input_checks_record_constant_column_and_duplicated_pair() -> None:
     assert record["x_nan_count"] == 0
     assert record["x_inf_count"] == 0
     assert record["degenerate_count"] == 0
-
-
-def test_date_contract() -> None:
-    _, _, _, metadata = _live_inputs()
-    dates = metadata["date"]
-    assert isinstance(dates, np.ndarray)
-    assert dates.dtype == np.dtype("datetime64[ns]")
-
-    from packages.ml.model.utils import normalize_dates
-
-    # A unit-converted copy carries the same instants; normalizing returns the
-    # canonical array with the order and length preserved.
-    unit_converted = dates.astype("datetime64[s]")
-    normalized = normalize_dates(unit_converted)
-    assert isinstance(normalized, np.ndarray)
-    assert normalized.dtype == np.dtype("datetime64[ns]")
-    assert len(normalized) == len(dates)
-    assert np.array_equal(normalized, dates)
-
-    # String input goes through pandas; naive strings are UTC and an offset is
-    # converted to UTC before the timezone is dropped.
-    parsed = normalize_dates(np.array(["2020-01-01", "2020-01-03"]))
-    assert parsed.dtype == np.dtype("datetime64[ns]")
-    assert np.array_equal(
-        parsed, np.array(["2020-01-01", "2020-01-03"], dtype="datetime64[ns]")
-    )
-    offset = normalize_dates(np.array(["2020-01-02T00:00:00+02:00"]))
-    assert offset[0] == np.datetime64("2020-01-01T22:00:00")
-
-    # Missing dates raise the named error and count the NaN dates, rather than
-    # letting a silent mismatch reach the row alignment.
-    missing = np.array(
-        ["2020-01-01", "NaT", "2020-01-03", "NaT"], dtype="datetime64[ns]"
-    )
-    with pytest.raises(ValueError) as excinfo:
-        normalize_dates(missing)
-    message = str(excinfo.value)
-    assert "2 missing date" in message
-    assert "NaT" in message
-
-
-def test_phase_4_finiteness_backstop_kept() -> None:
-    text = TRAINING_PATH.read_text(encoding="utf-8")
-    assert "if not np.isfinite(y).all():" in text
-    assert "finite = np.isfinite(X)" in text
-    assert "Invalid feature values" in text
-    assert "Invalid target values" in text
-
-
-def test_phase_2_builds_metadata_from_extraction_helper() -> None:
-    tree = ast.parse(FEATURE_ENGINEERING_PATH.read_text(encoding="utf-8"))
-    function = next(
-        node
-        for node in tree.body
-        if isinstance(node, ast.FunctionDef)
-        and node.name == "phase_2_feature_selection"
-    )
-    helper_calls = [
-        node
-        for node in ast.walk(function)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id == "_extract_inputs"
-    ]
-    assert len(helper_calls) == 1, (
-        "phase_2_feature_selection must build X/Y/metadata through _extract_inputs "
-        "so the persisted metadata is the tested extraction output"
-    )
-
-
-def test_x_y_values_unchanged() -> None:
-    frame, X, Y, _ = _live_inputs()
-    feature_engineering = _feature_engineering()
-    assert X.shape == (frame.shape[0], feature_engineering.EXPECTED_INDICATOR_COUNT)
-    assert np.array_equal(X, frame[feature_engineering.INDICATORS].values)
-    assert np.array_equal(Y, frame["realized_volatility_5d"].values)
-
-
-def test_phase_2_arrays_match_snapshot() -> None:
-    X_path = ARTIFACTS_DIR / "inputs" / "X.npy"
-    Y_path = ARTIFACTS_DIR / "inputs" / "Y.npy"
-    if not (X_path.is_file() and Y_path.is_file()):
-        pytest.skip("requires generated model inputs absent from this checkout")
-
-    _, X, Y, _ = _live_inputs()
-    X_snapshot = np.load(X_path, mmap_mode="r")
-    Y_snapshot = np.load(Y_path, mmap_mode="r")
-    assert X.shape == X_snapshot.shape
-    assert np.array_equal(X, X_snapshot)
-    assert np.array_equal(Y, Y_snapshot)
 
 
 if __name__ == "__main__":

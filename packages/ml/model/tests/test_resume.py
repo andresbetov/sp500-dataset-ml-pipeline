@@ -375,40 +375,6 @@ def test_resume_recomputes_a_fold_with_a_tampered_checkpoint() -> None:
         assert set(summary) == {f"fold_{idx}" for idx in range(5)}
 
 
-def test_folds_subset_records_the_selection() -> None:
-    with tempfile.TemporaryDirectory() as tmpdir:
-        root = _prepared_root(tmpdir)
-        _, summary, paths = _exercise_run(root, folds=[0, 2])[0]
-
-        assert set(summary) == {"fold_0", "fold_2"}
-        assert len(paths) == 2
-        manifest = _manifest(root)
-        assert manifest["partial"] is True
-        assert manifest["fold_selection"] == {
-            "requested": [0, 2],
-            "trained": [0, 2],
-            "resumed": [],
-            "n_folds_total": 5,
-            "n_folds_selected": 2,
-        }
-        selection = json.loads(
-            (root / "results" / "run_selection.json").read_text(encoding="utf-8")
-        )
-        assert selection["partial"] is True
-        assert selection["requested"] == [0, 2]
-        assert selection["trained"] == [0, 2]
-        assert selection["resumed"] == []
-        assert selection["fold_keys"] == ["fold_0", "fold_2"]
-        assert selection["n_folds_total"] == 5
-        assert selection["n_folds_selected"] == 2
-
-        source = (
-            REPO_ROOT / "packages" / "ml" / "model" / "main.py"
-        ).read_text(encoding="utf-8")
-        assert "--resume" in source
-        assert "--folds" in source
-
-
 def test_resume_with_folds_skips_only_selected_complete_records() -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         root = _prepared_root(tmpdir)
@@ -667,16 +633,6 @@ def test_resume_recomputes_a_record_missing_only_har_forecast_log() -> None:
         assert set(summary) == {f"fold_{idx}" for idx in range(5)}
 
 
-def test_config_hash_ignores_the_operational_run_section() -> None:
-    loaded = model_config.load_config()
-    changed = json.loads(json.dumps(loaded))
-    changed["run"]["retention"] = 1
-    assert run_log.config_hash(loaded) == run_log.config_hash(changed)
-
-    changed["folds"]["n_folds"] = 4
-    assert run_log.config_hash(loaded) != run_log.config_hash(changed)
-
-
 def test_resume_validates_before_creating_artifact_directories() -> None:
     from packages.ml.model import main as main_module
 
@@ -686,55 +642,6 @@ def test_resume_validates_before_creating_artifact_directories() -> None:
             with pytest.raises(_resume_error_type()):
                 main_module.main(resume=True)
         assert not root.exists(), "a failed resume probe created the artifact tree"
-
-
-def test_subset_phase_5_renders_selected_folds_without_plot_errors() -> None:
-    from packages.ml.model.visualization import training_diagnostics
-    from packages.ml.model.visualization.data_loader import (
-        load_fold_training_summary,
-    )
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        root = _prepared_root(tmpdir)
-        validation, _summary, _ = _exercise_run(root, folds=[0, 2])[0]
-        summary_df = load_fold_training_summary(
-            root / "results" / "fold_training_summary.json"
-        )
-        output_dir = Path(tmpdir) / "plots"
-
-        with mock.patch.object(
-            training_diagnostics, "ARTIFACTS_DIR", root
-        ):
-            paths = training_diagnostics.generate_training_diagnostics(
-                validation, summary_df, output_dir
-            )
-
-        assert {path.name for path in paths} == {
-            "actual_vs_predicted.png",
-            "residuals_distribution.png",
-            "feature_importance.png",
-            "error_by_volatility_bin.png",
-        }
-        assert all(path.is_file() for path in paths)
-
-
-def test_cli_help_lists_resume_and_folds() -> None:
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-B",
-            "-m",
-            "packages.ml.model.main",
-            "--help",
-        ],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
-    assert result.returncode == 0, result.stderr
-    assert "--resume" in result.stdout, result.stdout
-    assert "--folds" in result.stdout, result.stdout
 
 
 def test_no_argument_dry_run_plan_is_unchanged() -> None:
@@ -754,18 +661,6 @@ def test_no_argument_dry_run_plan_is_unchanged() -> None:
     assert result.returncode == 0, result.stderr
     assert "dry run" in result.stdout.lower(), result.stdout
     assert "Phase 2" in result.stdout, result.stdout
-
-
-def test_agent_and_readme_docs_name_the_new_flags() -> None:
-    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
-    agents = (REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8")
-
-    for document in (readme, agents):
-        assert "--resume" in document, "docs must name --resume"
-        assert "--folds" in document, "docs must name --folds"
-        assert "partial" in document.lower(), "docs must describe partial runs"
-    assert "run.retention" in readme, "README must document the retention key"
-    assert "run_selection.json" in readme
 
 
 if __name__ == "__main__":

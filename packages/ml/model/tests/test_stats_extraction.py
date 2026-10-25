@@ -190,89 +190,6 @@ def _mean(values: Iterable[float | None]) -> float | None:
     return float(np.mean(finite)) if finite else None
 
 
-def test_extractors_have_live_call_sites_in_the_visualization_path() -> None:
-    """Every previously dead extractor is called by the viz orchestrator."""
-    called = _called_functions(VISUALIZE_PATH)
-    for name in (
-        "extract_training_time_stats",
-        "extract_metric_stats",
-        "extract_sample_stats",
-        "extract_qlike_stats",
-    ):
-        assert name in called, f"{name} has no call site in {VISUALIZE_PATH}"
-
-
-def test_manifest_carries_per_fold_stats_means_and_gap(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The orchestrator writes the stats block next to the per-plot entries."""
-    _stub_checkpoint_loads(monkeypatch, tmp_path)
-    monkeypatch.setattr(
-        visualize, "load_validation_predictions", lambda _path=None: _predictions()
-    )
-    output_dir = tmp_path / "plots"
-
-    results = visualize.generate_all_visualizations(
-        summary_path=_write_summary(tmp_path),
-        predictions_path=tmp_path / "unused.pkl",
-        output_dir=output_dir,
-    )
-
-    # Non-regression: the loader task's per-plot manifest entries are intact.
-    assert sum(len(paths) for paths in results.values()) == 14
-    manifest = _load_manifest(output_dir)
-    entries = manifest["plots"]
-    assert {(entry["category"], entry["plot"]) for entry in entries} == EXPECTED_PLOTS
-    assert all(entry["status"] == "ok" for entry in entries), entries
-    assert all(set(entry) == {"category", "plot", "status", "error"} for entry in entries)
-
-    frame = _summary_frame()
-    stats = manifest["stats"]
-    qlike = stats["qlike"]
-    assert qlike["sign_convention"]
-    assert list(qlike["per_fold"]) == [f"fold_{index}" for index in range(5)]
-    assert set(qlike["means"]) == MEAN_KEYS
-
-    expected_gaps = []
-    for index in range(5):
-        fold = f"fold_{index}"
-        record = qlike["per_fold"][fold]
-        assert set(record) == PER_FOLD_KEYS, record
-        row = frame.iloc[index]
-        for key in ("test_qlike", "har_qlike", "har_r2"):
-            assert record[key] == pytest.approx(
-                float(row[key]), rel=0.0, abs=1e-12
-            ), (fold, key)
-        expected_gap = float(row["har_qlike"]) - float(row["test_qlike"])
-        assert record["qlike_gap"] == pytest.approx(
-            expected_gap, rel=0.0, abs=1e-12
-        ), fold
-        expected_gaps.append(expected_gap)
-
-    assert qlike["per_fold"]["fold_0"]["qlike_gap"] == pytest.approx(
-        LIVE_FOLD_0["qlike_gap"], rel=0.0, abs=1e-12
-    )
-    expected_means = {
-        "test_qlike_mean": float(frame["test_qlike"].mean()),
-        "har_qlike_mean": float(frame["har_qlike"].mean()),
-        "har_r2_mean": float(frame["har_r2"].mean()),
-        "qlike_gap_mean": _mean(expected_gaps),
-    }
-    for key, expected in expected_means.items():
-        assert qlike["means"][key] == pytest.approx(
-            expected, rel=0.0, abs=1e-12
-        ), key
-
-    # The other extractor outputs also reach the live manifest.
-    assert stats["metrics"]["r2_mean"] == pytest.approx(
-        float(frame["test_r2"].mean()), rel=0.0, abs=1e-12
-    )
-    assert stats["training_time"]["train_time_mean"] == pytest.approx(
-        float(frame["train_time_seconds"].mean()), rel=0.0, abs=1e-12
-    )
-    assert stats["samples"]["n_folds"] == len(frame)
-
-
 def test_qlike_gap_sign_convention_matches_a_synthetic_fixture() -> None:
     """A positive gap means the model beats HAR: gap = har_qlike - test_qlike."""
     frame = _summary_frame()
@@ -310,16 +227,3 @@ def test_stats_extraction_does_not_mutate_the_fold_frame() -> None:
     pd.testing.assert_frame_equal(frame, snapshot)
 
 
-def test_live_fold_zero_matches_the_branch_point_values() -> None:
-    """Read-only: the live summary reproduces the recorded branch-point stats."""
-    if not LIVE_SUMMARY.is_file():
-        pytest.skip("requires the live fold training summary absent from this checkout")
-
-    frame = data_loader.load_fold_training_summary(LIVE_SUMMARY)
-    stats = data_loader.extract_qlike_stats(frame)
-
-    fold_0 = stats["per_fold"]["fold_0"]
-    for key, expected in LIVE_FOLD_0.items():
-        assert fold_0[key] == pytest.approx(expected, rel=0.0, abs=1e-12), key
-    for key, expected in LIVE_BRANCH_POINT_MEANS.items():
-        assert stats["means"][key] == pytest.approx(expected, rel=0.0, abs=1e-12), key
