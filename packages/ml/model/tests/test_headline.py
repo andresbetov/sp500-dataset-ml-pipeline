@@ -1,25 +1,20 @@
-"""Tests for the QLIKE headline reporting convention.
+"""Tests for the promoted QLIKE headline convention.
 
-The promoted headline is the **unweighted mean of the 5 fold metrics**. The
-reporting contract has to make that explicit instead of leaving a bare
-``GLOBAL`` number in the log:
+The headline is the unweighted mean of the five fold metrics, persisted in
+``results/evaluation_summary.json`` under ``headline`` (outside the five-row
+``fold_training_summary.json`` contract):
 
-- ``headline.convention`` states the unweighted fold-mean convention and
-  ``headline.weighting`` says each fold contributes equally regardless of
-  ``n_test``;
-- ``headline.edge_definition`` states ``har_qlike - model_qlike`` (positive =
-  model lower loss);
-- ``headline.caveat`` records the single-seed limitation;
-- ``headline.folds[*].label`` marks each fold as one of five (fold_0 is not
-  the headline);
-- ``headline.pooled`` is the row-weighted mean over the persisted per-row
-  loss vectors, never an average of per-fold ratios;
-- the phase log promotes the aggregate and carries the convention and caveat.
+- ``aggregate`` - the unweighted mean of the per-fold model QLIKE and HAR
+  QLIKE, and their edge (``har_qlike - model_qlike``);
+- ``pooled`` - the row-weighted mean over the persisted per-row loss vectors,
+  never an average of per-fold ratios;
+- the five-row fold summary keeps exactly its five fold keys and no aggregate
+  row (the loader contract).
 
 These checks use the shared five-fold synthetic phase fixture and a direct
 five-fold vector fixture with unequal fold sizes, so the equal-weight
 aggregate and the row-weighted pooled value cannot coincide by accident. No
-live artifact is written.
+live artifact is read or written.
 
 Run with pytest from the repository root:
 
@@ -27,12 +22,11 @@ Run with pytest from the repository root:
 
 This file also runs standalone:
 
-    .venv/bin/python -B packages/ml/model/tests/test_qlike_reporting.py
+    .venv/bin/python -B packages/ml/model/tests/test_headline.py
 """
 
 from __future__ import annotations
 
-import logging
 import traceback
 
 import conftest  # noqa: F401  (puts the repository root on sys.path)
@@ -51,6 +45,12 @@ FOLD_SIZES = {
     "fold_3": 7,
     "fold_4": 8,
 }
+
+AGGREGATE_KEYS = {"model_qlike", "har_qlike", "edge"}
+
+
+def _fold_keys(summary: dict) -> list[str]:
+    return sorted(key for key in summary if key.startswith("fold_"))
 
 
 def _five_fold_frame() -> tuple[dict, object]:
@@ -143,14 +143,65 @@ def test_pooled_values_are_row_weighted_from_the_vectors() -> None:
     )
 
 
+def test_persisted_headline_matches_the_fold_metric_mean() -> None:
+    """The aggregate is the unweighted mean of the five fold metrics."""
+    evidence = _run_phase()
+    payload = evidence["evaluation_summary"]
+    assert payload is not None, (
+        "phase_4_training did not write results/evaluation_summary.json"
+    )
+    assert "headline" in payload, (
+        "the aggregate headline is absent from evaluation_summary.json; "
+        f"keys: {sorted(payload)}"
+    )
+    headline = payload["headline"]
+    summary = evidence["summary_json"]
+    fold_keys = _fold_keys(summary)
+    assert len(fold_keys) == 5
+    assert set(headline["folds"]) == set(fold_keys)
+
+    expected_model = float(
+        np.mean([summary[fold_key]["test_qlike"] for fold_key in fold_keys])
+    )
+    expected_har = float(
+        np.mean([summary[fold_key]["har_qlike"] for fold_key in fold_keys])
+    )
+    aggregate = headline["aggregate"]
+    assert set(aggregate) >= AGGREGATE_KEYS
+    assert aggregate["model_qlike"] == pytest.approx(
+        expected_model, rel=0.0, abs=1e-6
+    )
+    assert aggregate["har_qlike"] == pytest.approx(
+        expected_har, rel=0.0, abs=1e-6
+    )
+    assert aggregate["edge"] == pytest.approx(
+        expected_har - expected_model, rel=0.0, abs=1e-6
+    )
+
+    assert headline["n_valid"] == 5
+    assert headline["n_total"] == 5
+    assert headline["excluded_folds"] == []
+
+
+def test_fold_summary_keeps_exactly_five_rows_and_no_aggregate() -> None:
+    """The loader contract is exactly five ``fold_*`` rows, never a sixth."""
+    evidence = _run_phase()
+    summary = evidence["summary_json"]
+    assert len(summary) == 5
+    assert set(summary) == {f"fold_{index}" for index in range(5)}
+    for forbidden in ("aggregate", "headline", "global", "GLOBAL"):
+        assert forbidden not in summary
+    for row in summary.values():
+        assert "aggregate" not in row
+        assert "headline" not in row
+
+
 if __name__ == "__main__":
     failures = 0
     skipped = 0
     for _name, _fn in list(globals().items()):
         if _name.startswith("test_") and callable(_fn):
             try:
-                if "caplog" in _fn.__code__.co_varnames:
-                    continue
                 _fn()
                 print(f"PASS {_name}")
             except pytest.skip.Exception as exc:
