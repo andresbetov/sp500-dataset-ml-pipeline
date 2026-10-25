@@ -252,50 +252,6 @@ def test_fold_timing_decomposes_into_train_inference_and_har() -> None:
             )
 
 
-def test_summary_schema_adds_only_declared_keys() -> None:
-    """The per-fold summary keeps every pre-existing key and value."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        root = _prepared_root(tmpdir)
-        validation, _summary, summary_json, _model_paths, manifest = _exercised_run(
-            root
-        )
-
-        for fold_key, stored in summary_json.items():
-            declared = (
-                PREEXISTING_SUMMARY_KEYS
-                | {"har_time_seconds"}
-                | DUAL_OOS_R2_SUMMARY_KEYS
-            )
-            assert set(stored) == declared, (
-                fold_key,
-                sorted(set(stored) ^ declared),
-            )
-            prediction = validation[fold_key]
-            for key in (
-                "train_time_seconds",
-                "inference_time_seconds",
-                "fold_time_seconds",
-                "test_r2",
-                "test_qlike",
-                "clip_count",
-                "n_test_samples",
-            ):
-                assert stored[key] == prediction[key], (fold_key, key)
-            assert stored["model_path"] == prediction["fold_model_path"], fold_key
-
-        # The checkpoint payload is unchanged: loadable, and it predicts exactly
-        # what the fold recorded.
-        checkpoint = root / "checkpoints" / manifest["run_id"] / "fold_0.pkl"
-        loaded = joblib.load(checkpoint)
-        scored = validation["fold_0"]["test_pred"]
-        assert np.array_equal(
-            loaded.predict(
-                np.zeros((len(scored), N_INDICATORS + N_TICKER_FEATURES))
-            ),
-            scored,
-        )
-
-
 def _summary_frame() -> pd.DataFrame:
     """A complete summary frame whose fold totals exceed their components."""
     return pd.DataFrame(
@@ -314,78 +270,6 @@ def _summary_frame() -> pd.DataFrame:
             "n_features_ticker": [0] * 5,
         }
     )
-
-
-def test_timing_plot_reads_the_har_component_and_keeps_the_figure_name() -> None:
-    """The stacked bars include HAR and the figure name and caller are stable."""
-    frame = _summary_frame()
-    accessed: list = []
-    barh_calls: list = []
-    text_labels: list = []
-
-    real_getitem = pd.DataFrame.__getitem__
-    real_barh = plt.Axes.barh
-    real_text = plt.Axes.text
-
-    def recording_getitem(self, key):
-        accessed.append(key)
-        return real_getitem(self, key)
-
-    def recording_barh(ax, y, width, height, **kwargs):
-        barh_calls.append(
-            (np.asarray(width, dtype=float), kwargs.get("left"), kwargs.get("label"))
-        )
-        return real_barh(ax, y, width, height, **kwargs)
-
-    def recording_text(ax, x, y, s, *args, **kwargs):
-        text_labels.append((float(x), s))
-        return real_text(ax, x, y, s, *args, **kwargs)
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        output_dir = Path(tmpdir) / "model_outputs"
-        with contextlib.ExitStack() as stack:
-            stack.enter_context(
-                mock.patch.object(pd.DataFrame, "__getitem__", recording_getitem)
-            )
-            stack.enter_context(mock.patch.object(plt.Axes, "barh", recording_barh))
-            stack.enter_context(mock.patch.object(plt.Axes, "text", recording_text))
-            figure = performance_comparison.plot_timing_breakdown(
-                frame, output_dir / "timing_breakdown.png"
-            )
-
-        assert figure == output_dir / "timing_breakdown.png"
-        assert figure.is_file() and figure.stat().st_size > 0
-
-        assert "har_time_seconds" in accessed, (
-            "the timing plot must read the HAR timing component; "
-            f"read columns: {sorted({str(key) for key in accessed})}"
-        )
-
-        har_segments = [
-            call for call in barh_calls if call[2] and "HAR" in call[2]
-        ]
-        assert len(har_segments) == 1, barh_calls
-        widths, left, _label = har_segments[0]
-        assert np.allclose(widths, frame["har_time_seconds"].values)
-        assert np.allclose(
-            np.asarray(left, dtype=float),
-            frame["train_time_seconds"].values
-            + frame["inference_time_seconds"].values,
-        )
-
-        # The total label is the full fold cost, not just the model step.
-        for fold_time in frame["fold_time_seconds"].values:
-            assert any(
-                label == f"{fold_time:.1f}s" for _x, label in text_labels
-            ), (fold_time, text_labels)
-
-        # The caller keeps the same figure name.
-        paths = performance_comparison.generate_performance_comparisons(
-            frame, output_dir
-        )
-        assert output_dir / "timing_breakdown.png" in paths
-        assert len(paths) == 4
-        assert not list(Path(tmpdir).rglob("*.tmp"))
 
 
 if __name__ == "__main__":

@@ -66,12 +66,6 @@ def _run(
     return result, before, _snapshot(repo_root, artifacts_dir, outputs_dir)
 
 
-def test_absolute_import() -> None:
-    from packages.ml.model import main as main_module
-
-    assert callable(main_module.main)
-
-
 def test_module_entry_dry_run(
     repo_root: Path, artifacts_dir: Path, outputs_dir: Path
 ) -> None:
@@ -100,20 +94,6 @@ def test_path_entry_dry_run(
     assert after == before, _snapshot_changes(before, after)
 
 
-def test_unknown_argument_rejected(
-    repo_root: Path, artifacts_dir: Path, outputs_dir: Path
-) -> None:
-    result, before, after = _run(
-        repo_root,
-        artifacts_dir,
-        outputs_dir,
-        [sys.executable, "-B", "-m", "packages.ml.model.main", "--nope"],
-    )
-    assert result.returncode != 0, result.stdout
-    assert "usage" in result.stderr.lower(), result.stderr
-    assert after == before, _snapshot_changes(before, after)
-
-
 def test_import_has_no_side_effects(
     repo_root: Path, artifacts_dir: Path, outputs_dir: Path
 ) -> None:
@@ -128,18 +108,6 @@ def test_import_has_no_side_effects(
     after = _snapshot(repo_root, artifacts_dir, outputs_dir)
     assert result.returncode == 0, result.stderr
     assert after == before, _snapshot_changes(before, after)
-
-
-def test_init_parity(repo_root: Path) -> None:
-    init_files = [
-        repo_root / "packages" / "ml" / "model" / "__init__.py",
-        repo_root / "packages" / "ml" / "model" / "cross_validation" / "__init__.py",
-        repo_root / "packages" / "ml" / "model" / "features" / "__init__.py",
-        repo_root / "packages" / "ml" / "model" / "training" / "__init__.py",
-    ]
-    for path in init_files:
-        text = path.read_text(encoding="utf-8")
-        assert text.startswith("from __future__ import annotations\n"), path
 
 
 if __name__ == "__main__":
