@@ -173,12 +173,12 @@ For the numbers, read `packages/ml/model/artifacts/results/fold_training_summary
 - **No sector information.** The source data carries no sector labels, so sector dynamics cannot be learned.
 - **`market_regime` is a hardcoded calendar label**, not something derived from the data. Seven calendar buckets span 2000-2007 through 2026; a date past 2026 raises instead of joining the last bucket.
 - **QLIKE training targets conditional sigma.** The fold models minimize QLIKE on log daily sigma, the same loss reported in evaluation; the log-scale R²/MAE/RMSE remain diagnostic, and tail-risk use still requires out-of-sample evaluation.
-- **Model tests, no lint suite.** `packages/ml/model/tests/` runs under pytest; other changes are verified by running the affected phase and reading the logs.
+- **Model tests, no lint suite.** `packages/ml/model/tests/` runs under pytest; the hermetic unit suite excludes `packages/ml/model/tests/live/`. Other changes are verified by running the affected phase and reading the logs.
 - **A fresh clone needs Phase 1 first.** Nothing downstream can run without the generated parquet file.
 
 ## Contributing
 
-Read [AGENTS.md](AGENTS.md) before editing. It covers the two entry points and their order, the invariants that silently break saved artifacts, and known dead code. Run the model tests with `uv run --frozen python -m pytest packages/ml/model/tests -q` (checks that need generated data are skipped on a fresh clone). Run the phase covering your change — Phase 1 for `packages/ml/dataset`, Phases 2-5 otherwise — and confirm it completes. Repo-wide rationale lives in [docs/adr/](docs/adr/); check whether your change needs a new record before editing an accepted one.
+Read [AGENTS.md](AGENTS.md) before editing. It covers the two entry points and their order, the invariants that silently break saved artifacts, and known dead code. Run the hermetic unit suite with `uv run --frozen python -m pytest packages/ml/model/tests -q --ignore=packages/ml/model/tests/live`. Run the live artifact checks explicitly after a regeneration with `uv run --frozen python -m pytest packages/ml/model/tests/live -q`. Run the phase covering your change — Phase 1 for `packages/ml/dataset`, Phases 2-5 otherwise — and confirm it completes. Repo-wide rationale lives in [docs/adr/](docs/adr/); check whether your change needs a new record before editing an accepted one.
 
 ## License
 
