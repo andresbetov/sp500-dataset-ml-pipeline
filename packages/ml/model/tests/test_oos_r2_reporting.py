@@ -82,8 +82,6 @@ STUB_COMPONENT = 0.04
 # The pooled live values recomputed read-only at this branch point from the
 # current stored predictions and the persisted HAR coefficients; they are
 # interim and regenerate with the artifacts.
-LIVE_POOLED_LOG_R2 = 0.5935106380373554
-LIVE_POOLED_VS_HAR = 0.5625680996966533
 
 
 class _RecordingModel:

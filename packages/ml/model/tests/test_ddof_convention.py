@@ -46,7 +46,6 @@ from packages.ml.model.visualization import data_loader
 MODEL_ROOT = REPO_ROOT / "packages" / "ml" / "model"
 TRAINING_PATH = MODEL_ROOT / "training" / "training.py"
 DATA_LOADER_PATH = MODEL_ROOT / "visualization" / "data_loader.py"
-LIVE_SUMMARY = ARTIFACTS_DIR / "results" / "fold_training_summary.json"
 
 # The five fold R² values at the branch-point snapshot (the known fixture).
 BRANCH_POINT_R2 = np.array(
@@ -57,7 +56,6 @@ BRANCH_POINT_SAMPLE_STD = 0.214547
 
 # Current live sample spread of the five fold ``test_r2`` values. Interim pin:
 # re-record it when the live artifacts regenerate.
-LIVE_R2_SPREAD_DDOF1 = 0.12527045323920308
 
 
 def _fold_summary(values: np.ndarray, key: str = "test_r2") -> dict:

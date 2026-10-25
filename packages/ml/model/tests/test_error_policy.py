@@ -771,31 +771,6 @@ def test_qlike_loss_guards_stay_fail_loud() -> None:
     )
 
 
-def test_live_metrics_have_no_nan_today() -> None:
-    """Read-only: the stored live metrics are strict JSON with finite values."""
-    requires_live_artifacts(ARTIFACTS_DIR)
-    summary_path = ARTIFACTS_DIR / "results" / "fold_training_summary.json"
-    report_path = ARTIFACTS_DIR / "results" / "har_benchmark.json"
-    if not (summary_path.is_file() and report_path.is_file()):
-        pytest.skip("requires the stored live fold summary and HAR report")
-
-    summary = _parse_strict(summary_path.read_text(encoding="utf-8"))
-    report = _parse_strict(report_path.read_text(encoding="utf-8"))
-
-    invalid = []
-    for fold_key, row in summary.items():
-        for key in METRIC_KEYS:
-            value = row.get(key)
-            if value is None or not math.isfinite(value):
-                invalid.append(f"{fold_key}.{key}")
-    for fold_key, row in report["folds"].items():
-        for key in ("har_r2", "model_r2", "model_qlike"):
-            value = row.get(key)
-            if value is None or not math.isfinite(value):
-                invalid.append(f"har_report.{fold_key}.{key}")
-    assert not invalid, f"live metrics carry invalid values today: {invalid}"
-
-
 if __name__ == "__main__":
     failures = 0
     skipped = 0

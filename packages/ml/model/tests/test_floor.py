@@ -48,10 +48,8 @@ POLICY_FLOORED_TRAIN_SIZE = 2
 # row in fold 0's test block so the retained side is exercised too.
 TEST_FLOOR_ROWS = (12, 25, 38, 42, 57)
 TEST_SMALLEST_POSITIVE_ROW = 13
-LIVE_FOLD_0_KEPT_ROWS = 337_067
 # The fold-0 floor-retained model-vs-HAR QLIKE edge recomputed from the
 # regenerated stored predictions and HAR coefficients.
-LIVE_FOLD_0_FLOOR_RETAINED_EDGE = 0.068318
 
 
 def _synthetic_har_regressors(dates: np.ndarray, tickers: np.ndarray) -> tuple:

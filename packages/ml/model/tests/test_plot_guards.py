@@ -31,7 +31,6 @@ from packages.ml.model.visualization import (
 )
 from packages.ml.model.visualization.data_loader import load_fold_training_summary
 
-LIVE_SUMMARY = conftest.ARTIFACTS_DIR / "results" / "fold_training_summary.json"
 
 METRIC_COLUMNS = ("test_r2", "test_mae", "test_rmse")
 

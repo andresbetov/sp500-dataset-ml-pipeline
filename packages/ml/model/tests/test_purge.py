@@ -82,9 +82,6 @@ INLINE_FOLD_MINIMA = re.compile(
 
 # The live calendar at the branch point: 6504 unique trading dates, the final
 # 500 reserved, leaving 6004 fold dates whose six block edges are exact.
-LIVE_N_DATES = 6504
-LIVE_HOLDOUT_N_DATES = 500
-LIVE_FOLD_EDGES = [0, 1000, 2001, 3002, 4002, 5003, 6004]
 
 # HOLDOUT_N_DATES + (N_FOLDS + 1) * (PURGE_HORIZON_D + 1) with the current
 # config; the test re-derives it from the module symbols.

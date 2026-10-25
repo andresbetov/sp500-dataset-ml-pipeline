@@ -33,7 +33,6 @@ from packages.ml.model.visualization import (
 
 MODEL_ROOT = Path(__file__).resolve().parents[1]
 VISUALIZE_PATH = MODEL_ROOT / "visualization" / "visualize.py"
-LIVE_SUMMARY = ARTIFACTS_DIR / "results" / "fold_training_summary.json"
 
 # Current live fold-0 values, recorded at the branch point. Interim pins:
 # re-record them when the generated artifacts are regenerated.
@@ -42,12 +41,6 @@ LIVE_FOLD_0 = {
     "har_qlike": 0.12572092515717045,
     "har_r2": -0.3149361367920722,
     "qlike_gap": 0.06788814222478842,
-}
-LIVE_BRANCH_POINT_MEANS = {
-    "test_qlike_mean": 0.058485102770503485,
-    "har_qlike_mean": 0.10767435208926124,
-    "har_r2_mean": -0.1121044291066822,
-    "qlike_gap_mean": 0.04918924931875777,
 }
 
 PER_FOLD_KEYS = {"test_qlike", "har_qlike", "har_r2", "qlike_gap"}

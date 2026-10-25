@@ -43,10 +43,6 @@ BLOCK_ROWS = 10
 N_INDICATORS = 3
 N_TICKER_FEATURES = 1
 
-LIVE_SUMMARY = (
-    REPO_ROOT / "packages" / "ml" / "model" / "artifacts" / "results"
-    / "fold_training_summary.json"
-)
 
 RUN_ID_RE = re.compile(r"^\d{8}T\d{6}Z-[0-9a-f]{8}$")
 CONFIG_HASH_RE = re.compile(r"^[0-9a-f]{8}$")

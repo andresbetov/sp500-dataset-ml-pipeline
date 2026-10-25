@@ -28,8 +28,6 @@ from packages.ml.model.visualization import (
     visualize,
 )
 
-LIVE_SUMMARY = ARTIFACTS_DIR / "results" / "fold_training_summary.json"
-LIVE_PREDICTIONS = ARTIFACTS_DIR / "results" / "validation_predictions.pkl"
 
 EXPECTED_PLOTS = {
     "metrics": {
