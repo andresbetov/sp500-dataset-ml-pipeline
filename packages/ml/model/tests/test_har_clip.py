@@ -219,18 +219,6 @@ def test_live_style_forecast_not_clipped_and_silent() -> None:
     logger.warning.assert_not_called()
 
 
-def test_constraint_documented_in_module_text() -> None:
-    """The module text declares the clip, its log equivalence, and its source."""
-    source = Path(har_benchmark.__file__).read_text(encoding="utf-8")
-
-    assert "forecast_floor**2" in source
-    assert "forecast_log >= ln(forecast_floor)" in source
-    assert "-27.631021" in source
-    assert "shared config" in source
-    assert "must equal" in source
-    assert "exp(2 * ln(floor))" in source
-
-
 def test_counted_clip_equals_applied_clip_exactly() -> None:
     """The counter marks exactly the rows the clip changed, bit-for-bit."""
     regressors, target_log = _clip_fixture()

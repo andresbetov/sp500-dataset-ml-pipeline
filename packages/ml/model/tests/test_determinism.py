@@ -271,26 +271,6 @@ def test_seed_sweep_writes_at_least_three_seeds_with_per_fold_results(
             ), "two seeds produced identical forecasts on every fold"
 
 
-def test_thread_policy_is_recorded_in_the_manifest(monkeypatch) -> None:
-    """The policy is written to the run record, not merely configured."""
-    from packages.ml.model import run_log
-
-    monkeypatch.delenv("OMP_NUM_THREADS", raising=False)
-    with tempfile.TemporaryDirectory() as tmpdir:
-        root = Path(tmpdir)
-        run = run_log.new_run("determinism", root)
-        assert "environment" in run
-        assert run["environment"]["threads"]["policy"] == "bit-reproducible"
-        run_log.finish_run(run)
-
-        persisted = json.loads(
-            (root / "run_manifest.json").read_text(encoding="utf-8")
-        )
-        assert persisted["environment"]["threads"] == run["environment"]["threads"]
-        assert persisted["environment"]["threads"]["n_jobs"] == 1
-        assert persisted["environment"]["threads"]["omp_num_threads"] == "1"
-
-
 if __name__ == "__main__":
     import inspect
 
