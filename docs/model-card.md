@@ -20,7 +20,7 @@ Research and benchmarking: comparing specifications under a fixed temporal proto
 
 ## Training data and universe
 
-The source is a pinned Kaggle S&P 500 historical dataset; delisted companies are absent (survivors-only). The frame is current-and-recent constituents, so long-horizon return statistics are biased upward and crisis behavior is not a point-in-time index reconstruction. The current snapshot and source provenance are in [dataset.md](pipelines/dataset.md); the source terms are the Kaggle dataset's terms.
+The source is the pinned Kaggle S&P 500 historical dataset published by Kaggle user `jacksaleeby` ([dataset page](https://www.kaggle.com/datasets/jacksaleeby/s-and-p500-historical-data)); delisted companies are absent (survivors-only). The frame is current-and-recent constituents, so long-horizon return statistics are biased upward and crisis behavior is not a point-in-time index reconstruction. The current snapshot and source provenance are in [dataset.md](pipelines/dataset.md); the source terms are the Kaggle dataset's terms.
 
 ## Evaluation protocol
 

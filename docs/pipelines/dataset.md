@@ -16,7 +16,7 @@ On a fresh clone the parquet does not exist, so Phase 2 fails immediately until 
 
 ## Inputs and provenance
 
-The source is a single pinned Kaggle dataset: `jacksaleeby/s-and-p500-historical-data/versions/1`, file `SP500_Historical_Data.csv`. `ingestion.py` downloads it through `kagglehub.dataset_download`, which caches the bundle on disk, then picks the one CSV that matches the expected file name and rejects an empty, ambiguous, or differently named bundle.
+The source is a single pinned Kaggle dataset published by Kaggle user `jacksaleeby`: [`jacksaleeby/s-and-p500-historical-data`](https://www.kaggle.com/datasets/jacksaleeby/s-and-p500-historical-data), version 1, file `SP500_Historical_Data.csv`. `ingestion.py` downloads it through `kagglehub.dataset_download`, which caches the bundle on disk, then picks the one CSV that matches the expected file name and rejects an empty, ambiguous, or differently named bundle.
 
 Every load writes `data/processed/ingestion_manifest.json`, which records the source handle, the file name, the file's SHA-256, the raw row count, the ticker count, and the date range. The fields are `source`, `file_name`, `source_sha256`, `rows`, `tickers`, `date_min`, and `date_max`.
 
