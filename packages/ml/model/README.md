@@ -1,116 +1,41 @@
 # Model package
 
-Phases 2-5 of the S&P 500 volatility pipeline: feature selection, temporal
-cross-validation, fold training, and visualization. Phase 1 (code under
-`packages/ml/dataset/`) builds `data/processed/dataset.parquet` and writes
-`packages/ml/model/artifacts/results/regime_characterization.json`; it must
-run before this package.
+Phases 2-5 of the S&P 500 volatility pipeline: feature selection, temporal cross-validation, fold training and evaluation, and visualization. Phase 1 (under `packages/ml/dataset/`) must run first; it writes `data/processed/dataset.parquet` and `packages/ml/model/artifacts/results/regime_characterization.json`.
 
 ## Output roots
 
-The package writes to two gitignored roots with different purposes:
+| Root | Contents |
+|---|---|
+| `packages/ml/model/artifacts/` | Pipeline state and results — the source of truth: inputs, folds, per-run checkpoints, results JSON/pickle payloads, and run state files. |
+| `data/model_outputs/` | Presentation charts written by Phase 5 — rendered from the artifacts, never an input to training or validation. |
 
-| Root | Written by | Contents |
-|---|---|---|
-| `packages/ml/model/artifacts/` | Phase 1; Phases 2-4; model entry point | Source-of-truth pipeline state and results: `results/regime_characterization.json` (Phase 1); `inputs/`, `folds/`, `checkpoints/<run_id>/`, `results/`, and opt-in `tuning/<run_id>/`; plus `run_manifest.json`, `runs.jsonl`, and `artifact_registry.json`; on a real run the entry point writes run state before the phases and finalizes it after Phase 5 |
-| `data/model_outputs/` | Phase 5 only | Presentation charts: the PNG figures and the plot `manifest.json` |
+Both roots are gitignored.
 
-`artifacts/` is the pipeline's working tree and the source of truth for run
-state and results: it holds the verified inputs, fold records, checkpoints, and
-the per-run metric JSON and pickle payloads that the repository README points
-to for the numbers. `data/model_outputs/` is the presentation layer, regenerated
-from those artifacts on every visualization pass and never feeding a training
-or validation step. See the tracked
-[`docs/model-artifacts.md`](../../../docs/model-artifacts.md) for the retention
-rules, resume identity, and evaluation-artifact contract.
+## Phases
 
-## Pipeline phases
+1. **Phase 2 — feature selection.** Reads the parquet, selects the 37 positional `INDICATORS`, validates finite X/Y, writes `packages/ml/model/artifacts/inputs/X.npy`, `Y.npy`, `metadata.pkl`.
+2. **Phase 3 — temporal cross-validation.** Reserves the holdout, builds date-group folds with a train-only purge, writes `packages/ml/model/artifacts/folds/folds_metadata.pkl`.
+3. **Phase 4 — training and evaluation.** Floors the target, trains one QLIKE model per fold, fits the HAR-RV benchmark on training rows, writes fold summaries, predictions, loss vectors, and the evaluation summary.
+4. **Phase 5 — visualization.** Renders the figures and plot manifest into `data/model_outputs/`.
 
-1. **Phase 2 — feature selection.** Reads the Phase 1 parquet and writes
-   `artifacts/inputs/X.npy`, `Y.npy`, and `metadata.pkl` through the atomic
-   writer, recording the metadata hash in the artifact registry.
-2. **Phase 3 — temporal cross-validation.** Reserves the configured holdout
-   window, builds the date-group folds with a train-only purge, and writes
-   `artifacts/folds/folds_metadata.pkl`.
-3. **Phase 4 — training.** Trains one QLIKE model per fold into
-   `artifacts/checkpoints/<run_id>/` with parameter, summary, and predictions
-   sidecars; writes the fold summary, HAR benchmark, loss vectors, and
-   evaluation summary under `artifacts/results/`, and updates the run manifest
-   at the artifacts root.
-4. **Phase 5 — visualization.** Renders the figures and plot manifest into
-   `data/model_outputs/`; the entry point then finalizes the run manifest,
-   appends `runs.jsonl`, and applies checkpoint retention.
+## Running
 
-## Running and resuming
-
-Run from the repository root (both forms are equivalent):
+Run from the repository root; both forms are equivalent:
 
 ```bash
 python -m packages.ml.model.main
 python packages/ml/model/main.py
 ```
 
-The entry point accepts:
+To check the entry point without writing anything:
 
 ```bash
-# Log the planned phases and exit without writing anything
 python -m packages.ml.model.main --dry-run
-
-# Train a subset of the configured folds; the run is explicitly partial
-python -m packages.ml.model.main --folds 0,2
-
-# Continue the latest run manifest, reusing complete verified fold records
-python -m packages.ml.model.main --resume
-
-# After the normal phases, evaluate the reserved holdout once under the lock
-python -m packages.ml.model.main --evaluate-holdout
-
-# Override an already locked holdout with an explicitly recorded reason
-python -m packages.ml.model.main --force-holdout "explicit review reason"
 ```
 
-`--resume` requires the manifest's run id, config hash, fold-manifest hash, and
-input identity to match the persisted data. A fold is reused only when its
-checkpoint, parameter sidecar, summary, and predictions record all exist and
-match their artifact-registry size/SHA-256 entries. A mismatch refuses by name
-instead of falling back to a fresh run. Retention keeps the newest
-`run.retention` run directories (configured in `config/base.yaml`);
-`runs.jsonl` is append-only and is never pruned. The full command and flag
-contract is in the repository [`README.md`](../../../README.md) and
-[`AGENTS.md`](../../../AGENTS.md).
-
-## Locked holdout
-
-The holdout is opt-in and one-shot. The first `--evaluate-holdout` writes
-`artifacts/results/holdout_lock.json` and records the lock in
-`run_manifest.json` before any holdout metric exists. The lock binds the frozen
-selection recipe, the Phase-2 dataset pin and derived `X`/`Y` hashes, the
-fold-manifest hash, and the reserved bounds. The manifest carries the full lock
-payload and every new run manifest carries the latest holdout block forward;
-the append-only `runs.jsonl` is the fallback if a manifest lost it, so an
-ordinary run cannot erase the lock and a lost results lock is restored and
-remains binding. The evaluation
-is one final refit on the purged remainder plus the HAR-RV benchmark on the
-same rows, predicting the holdout block once; the result lands in
-`results/holdout_report.json` with `results/SHA256SUMS`. A second evaluation
-raises `HoldoutLockError`, a post-lock resume records a skipped holdout, and
-`--force-holdout <reason>` appends to `results/holdout_overrides.jsonl` without
-accepting a changed lock identity.
+The remaining flags (`--resume`, `--folds`, `--evaluate-holdout`, `--force-holdout`), the run lifecycle, resume, retention, and the holdout gate are in [`docs/operations.md`](../../../docs/operations.md). The canonical flag reference is [`docs/reference/cli.md`](../../../docs/reference/cli.md); the fold geometry, training, and evaluation protocol are in [`docs/pipelines/model.md`](../../../docs/pipelines/model.md). The dataset columns are documented in [`docs/reference/dataset-schema.md`](../../../docs/reference/dataset-schema.md), and the model card is [`docs/model-card.md`](../../../docs/model-card.md).
 
 ## Legacy and stale directories
 
-Two directories in the artifacts root are retained on purpose; neither is an
-output root, and no pipeline phase reads or writes files in either:
-
-- `artifacts/legacy/` is empty and unused. The entry point and Phase 2 create
-  it, but no file is written to it and no code reads it; it is retained in
-  place and no deletion path exists.
-- `artifacts/baseline_v1/` is the pre-remediation baseline snapshot
-  (`2,668,192 × 39` legacy versus `2,669,959 × 53` current). It is kept for
-  provenance with its own README and hash manifest, not used by any pipeline
-  phase. Removal requires an explicit owner override appended to
-  `artifacts/runs.jsonl`; the full disposition is recorded in
-  [`docs/model-artifacts.md`](../../../docs/model-artifacts.md).
-
-Untracked reproduction scripts may read the baseline snapshot deliberately;
-they are not part of the pipeline.
+- `packages/ml/model/artifacts/legacy/` is empty and unused; no phase reads or writes it.
+- `packages/ml/model/artifacts/baseline_v1/` is a pre-remediation snapshot kept for provenance only; no phase reads it.

@@ -10,16 +10,16 @@
 
 **Purpose.** This report documents what was built, on what data, under which protocol, and what the evidence does and does not support. It is a read-only synthesis of the evaluated artifacts; the locked holdout was not re-evaluated.
 
-**Status.** Issued 2026-10-25. The evaluated model and its holdout report are unchanged from the 2026-10-20 evaluation. This branch adds only this documentation file; the test-only CI fix is already in `develop`, and the production subtree is identical to the evaluated tree.
+**Status.** Issued 2026-10-25. Historical report: the numbers describe the 2026-10-20 evaluation and are not updated by later runs. The evaluated model and holdout report are unchanged from that evaluation. This report was added in commit `47f1fa5` and merged at `bb0dc5a`; current artifacts may differ. For how to read live results, see [`docs/results.md`](../results.md).
 
-**Contents.** [0 Provenance](#0-provenance) · [1 Executive summary](#1-executive-summary-and-claim-card) · [2 Question and target](#2-question-target-and-intended-use) · [3 Data](#3-data-and-universe) · [4 Protocol](#4-protocol-and-design) · [5 Model and tuning](#5-model-and-tuning) · [6 Cross-validation](#6-cross-validation-performance) · [7 Holdout](#7-holdout-performance) · [8 Robustness](#8-robustness-and-diagnostic-limits) · [9 Construction](#9-construction-robustness) · [10 Engineering](#10-engineering-discipline) · [11 Limitations](#11-limitations-and-falsification) · [12 Conclusion](#12-conclusion) · [Appendices A–E](#appendix-a-formulas-and-definitions).
+**Contents.** [0 Provenance](#0-provenance) · [1 Executive summary](#1-executive-summary-and-claim-card) · [2 Question and target](#2-question-target-and-intended-use) · [3 Data](#3-data-and-universe) · [4 Protocol](#4-protocol-and-design) · [5 Model and tuning](#5-model-and-tuning) · [6 Cross-validation](#6-cross-validation-performance) · [7 Holdout](#7-holdout-performance) · [8 Robustness](#8-robustness-and-diagnostic-limits) · [9 Construction](#9-construction-robustness) · [10 Engineering](#10-engineering-discipline-at-evaluation-time) · [11 Limitations](#11-limitations-and-falsification) · [12 Conclusion](#12-conclusion) · [Appendices A–E](#appendix-a-formulas-and-definitions).
 
 ## 0. Provenance
 
 - **Evaluated model commit:** `df5aa5a6ee45cdef8361a8acd7c2a6c6876c092b`.
 - **Publication merge:** `466d76dd283c9abdbd8a3790fb6e467e6efa8c8b` (2026-10-22); published tree `718b04fdb500de3145ace1f4a7a7a3a09400c3a8`, identical to the evaluated tree.
 - **Base develop commit:** `178e74c69e33eacb2fa299fa0e085146e92f5b7a` (test-only CI fix merge; production subtree identical to the evaluated tree).
-- **Report commit:** the tip of branch `docs/model-performance-report` (the commit that adds this file; SHA in `git log`).
+- **Report commit:** `47f1fa5a2d7f97d6d7b1e13836cf2fab33528791` (2026-10-25); merged at `bb0dc5a1af55b0db2b73da34f5786d88dd488d70`.
 - **Holdout report SHA-256:** `45118752fd6dcb5de1f8a816270931d2bb453ba3d434107d842dde9fb81b82d5`.
 - **Seeds:** base/campaign `42`; selected model seed `43` (`random_state=43`).
 - **Dates:** holdout evaluated `2026-10-20`; report generated `2026-10-20T06:58:05.097434+00:00`; lock recorded `2026-10-20T06:52:01.673063+00:00`; this report `2026-10-25`.
@@ -83,7 +83,7 @@ The source is the Kaggle dataset `jacksaleeby/s-and-p500-historical-data/version
 | Stage | Rows | Tickers / dates | Note | Source |
 |---|---:|---|---|---|
 | Raw source, ingestion census | 2,703,531 | 472 tickers; 2000-01-03 to 2026-02-20 | source CSV | `ingestion_manifest.json#rows`, `#tickers` |
-| Pre-drop frame census | 2,702,320 | — | differs from ingestion by 1,211; unresolved | `regime_characterization.json#_frame.pre_dropna_rows` |
+| Pre-drop frame census | 2,702,320 | — | after `prepare_dataframe` cleaning; 1,211 rows below ingestion | `regime_characterization.json#_frame.pre_dropna_rows` |
 | Shipped dataset | 2,669,959 | 469 tickers; 6,504 dates; 2000-04-04 to 2026-02-12 | 53 columns (37 + 16) | `metadata.pkl#dataset` |
 | At-floor / zero-RV | 2,620 | — | rate `0.000981`; floor `1e-12` | `metadata.pkl#input_checks.degenerate_count`, `#degenerate_rate` |
 | CV test blocks | 2,095,971 | 5 folds | all test rows | `evaluation_summary.json#floor_decomposition.counts` |
@@ -98,7 +98,7 @@ The source is the Kaggle dataset `jacksaleeby/s-and-p500-historical-data/version
 
 **Survivor bias.** The source is current-and-recent constituents, not point-in-time membership. The frame records `survivors_only: true`, `pre_dropna_rows=2,702,320`, `shipped_rows=2,669,959`, and an upward long-horizon return bias of roughly `1.4–3.9` pp/year (CAGR) `[R]`. Delisted failures are absent and the cross-section grows mechanically. Crisis and average-universe claims are conditional on this frame.
 
-**Raw census discrepancy.** Ingestion says `2,703,531`; the pre-drop frame says `2,702,320`; difference `1,211`; both cite the same source SHA. Shipped rows are `2,669,959` in both accounts, so implied drops are `33,572` versus `32,361`. The difference is unresolved; model rows are pinned by the dataset and input hashes.
+**Raw census.** Ingestion reports `2,703,531` rows; the pre-drop frame records `2,702,320`, a difference of `1,211` rows. The pre-drop count is taken after `prepare_dataframe`, so the difference is cleaning attrition (notably the 500-trading-day minimum; the exact per-step split is not persisted), not an unresolved source discrepancy. Shipped rows are `2,669,959` in both accounts. Model rows are pinned by the dataset and input hashes.
 
 **Floor census.** There are `2,620` total floor rows: `1,922` in CV test blocks and `698` never evaluated. Per-fold test-block rows are `7 / 581 / 733 / 557 / 44`; holdout `15` of `234,488`. A pre-remediation split is listed in Appendix D; the total is unchanged.
 
@@ -287,7 +287,7 @@ DM is negative and far below conventional thresholds; the interval is entirely a
 
 **HAR, integrity, resume.** HAR fits only training rows and scores exactly the same floor-retained rows; fold 0's `45,259 = 50,560 + 2,035 − 7,336` difference is inner validation plus warm-up, not a different test set. The payload digest `859a2a8e…` binds the recipe, dataset, inputs, fold digest, and bounds; file SHA `14457233…` verifies lock bytes; report hash `4511…` verifies the report; `SHA256SUMS` covers `4/4`. This is local integrity, not external attestation. Resume requires manifest identity plus matching sidecar/predictions hashes; the recorded run resumed `5/5` folds, trained `0`, and left the summary hash unchanged (`b10a0ac…`). `runs.jsonl` has `6` lines; strict JSON means no NaN/Infinity extensions, not that numbers are true.
 
-## 10. Engineering discipline
+## 10. Engineering discipline at evaluation time
 
 **Table 10. Engineering evidence**
 
@@ -333,7 +333,7 @@ The Limits callout in §1 lists the standing caveats; this section expands the o
 
 **Multiplicity.** Ten deciles and seven regimes across two windows; no multiple-testing correction. The 5/6 crossover is consistent, but individual bins are descriptive.
 
-**Other.** Raw census differs by `1,211` unresolved rows; selection config hash `5e822810` is unverified.
+**Other.** The `1,211`-row ingestion-to-pre-drop difference is cleaning attrition, not an unresolved source discrepancy; the exact per-step split is not persisted. Selection config hash `5e822810` is unverified.
 
 **(a) Tests that would weaken the supported average-advantage claim.**
 
@@ -422,7 +422,7 @@ Terms are defined in §2; the stored value is per-day sigma, not annualized. Row
 
 ## Appendix C. Reproduction and checksums
 
-Run from the repository root; these are read-only except for pytest's normal cache. Do not run `--evaluate-holdout` or `--force-holdout` to audit: the first is refused by the lock, the second appends an override.
+Run from the repository root; these are read-only except for pytest's normal cache. These checks describe the evaluated tree; current HEAD and test counts can differ after later test-only changes. Do not run `--evaluate-holdout` or `--force-holdout` to audit. On a checkout with no recorded lock, the first `--evaluate-holdout` creates the lock and scores the holdout; `--force-holdout` appends an override. Use the synthetic/temporary-root tests and read the recorded artifacts instead.
 
 1. **Commits/trees.**
 
@@ -431,7 +431,7 @@ git rev-parse HEAD
 git rev-parse df5aa5a^{tree} 466d76d^{tree}
 ```
 
-`HEAD` is the report commit, not the base develop commit `178e74c`; it adds only this file. The evaluated and publication trees are both `718b04fdb500de3145ace1f4a7a7a3a09400c3a8`.
+`HEAD` here means the report-time checkout (`47f1fa5`), not the base develop commit `178e74c`; it adds only this file. Later test-only commits (for example `61eae9e`) move `HEAD` without changing the evaluated artifacts. The evaluated and publication trees are both `718b04fdb500de3145ace1f4a7a7a3a09400c3a8`.
 
 2. **Lock payload.**
 

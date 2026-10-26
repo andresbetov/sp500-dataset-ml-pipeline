@@ -1,10 +1,8 @@
 """Source-hygiene checks for the model package.
 
 The checks are static: every production import is referenced by a name load
-(re-exports named in ``__all__`` count), the fold loader's return annotation
-matches the payload it returns, and the package README documents both output
-roots and the stale-directory dispositions. No live artifact is read or
-written.
+(re-exports named in ``__all__`` count) and the fold loader's return annotation
+matches the payload it returns. No live artifact is read or written.
 
 Run with pytest from the repository root:
 
@@ -35,8 +33,6 @@ from packages.ml.model.utils import get_project_paths
 
 MODEL_ROOT = REPO_ROOT / "packages" / "ml" / "model"
 TESTS_DIR = MODEL_ROOT / "tests"
-README_PATH = MODEL_ROOT / "README.md"
-ARTIFACT_GUIDE_PATH = REPO_ROOT / "docs" / "model-artifacts.md"
 
 # A future import is a compiler directive, never a runtime name.
 DIRECTIVE_MODULES = {"__future__"}
@@ -105,10 +101,6 @@ def _unused_imports(path: Path) -> list[tuple[str, int, str]]:
         for bound, line, source in imported
         if bound not in referenced
     ]
-
-
-def _normalized(path: Path) -> str:
-    return " ".join(path.read_text(encoding="utf-8").split()).lower()
 
 
 def test_load_folds_metadata_annotation_matches_the_loaded_payload() -> None:
