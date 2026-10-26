@@ -1,7 +1,12 @@
 .idea
 .env
 /data/processed/dataset.parquet
-*.md
+/data/processed/ingestion_manifest.json
 *.joblib
 *.pkl
 /packages/ml/model/artifacts
+/data/model_outputs/
+__pycache__/
+*.pyc
+*.pyo
+.venv/

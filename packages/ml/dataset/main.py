@@ -1,68 +1,63 @@
 from __future__ import annotations
 
-import json
 import logging
 import sys
 from pathlib import Path
 
-import pandas as pd
+if __name__ == "__main__" and __package__ is None:
+    # Direct execution: python packages/ml/dataset/main.py — normalize to the
+    # canonical package identity so the package-relative imports below resolve
+    # without an installation (PEP 366).
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+    __package__ = "packages.ml.dataset"
 
-from loader import load_dataframe
-from preparation import prepare_dataframe
-from features import build_features_dataframe, _characterize_regimes
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)],
-)
+from .artifacts import write_dataset_parquet, write_regime_characterization
+from .cleaning import prepare_dataframe
+from .features import build_features_dataframe
+from .ingestion import load_dataframe
+from .regime_characterization import characterize_regimes
+from .utils import DATASET_PATH, REGIME_CHARACTERIZATION_PATH, setup_logging
+from .validation import check_contiguous_ticker_frames, check_panel_staleness
 
 logger = logging.getLogger(__name__)
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = SCRIPT_DIR.parent.parent.parent
-DEFAULT_FILE_DIRECTORY = PROJECT_ROOT / "data" / "processed"
 
-
-def _save_parquet(df: pd.DataFrame, file_name: str) -> None:
-    file_path = Path(DEFAULT_FILE_DIRECTORY / (file_name + ".parquet"))
-    file_path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_parquet(file_path, index=False)
-
-
-def generate_featured_dataset(
-    file_name: str | None = None,
-) -> None:
+def generate_featured_dataset() -> None:
     logger.info("Loading raw dataset...")
-    raw_df = load_dataframe(file_name=file_name)
-    logger.info(f"Loaded {len(raw_df):,} rows")
+    raw_df = load_dataframe()
+    logger.info("Loaded %d rows", len(raw_df))
 
     logger.info("Preparing data...")
     prepared_df = prepare_dataframe(raw_df)
-    logger.info(f"Prepared: {len(prepared_df):,} rows")
+    logger.info("Prepared: %d rows", len(prepared_df))
 
     logger.info("Building features...")
     featured_df = build_features_dataframe(prepared_df)
-    logger.info(f"Featured: {len(featured_df):,} rows")
+    logger.info("Featured: %d rows", len(featured_df))
 
     # Characterize regimes before dropping NaN
     logger.info("Characterizing regimes...")
-    regime_stats = _characterize_regimes(featured_df)
-
-    # Save regime characterization to JSON
-    artifacts_dir = PROJECT_ROOT / "packages" / "ml" / "model" / "artifacts" / "results"
-    artifacts_dir.mkdir(parents=True, exist_ok=True)
-    regime_stats_path = artifacts_dir / "regime_characterization.json"
-    with open(regime_stats_path, "w") as f:
-        json.dump(regime_stats, f, indent=2)
-    logger.info(f"Regime stats saved to {regime_stats_path}")
+    regime_stats = characterize_regimes(featured_df)
 
     logger.info("Dropping NaN rows...")
-    before = len(featured_df)
+    pre_dropna_rows = len(featured_df)
     featured_df = featured_df.dropna()
-    logger.info(f"Dropped {before - len(featured_df):,} NaN rows ({len(featured_df):,} remaining)")
+    logger.info(
+        "Dropped %d NaN rows (%d remaining)",
+        pre_dropna_rows - len(featured_df),
+        len(featured_df),
+    )
 
-    _save_parquet(featured_df, "dataset")
+    check_contiguous_ticker_frames(featured_df)
+    write_dataset_parquet(featured_df, DATASET_PATH)
     logger.info("Dataset saved to data/processed/dataset.parquet")
 
-generate_featured_dataset()
+    check_panel_staleness(featured_df)
+
+    write_regime_characterization(regime_stats, pre_dropna_rows, len(featured_df))
+    logger.info("Regime stats saved to %s", REGIME_CHARACTERIZATION_PATH)
+
+
+if __name__ == "__main__":
+    setup_logging()
+    generate_featured_dataset()

@@ -6,10 +6,13 @@ import logging
 from pathlib import Path
 
 import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
 import pandas as pd
 
-from visualization.data_loader import load_fold_training_summary
+from packages.ml.model.visualization.data_loader import load_fold_training_summary
+from packages.ml.model.visualization.plotting import (
+    render_plot,
+    save_figure_atomically,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +21,8 @@ def plot_temporal_fold_ranges(summary_df: pd.DataFrame, output_path: Path | None
     """
     Create timeline visualization showing train/test date ranges for each fold.
 
-    Displays temporal splits of TimeSeriesSplit with expanding windows.
+    Displays the fold train/test date ranges: date-group blocks over the sorted
+    unique trading dates with expanding training windows.
 
     Args:
         summary_df: DataFrame from load_fold_training_summary()
@@ -28,26 +32,30 @@ def plot_temporal_fold_ranges(summary_df: pd.DataFrame, output_path: Path | None
         Path to saved figure
     """
     if output_path is None:
-        from utils import get_project_paths
+        from packages.ml.model.utils import get_project_paths
         output_path = get_project_paths()["outputs_dir"] / "temporal_fold_ranges.png"
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Work on a copy: the shared summary frame is passed to every category and
+    # must keep its string date columns for its other readers.
+    frame = summary_df.copy()
+
     fig, ax = plt.subplots(figsize=(14, 8))
 
     # Convert date strings to datetime
-    summary_df["train_date_min"] = pd.to_datetime(summary_df["train_date_min"])
-    summary_df["train_date_max"] = pd.to_datetime(summary_df["train_date_max"])
-    summary_df["test_date_min"] = pd.to_datetime(summary_df["test_date_min"])
-    summary_df["test_date_max"] = pd.to_datetime(summary_df["test_date_max"])
+    frame["train_date_min"] = pd.to_datetime(frame["train_date_min"])
+    frame["train_date_max"] = pd.to_datetime(frame["train_date_max"])
+    frame["test_date_min"] = pd.to_datetime(frame["test_date_min"])
+    frame["test_date_max"] = pd.to_datetime(frame["test_date_max"])
 
     # Extract fold numbers
-    fold_nums = summary_df["fold"].str.extract(r'fold_(\d+)')[0].astype(int).values
+    fold_nums = frame["fold"].str.extract(r'fold_(\d+)')[0].astype(int).values
 
     y_positions = range(len(fold_nums))
 
     # Plot train and test ranges for each fold
-    for i, (idx, row) in enumerate(summary_df.iterrows()):
+    for i, (idx, row) in enumerate(frame.iterrows()):
         # Training period (blue)
         train_start = row["train_date_min"]
         train_end = row["train_date_max"]
@@ -73,14 +81,15 @@ def plot_temporal_fold_ranges(summary_df: pd.DataFrame, output_path: Path | None
     ax.grid(axis="x", alpha=0.3)
     ax.legend(loc="upper right")
 
-    # Format x-axis for better date display
+    # Format the x-axis for display. YearLocator only positions year ticks; it
+    # changes no date, fold boundary, or data. Intended no-fix.
     import matplotlib.dates as mdates
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
     ax.xaxis.set_major_locator(mdates.YearLocator())
     plt.xticks(rotation=45, ha="right")
 
     plt.tight_layout()
-    plt.savefig(output_path, dpi=300, bbox_inches="tight")
+    save_figure_atomically(output_path, dpi=300, bbox_inches="tight")
     logger.info(f"Saved temporal fold ranges plot to {output_path}")
     plt.close()
 
@@ -99,7 +108,7 @@ def plot_fold_sample_distribution(summary_df: pd.DataFrame, output_path: Path | 
         Path to saved figure
     """
     if output_path is None:
-        from utils import get_project_paths
+        from packages.ml.model.utils import get_project_paths
         output_path = get_project_paths()["outputs_dir"] / "fold_sample_distribution.png"
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -132,7 +141,7 @@ def plot_fold_sample_distribution(summary_df: pd.DataFrame, output_path: Path | 
     ax.grid(axis="y", alpha=0.3)
 
     plt.tight_layout()
-    plt.savefig(output_path, dpi=300, bbox_inches="tight")
+    save_figure_atomically(output_path, dpi=300, bbox_inches="tight")
     logger.info(f"Saved fold sample distribution plot to {output_path}")
     plt.close()
 
@@ -153,7 +162,7 @@ def plot_temporal_metric_trend(summary_df: pd.DataFrame, output_path: Path | Non
         Path to saved figure
     """
     if output_path is None:
-        from utils import get_project_paths
+        from packages.ml.model.utils import get_project_paths
         output_path = get_project_paths()["outputs_dir"] / "temporal_metric_trend.png"
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -192,14 +201,17 @@ def plot_temporal_metric_trend(summary_df: pd.DataFrame, output_path: Path | Non
         axes[2].text(x, y, f"{y:.6f}", ha="center", va="bottom", fontsize=9)
 
     plt.tight_layout()
-    plt.savefig(output_path, dpi=300, bbox_inches="tight")
+    save_figure_atomically(output_path, dpi=300, bbox_inches="tight")
     logger.info(f"Saved temporal metric trend plot to {output_path}")
     plt.close()
 
     return output_path
 
 
-def generate_temporal_visualizations(summary_df: pd.DataFrame | None = None, output_dir: Path | None = None) -> list[Path]:
+def generate_temporal_visualizations(
+    summary_df: pd.DataFrame | None = None,
+    output_dir: Path | None = None,
+) -> list[Path]:
     """
     Generate all temporal analysis visualizations.
 
@@ -214,16 +226,27 @@ def generate_temporal_visualizations(summary_df: pd.DataFrame | None = None, out
         summary_df = load_fold_training_summary()
 
     if output_dir is None:
-        from utils import get_project_paths
+        from packages.ml.model.utils import get_project_paths
         output_dir = get_project_paths()["outputs_dir"]
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    paths = [
-        plot_temporal_fold_ranges(summary_df, output_dir / "temporal_fold_ranges.png"),
-        plot_fold_sample_distribution(summary_df, output_dir / "fold_sample_distribution.png"),
-        plot_temporal_metric_trend(summary_df, output_dir / "temporal_metric_trend.png"),
+    plots = [
+        ("temporal_fold_ranges", plot_temporal_fold_ranges),
+        ("fold_sample_distribution", plot_fold_sample_distribution),
+        ("temporal_metric_trend", plot_temporal_metric_trend),
     ]
+
+    paths = []
+    for plot_name, plot_function in plots:
+        path = render_plot(
+            "temporal",
+            plot_name,
+            lambda output_path, render=plot_function: render(summary_df, output_path),
+            output_dir,
+        )
+        if path is not None:
+            paths.append(path)
 
     logger.info(f"Generated {len(paths)} temporal visualizations")
     return paths

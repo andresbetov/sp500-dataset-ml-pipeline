@@ -1,0 +1,52 @@
+name: checks
+
+on:
+  pull_request:
+    branches: [develop, main]
+  push:
+    branches: [develop, main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+        with:
+          python-version: "3.14"
+      - name: Sync dependencies (locked)
+        run: uv sync --frozen
+      - name: Byte-compile packages (syntax only, no execution)
+        run: uv run --frozen python -m compileall -q packages
+      - name: pytest (model, hermetic unit suite)
+        run: uv run --frozen python -m pytest packages/ml/model/tests -q --ignore=packages/ml/model/tests/live
+
+  dataset-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+        with:
+          python-version: "3.14"
+      - name: Cache Kaggle dataset download
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cache/kagglehub
+          key: kagglehub-${{ runner.os }}-jacksaleeby-s-and-p500-historical-data
+      - name: Sync dependencies (locked)
+        run: uv sync --frozen
+      - name: Run Phase 1 (dataset) — run-as-script per AGENTS.md
+        run: uv run --frozen python packages/ml/dataset/main.py 2>&1 | tail -c 4000
+      - name: Verify artifact and report stats
+        run: |
+          test -f data/processed/dataset.parquet
+          uv run --frozen python -c "import os, pyarrow.parquet as pq; p='data/processed/dataset.parquet'; m=pq.ParquetFile(p).metadata; print(f'dataset.parquet: rows={m.num_rows} cols={m.num_columns} bytes={os.path.getsize(p)}')" | tee -a "$GITHUB_STEP_SUMMARY"

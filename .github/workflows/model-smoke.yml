@@ -1,0 +1,40 @@
+name: model-smoke (manual)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  model:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+        with:
+          python-version: "3.14"
+      - name: Cache Kaggle dataset download
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cache/kagglehub
+          key: kagglehub-${{ runner.os }}-jacksaleeby-s-and-p500-historical-data
+      - name: Sync dependencies (locked)
+        run: uv sync --frozen
+      - name: Run Phase 1 (dataset)
+        run: uv run --frozen python packages/ml/dataset/main.py 2>&1 | tail -c 2000
+      - name: Run Phases 2-5 (model)
+        shell: bash
+        run: |
+          set -o pipefail
+          uv run --frozen python packages/ml/model/main.py 2>&1 | tail -c 4000
+      - name: Verify fold summary and Phase-5 outputs
+        run: |
+          test -f packages/ml/model/artifacts/results/fold_training_summary.json
+          echo "model phase OK: fold_training_summary.json written" | tee -a "$GITHUB_STEP_SUMMARY"
+          shopt -s nullglob
+          pngs=(data/model_outputs/*.png)
+          png_count=${#pngs[@]}
+          echo "Phase-5 outputs: ${png_count} PNG charts written" | tee -a "$GITHUB_STEP_SUMMARY"
+          test "$png_count" -ge 14
