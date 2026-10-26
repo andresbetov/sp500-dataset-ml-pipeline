@@ -2,183 +2,125 @@
 
 Predicts 5-day realized volatility for S&P 500 constituents from price and volume history alone.
 
-This is a research pipeline: one script builds the dataset, one trains and evaluates the model. Run metrics are written to disk rather than quoted here — they change with every retrain and with every refresh of the source data.
+This is a research pipeline, not a production risk or trading system. One script builds the dataset; one entry point trains and evaluates the model. Run metrics are written to disk on every run rather than quoted here, because they change with each retrain and each refresh of the source data.
 
-## What it does
+## Research question and scope
 
-Given a multi-ticker daily OHLCV panel, the pipeline:
+The research question is whether the model achieves a lower average QLIKE than the HAR-RV benchmark under a fixed protocol, and where any difference is concentrated across the volatility distribution.
 
-1. Downloads and cleans the source data from Kaggle.
-2. Engineers per-ticker technical features plus a forward-looking volatility target.
-3. Trains one gradient-boosted regression model per temporal fold, evaluating each only on strictly later data.
-4. Writes an evaluation report and charts for that run.
+The target is `realized_volatility_5d`: the Yang-Zhang daily volatility estimate over the next five trading days, expressed as per-day sigma and not annualized. The universe is S&P 500 constituents from a survivors-only source, so delisted names are absent.
 
-The prediction target is `realized_volatility_5d` — the Yang–Zhang daily volatility estimate over the next five trading days (per-day σ, not annualized). This is continuous regression, not classification.
+The model consumes 37 price/volume features and no ticker identity. It trains one XGBoost regressor per temporal fold, each minimizing QLIKE on `log(RV)`, and is scored against the canonical HAR-RV benchmark (Corsi 2009, 1/5/22 trailing variance components) on the same rows.
 
-Features come from price and volume only. There is deliberately no per-ticker identity encoding: a ticker's behaviour is already carried by its own indicator magnitudes (larger returns, more extreme momentum, different volume patterns), so per-ticker columns would add sparse inputs without adding generalizable signal.
+Intended use is research and benchmarking: comparing specifications under a fixed protocol and quantifying the average difference from HAR. It is not for production risk, trading, or causal use.
 
-## Requirements
+## Quickstart
 
-- Python 3.12 or newer
-- [uv](https://docs.astral.sh/uv/) for dependency management
-- Kaggle API credentials — needed only for Phase 1
-
-`uv.lock` pins the full dependency tree. `pyarrow` additionally carries an exact pin in `pyproject.toml` (`==24.0.0`) because it writes the dataset artifact; the reference environment is CPython 3.14.7 with pandas 3.0.2 and numpy 2.4.4.
-
-Byte-identical regeneration is a local property: on the machine that wrote `dataset.parquet`, a fresh Phase 1 run reproduces the file byte for byte, but another platform can produce different bytes for identical content. Across machines, compare content instead of bytes — for example the SHA-256 of the `realized_volatility_5d` payload (`a8b097ca3cb9d6b623890aca2dcfa65c3e0d3658761541cc8fb64d51d09aac9f`), which is machine-independent. Phase 1 writes the parquet with pyarrow's default writer options (Snappy compression, `index=False`).
-
-## Setup
+Requirements: Python 3.12 or newer, [uv](https://docs.astral.sh/uv/) for dependency management, and Kaggle API credentials for Phase 1 only (`~/.kaggle/kaggle.json`).
 
 ```bash
 uv sync
-```
-
-Phase 1 downloads a Kaggle dataset through `kagglehub`, which reads Kaggle credentials (`~/.kaggle/kaggle.json` by default; create one under Kaggle → Settings → API → Create New Token). `kagglehub` caches the download, but each Phase 1 run still validates the cache, so the machine needs network access and valid credentials. Phases 2-5 are fully local.
-
-## Running the pipeline
-
-There is no single end-to-end entry point. Run the two phases in order, from the repository root:
-
-```bash
-# Phase 1 — download, clean, and engineer features
+source .venv/bin/activate
 python packages/ml/dataset/main.py
-# writes data/processed/dataset.parquet
-
-# Phases 2-5 — feature selection, temporal validation, training, evaluation
-python packages/ml/model/main.py
-# ... or the module form:
 python -m packages.ml.model.main
-# writes model artifacts and charts (see Outputs)
 ```
 
-Both phases work from the repository root or from inside their own package directory, and the model phase runs the same through either form above. The model entry accepts `--dry-run` (log the plan and exit), `--resume` (continue the latest run), `--folds` (train a subset of fold indices), and the opt-in locked-holdout entry:
+`uv sync` creates the virtual environment; activate it before the `python` commands, or prefix each command with `uv run`.
+
+Sizes and runtimes are hardware- and data-dependent; [docs/operations.md](docs/operations.md) records the current disk snapshot and where phase durations are logged.
+
+Phase 1 downloads the pinned Kaggle CSV and needs network access plus Kaggle credentials. Phases 2-5 are local and fail fast if `data/processed/dataset.parquet` is missing, so a fresh clone always starts with Phase 1. The model entry also runs by path:
 
 ```bash
-# Plan only — no writes, same phases as a full run
+python packages/ml/model/main.py
+```
+
+To check the model entry point without writing anything, use its dry run:
+
+```bash
 python -m packages.ml.model.main --dry-run
-
-# Train only folds 0 and 2 into the normal artifact tree
-python -m packages.ml.model.main --folds 0,2
-
-# Continue the latest run, reusing complete per-fold sidecars and training
-# only the folds that are missing or fail identity/hash verification
-python -m packages.ml.model.main --resume
-
-# After the normal phases, evaluate the already reserved holdout once under
-# the written lock and produce the final report
-python -m packages.ml.model.main --evaluate-holdout
-
-# Re-evaluate an already locked holdout; the reason is appended to the
-# override record (implies --evaluate-holdout)
-python -m packages.ml.model.main --force-holdout "explicit review reason"
 ```
 
-`--evaluate-holdout` is the only path that reads the reserved window; a run
-without it never touches the holdout. The first evaluation writes
-`results/holdout_lock.json` and records it in `run_manifest.json` before any
-holdout metric is computed. The lock is the SHA-256 of the frozen selection
-recipe (hyperparameters plus seed/thread policy), the Phase-2 dataset pin and
-derived `X`/`Y` hashes, the fold-manifest hash, and the recorded holdout
-bounds. The manifest carries the full lock payload and every new run manifest
-carries the latest holdout block forward; the append-only `runs.jsonl` is the
-fallback if a manifest lost it. Losing the results lock therefore does not
-silently un-evaluate the holdout: it is restored from the manifest or the last
-holdout-bearing log record and remains binding. A second evaluation raises
-`HoldoutLockError`; a post-lock
-`--resume --evaluate-holdout` records a skipped holdout instead of re-scoring.
-Only `--force-holdout <reason>` bypasses the already-evaluated refusal, and it
-appends the reason to `results/holdout_overrides.jsonl` while still refusing a
-changed config, dataset pin, input hash, fold hash, or bounds.
+The model entry also accepts `--resume`, `--folds`, `--evaluate-holdout`, and `--force-holdout`; the run lifecycle is documented in [docs/operations.md](docs/operations.md).
 
-`--resume` reads `packages/ml/model/artifacts/run_manifest.json` and requires the manifest's `run_id`, `config_hash`, `fold_manifest_hash`, and `input_identity` (dataset SHA-256 plus the persisted `X.npy`/`Y.npy` hashes). A missing identity, a config/fold-construction mismatch, or a changed dataset/input digest refuses by name instead of silently starting a fresh run; the persisted inputs and fold payload are verified before Phases 2/3 can rewrite them. A fold is skipped only when its checkpoint, parameter sidecar, summary record, and predictions record are all present and match their artifact-registry size/SHA-256 entries, and the summary's recorded predictions hash matches the predictions file. The run manifest records `fold_selection` (`requested`, `trained`, `resumed`) and `partial` for every invocation; a subset run also writes `results/run_selection.json`, while a full run keeps exactly five fold rows. Neither flag changes the no-argument full run.
+All generated output is gitignored.
 
-### Retention and run history
+## Pipeline at a glance
 
-Run-scoped checkpoint directories live under `packages/ml/model/artifacts/checkpoints/<run_id>/`. After each run, retention keeps the newest `run.retention` directories (configured in `packages/ml/model/config/base.yaml`) and removes older ones; each kept directory carries a `README.md` with its identity, selection, contents, and retention rule. `packages/ml/model/artifacts/runs.jsonl` is append-only and is never truncated or pruned, so run history survives directory retention. The inputs, fold metadata, results, run manifest, and each per-fold sidecar and PNG are written individually through tmp + rename; the fold summary records the predictions file's size and SHA-256 so a stale pair is detected and recomputed rather than accepted.
+| Phase | Entry point | Input | Output | Doc |
+|---|---|---|---|---|
+| 1 — dataset | `python packages/ml/dataset/main.py` | Kaggle CSV | `data/processed/dataset.parquet`, `data/processed/ingestion_manifest.json`, `packages/ml/model/artifacts/results/regime_characterization.json` | [dataset](docs/pipelines/dataset.md) |
+| 2 — feature selection | model entry | the parquet | `inputs/X.npy`, `Y.npy`, `metadata.pkl` | [model](docs/pipelines/model.md) |
+| 3 — temporal cross-validation | model entry | inputs | `folds/folds_metadata.pkl` | [model](docs/pipelines/model.md) |
+| 4 — training and evaluation | model entry | folds | fold summaries, predictions, loss vectors, `evaluation_summary.json` | [model](docs/pipelines/model.md) |
+| 5 — visualization | model entry | results | 14 PNGs plus `data/model_outputs/manifest.json` | [model](docs/pipelines/model.md) |
 
-A `--folds` run is explicitly partial: its summary and evaluation artifacts contain only the selected folds, `run_manifest.json` carries `partial: true` plus the selection, and `results/run_selection.json` restates the requested/trained/resumed folds. Phase 5 diagnostics render the emitted fold records (no missing-fold indexing), so a subset run records normal per-plot statuses instead of silent plot failures.
-
-Determinism evidence is opt-in and cheap:
-
-```bash
-# At least three seeds per fold on the validation views; tiny fits
-python -m packages.ml.model.determinism
-# writes packages/ml/model/artifacts/results/seed_sweep.json
+```text
+Phase 1 parquet -> Phase 2 inputs -> Phase 3 folds -> Phase 4 models/metrics -> Phase 5 charts
+        optional, after Phase 5: locked holdout under --evaluate-holdout
 ```
 
-The sweep uses the validation-only fold views (never a test block or the holdout window), records per-seed/per-fold validation QLIKE plus model/prediction hashes, and carries the thread/seed policy, environment versions, `PYTHONHASHSEED`, git sha, lock hash, and fold-manifest digest. The pipeline itself pins `training.n_jobs` and `OMP_NUM_THREADS` to 1 and records the effective values in every run manifest.
+The holdout is opt-in and runs only after the normal phases complete, under `--evaluate-holdout`.
 
-Phase 2 fails immediately if Phase 1 has not been run first. Because generated data is gitignored, a fresh clone always starts with Phase 1.
+## Evaluation design
 
-Phase 1 feature code lives in `packages/ml/dataset/features/` (one family per module, assembled by `assembly.py`):
+The protocol is date-group cross-validation with a separate locked holdout. Five design choices matter most:
 
-- `features/__init__.py` — re-exports `build_features_dataframe`
-- `features/_common.py` — shared z-score guard and adjusted-OHLC column names
-- `features/prices.py` — base returns, adjusted OHLC, return lags, price/SMA normalization, rolling means and extremes
-- `features/volume.py` — volume lags, transforms, and z-score
-- `features/trend.py` — EMA trend and RSI/MACD momentum
-- `features/volatility.py` — range-based and trailing volatility
-- `features/target.py` — Yang-Zhang 5-day realized-volatility target
-- `features/regimes.py` — hardcoded calendar `market_regime` label
-- `features/assembly.py` — validation, history enforcement, and `build_features_dataframe`
+- **Date-group expanding folds.** Sorted unique trading dates are split into contiguous blocks; each fold trains on earlier blocks and scores only later rows. No shuffle, so a model is never scored on data earlier than its training window.
+- **Train-only 5-day purge.** Training rows whose 5-day label window reaches into a test block are dropped, so no test-period outcome leaks into training. Test blocks are kept whole.
+- **Strict floor.** The target is floored at `1e-12` before the log; at-or-below-floor rows are excluded from fitting, model scoring, and the benchmark, so flat windows cannot distort the loss.
+- **Locked one-shot holdout.** The final 500 unique dates are reserved before fold construction and read only by an opt-in evaluation that writes a lock before scoring anything.
+- **QLIKE against HAR.** QLIKE is the headline loss, reported beside dual out-of-sample R², Diebold-Mariano/Clark-West/Giacomini-White (DM/CW/GW) tests, and Mincer-Zarnowitz calibration.
 
-### Outputs
+The protocol lives in [docs/pipelines/model.md](docs/pipelines/model.md); how to read the numbers lives in [docs/results.md](docs/results.md).
 
-| Path | Phase | Contents |
-|---|---|---|
-| `data/processed/dataset.parquet` | 1 | Cleaned survivors-only panel: raw OHLCV columns plus the retained adjusted OHLC columns (`_adj_open`, `_adj_high`, `_adj_low`), per-ticker features plus `log_price`, `realized_volatility_5d`, `market_regime` |
-| `packages/ml/model/artifacts/inputs/` | 2 | `X.npy`, `Y.npy`, `metadata.pkl` — exactly what training consumes |
-| `packages/ml/model/artifacts/folds/` | 3 | Fold indices and date ranges for temporal validation |
-| `packages/ml/model/artifacts/checkpoints/` | 4 | One trained model per fold plus its `fold_<i>_params.json` hyperparameter sidecar, `fold_<i>_summary.json` metric/identity record, and `fold_<i>_predictions.pkl` resume record, under a run-scoped `<run_id>/` directory; each file is written atomically (tmp + rename), and each kept run directory carries a provenance `README.md` |
-| `packages/ml/model/artifacts/results/` | 1, 4, holdout | `fold_training_summary.json` (per-fold metrics), `har_benchmark.json` (HAR-RV benchmark per fold), `per_row_losses.parquet` (per-row loss vectors), `evaluation_summary.json` (evaluation report statistics), `run_selection.json` (partial/selection record), `regime_characterization.json`, predictions; the opt-in holdout writes `holdout_lock.json`, `holdout_predictions.pkl`, `holdout_model.pkl`, `holdout_report.json`, `SHA256SUMS`, and `holdout_overrides.jsonl` |
-| `packages/ml/model/artifacts/results/seed_sweep.json` | explicit | Seed × fold validation sweep with the determinism policy, environment, and fold-manifest digest (`python -m packages.ml.model.determinism`) |
-| `packages/ml/model/artifacts/` | 2-5 | `runs.jsonl` (append-only run log: one strict-JSON line per run, never pruned), `run_manifest.json` (latest run: identity, config hash, fold selection, environment versions, phase/fold status, durations, artifact hashes, written atomically), `artifact_registry.json` (byte size + sha256 per recorded artifact, updated atomically at write time; every live `joblib.load` verifies against it before loading). Run-scoped directories are pruned to the newest `run.retention` |
-| `data/model_outputs/` | 5 | 14 PNG evaluation charts |
+## Results
 
-Everything in the table is generated output and gitignored.
+Live metrics are written to artifacts and are not maintained in this file. The cross-validation source is `packages/ml/model/artifacts/results/evaluation_summary.json`; the holdout source is `packages/ml/model/artifacts/results/holdout_report.json`. See [docs/results.md](docs/results.md) for how to read them.
 
-## How the data is validated
+The last locked evaluation is dated 2026-10-20 and is documented in [the technical report](docs/reports/model-performance-and-rigor.md). It reports a lower average QLIKE than HAR in both cross-validation and the holdout, with the report's stated caveats: one seed, one 500-date holdout window, calibration rejected, tail safety not established, and a survivors-only universe. The report is historical evidence; later runs on refreshed data may differ. Its tables, intervals, and falsification tests are the canonical narrative source.
 
-Temporal validation uses date-group folds with expanding training windows: the sorted unique trading dates are split into six contiguous blocks, and each of the five folds trains on every block before its test block and is scored only on later rows.
+## Limitations
 
-Each fold applies a train-only purge of the 5-day forward target's label overlap — training rows whose label window reaches into the test block are dropped, while test blocks are kept whole — so exactly five complete trading days separate the last kept training date from the first kept test date. The per-fold guard in `packages/ml/model/cross_validation/cross_validator.py` enforces this in unique-trading-date index space.
-
-Most price-derived features are computed per ticker and shifted one day, so they never see their own bar. A handful of model inputs deliberately carry the close of day t: `simple_return` is a same-bar return, and the `price_vs_sma_*` and `zscore_*` families divide a current-bar value by a lagged statistic. For those inputs the documented contract is the close of t — they are anchored to the bar being predicted, not to the previous close. `log_return` stays in the dataset as the target's input but is not a model input. The target is the single deliberate exception: it looks five days forward.
-
-Six dataset columns are infinite-memory recursions rather than windowed statistics: `ema_12`, `ema_26`, `macd`, `macd_signal`, `macd_hist` and `rsi_14`. With pandas' `adjust=False` the first value seeds each recursion, so the earliest outputs are warm-up approximations of their steady-state definitions rather than exact long-memory estimates; the head cut discards most of that warm-up. `rsi_14` ships the EMA-seeded variant of the smoothed average-gain/average-loss ratio, not Wilder's original 14-period SMA-seeded recursion — on the shipped frame the two agree bit-exactly on ~40% of rows and within 0.5 RSI points on 99.93% of them, with the remaining gap confined to the first ~33 surviving rows of each ticker and decaying with the recursion. Consumers that need steady-state values should recompute the recursion over each ticker's full raw series.
-
-## Model
-
-One `XGBRegressor` per fold, hyperparameters frozen in `packages/ml/model/config/base.yaml` (`training.hyperparameters`) and derived by the trainer at call time. Keeping one model per fold prevents any fold from being influenced by another fold's evaluation data. Edit hazards in the training path — including a dead early-stopping branch — are listed in AGENTS.md.
-
-The target is modeled as `log(RV)` — the Yang-Zhang variance is closer to log-normal, and QLIKE is the robust loss for it. Exact-zero flat windows are floor artifacts: they are floored at `1e-12` only to keep the log finite, and one floor policy excludes them from fold fitting, model scoring, and the HAR benchmark. Each fold persists the original test indices, the aligned retained-row mask, the scored indices, and reconciled counts, and declares the headline floor-retained row set. R²/MAE/RMSE are computed on the log scale, with sklearn's fold-own-mean R² convention. Every fold also fits the canonical HAR-RV benchmark (Corsi (2009), 1/5/22 trailing variance components) on its training rows only and is scored on the same floor-retained test rows; the comparison lands in `har_benchmark.json`. The evaluation layer persists one loss-vector row per test-block row (`per_row_losses.parquet`, with the persisted floor flag) and writes `evaluation_summary.json` from those rows only: dual OOS-R², DM/CW/GW with Newey-West HAC lag 4, Mincer-Zarnowitz regressions, decile/regime QLIKE, QLIKE mean/median/IQR/top-1% tails, the floor with/without decomposition, the date-clustered gap, expanding-origin loss curves, and the declared no-calibration status.
-
-The optional holdout evaluation is a single final refit on the purged remainder (every floor-retained row before the reserved window whose five-day label window ends before it) plus the canonical HAR-RV benchmark on the same rows, predicting the holdout block once. The protocol, lock identity, holdout metrics, config hash, git sha, environment reference, and artifact hashes are written to `holdout_report.json`; `SHA256SUMS` verifies the report and its sibling holdout artifacts. The headline edge carries single-seed, floor-policy, holdout, and no-calibration caveats.
-
-## Evaluation
-
-Phase 5 writes 14 charts to `data/model_outputs/` in four groups:
-
-- **Metrics** — R² per fold, MAE vs RMSE, and a metrics heatmap (all on the log target)
-- **Temporal** — fold windows on a timeline, sample counts per fold, metric trend over time
-- **Comparisons** — per-fold R²/MAE/RMSE bars, training vs inference timing, sample distributions, feature counts
-- **Diagnostics** — actual vs predicted, residual distributions, feature importance, error by volatility level
-
-For the numbers, read `packages/ml/model/artifacts/results/fold_training_summary.json` and `har_benchmark.json` from the run that produced them. They are not reproduced here because they depend on both the data snapshot and the machine.
-
-## Scope and limitations
-
-- **Survivors-only universe.** The source carries current and recent S&P 500 constituents only — companies that were delisted are absent. Long-horizon return statistics are therefore biased upward by roughly 1.4–3.9 percentage points per year (CAGR), and the ticker cross-section grows monotonically by construction. Phase 1 fails fast if the per-year ticker count ever declines, which is how a frame containing exits would present itself; a membership-aware frame must waive that check explicitly via `prepare_dataframe(..., survivors_only=False)`. The regime characterization JSON records the frame label and the bias note under `_frame`.
+- **Survivors-only universe.** The source carries current and recent constituents only; delisted names are absent, so long-horizon returns are biased upward.
 - **Price and volume only.** No macro data, fundamentals, sentiment, or cross-ticker features.
-- **No sector information.** The source data carries no sector labels, so sector dynamics cannot be learned.
-- **`market_regime` is a hardcoded calendar label**, not something derived from the data. Seven calendar buckets span 2000-2007 through 2026; a date past 2026 raises instead of joining the last bucket.
-- **QLIKE training targets conditional sigma.** The fold models minimize QLIKE on log daily sigma, the same loss reported in evaluation; the log-scale R²/MAE/RMSE remain diagnostic, and tail-risk use still requires out-of-sample evaluation.
-- **Model tests, no lint suite.** `packages/ml/model/tests/` runs under pytest; other changes are verified by running the affected phase and reading the logs.
-- **A fresh clone needs Phase 1 first.** Nothing downstream can run without the generated parquet file.
+- **No sector data.** The source carries no sector labels, so sector dynamics cannot be learned.
+- **Calendar `market_regime`.** The regime label is a hardcoded calendar bucket, not a data-derived state, and is not a model input.
+- **Calibration rejected, tails not safe.** Mincer-Zarnowitz rejects calibration, and tail safety is not established.
+- **Single seed, one holdout window.** The reported results come from one seed and one 500-date holdout; seed and window uncertainty are not estimated.
+
+The full limitations and falsification list is in [docs/reports/model-performance-and-rigor.md](docs/reports/model-performance-and-rigor.md).
+
+## Repository map
+
+- `packages/ml/dataset/` — Phase 1: download, clean, engineer features, build the target.
+- `packages/ml/model/` — Phases 2-5: feature selection, folds, training, evaluation, visualization.
+- `packages/ml/model/config/base.yaml` — the runtime configuration: fold count, holdout size, retention, floor, and frozen hyperparameters.
+- `docs/` — documentation index, operations runbook, results guide, and pipeline references.
+- `docs/adr/` — architecture decision records that own the rationale behind the design.
+- `data/processed/` — generated dataset (gitignored).
+- `packages/ml/model/artifacts/` — generated run state and results (gitignored).
+- `data/model_outputs/` — generated charts (gitignored).
+
+## Documentation
+
+| What | Where |
+|---|---|
+| Quickstart (this file) | [`README.md`](README.md) |
+| Dataset pipeline | [`docs/pipelines/dataset.md`](docs/pipelines/dataset.md) |
+| Dataset column dictionary | [`docs/reference/dataset-schema.md`](docs/reference/dataset-schema.md) |
+| Model pipeline | [`docs/pipelines/model.md`](docs/pipelines/model.md) |
+| Command and flag reference | [`docs/reference/cli.md`](docs/reference/cli.md) |
+| Running, resuming, retention, holdout | [`docs/operations.md`](docs/operations.md) |
+| Reading results | [`docs/results.md`](docs/results.md) |
+| Model card | [`docs/model-card.md`](docs/model-card.md) |
+| Technical report | [`docs/reports/model-performance-and-rigor.md`](docs/reports/model-performance-and-rigor.md) |
+| Architecture decisions | [`docs/adr/`](docs/adr/) |
+| Agent and contributor rules | [`AGENTS.md`](AGENTS.md) |
 
 ## Contributing
 
-Read [AGENTS.md](AGENTS.md) before editing. It covers the two entry points and their order, the invariants that silently break saved artifacts, and known dead code. Run the model tests with `uv run --frozen python -m pytest packages/ml/model/tests -q` (checks that need generated data are skipped on a fresh clone). Run the phase covering your change — Phase 1 for `packages/ml/dataset`, Phases 2-5 otherwise — and confirm it completes. Repo-wide rationale lives in [docs/adr/](docs/adr/); check whether your change needs a new record before editing an accepted one.
+Read [AGENTS.md](AGENTS.md) before editing. Run the hermetic model suite with `uv run --frozen python -m pytest packages/ml/model/tests -q --ignore=packages/ml/model/tests/live`, then run the phase your change touches and confirm it completes. The full suite adds live artifact checks under `tests/live/`; those skip on a fresh clone.
 
 ## License
 

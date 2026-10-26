@@ -70,3 +70,12 @@ also documents a `python -m packages.ml.model.main` entry form. The rest of the
 decision above — plain script entry points, no build system, no console
 scripts, `__main__` guard — stands; the context and alternatives that describe
 the model phase as flat-imported are historical.
+
+## Further note — 2026-10-25
+
+The model entry now accepts `--dry-run`, `--resume`, `--folds`,
+`--evaluate-holdout`, and `--force-holdout`, and config resolution honors the
+`MODEL_CONFIG_PATH` environment variable. The "no arguments and no environment
+variables" wording in the Context is therefore historical. The core decision —
+plain script entry points, no build system, no console scripts, and the
+`__main__` guard — still stands.

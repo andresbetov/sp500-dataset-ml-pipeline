@@ -7,8 +7,7 @@ no live ``artifacts/**`` tree is read or written. They pin:
 - pruning keeps exactly the newest N run directories (by UTC run-id name);
 - every kept directory carries a per-directory ``README.md``;
 - ``runs.jsonl`` is byte-identical and append-only across pruning;
-- ``finish_run`` applies the configured retention after appending its line;
-- ``docs/model-artifacts.md`` documents the retention and append-only contract.
+- ``finish_run`` applies the configured retention after appending its line.
 
 Run with pytest from the repository root:
 
@@ -27,9 +26,6 @@ import traceback
 from pathlib import Path
 from unittest import mock
 
-import pytest
-
-from conftest import REPO_ROOT
 from packages.ml.model import config, run_log
 
 
